@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pushkey"
+version = "2.0.0"
+description = "Encrypted Key Manager with Direct .env Injection"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Author", email = "author@example.com"}]
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+]
+
+[project.scripts]
+pushkey = "pushkey:main"
+
+[tool.setuptools]
+py-modules = ["pushkey"]
+
+[tool.pytest.ini_options]
+tmp_path_retention_policy = "none"
+addopts = "--basetemp=.pytest_tmp"
