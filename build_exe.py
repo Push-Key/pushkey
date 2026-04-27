@@ -14,14 +14,15 @@ def build():
         "--onefile",
         "--windowed",
         "--name", "Pushkey",
-        "--icon", "pushkey.ico" if (root / "pushkey.ico").exists() else None,
-        "--add-data", ".pushkey:.",  # Include default vault dir
         "--collect-all", "cryptography",
         str(root / "pushkey.py"),
     ]
 
-    # Filter out None values
-    cmd = [c for c in cmd if c is not None]
+    # Add icon if present
+    icon_path = root / "pushkey.ico"
+    if icon_path.exists():
+        cmd.insert(4, str(icon_path))
+        cmd.insert(4, "--icon")
 
     print(f"Building: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=root)
