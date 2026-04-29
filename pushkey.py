@@ -1196,6 +1196,7 @@ class AppFrame(ctk.CTkFrame):
         self._scan_ts = None
 
         self.render_all()
+        self.after(600, self._check_rotation_schedule)
 
     def save(self):
         save_vault(self.vault, self.password)
@@ -1219,6 +1220,92 @@ class AppFrame(ctk.CTkFrame):
         if self._lock_timer_id:
             self.after_cancel(self._lock_timer_id)
         self._lock_timer_id = self.after(self._lock_timeout, self.lock)
+
+    def _check_rotation_schedule(self):
+        """On unlock: prompt for each overdue scheduled key, one dialog at a time."""
+        due = [(n, i) for n, i in self.vault.items()
+               if days_until_rotation(i) is not None and days_until_rotation(i) <= 0]
+        if not due:
+            return
+        # Sort most overdue first
+        due.sort(key=lambda x: days_until_rotation(x[1]) or 0)
+        self._prompt_rotation_queue(due)
+
+    def _prompt_rotation_queue(self, queue):
+        if not queue:
+            return
+        name, info = queue[0]
+        remaining = queue[1:]
+
+        provider = info.get("provider")
+        prov_data = PROVIDERS.get(provider, {})
+        days_left = days_until_rotation(info)
+        overdue_days = abs(days_left) if days_left is not None else 0
+        schedule = info.get("rotation_schedule", "?")
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Rotation Due — {name}")
+        win.geometry("500x340")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+
+        # Header
+        ctk.CTkLabel(win, text="Rotation Due", font=FONT_H2, text_color=C["amber"]).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"{name}  ·  overdue by {overdue_days} day(s)  ·  schedule: every {schedule}d",
+                     font=FONT_XS, text_color=C["text3"]).pack()
+
+        # Provider info + link
+        if provider:
+            pf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+            pf.pack(fill="x", padx=20, pady=(14, 0))
+            pr = ctk.CTkFrame(pf, fg_color="transparent")
+            pr.pack(fill="x", padx=12, pady=10)
+            ctk.CTkLabel(pr, text=f"Provider: {provider}", font=FONT_SM,
+                         text_color=C["text"]).pack(side="left")
+            if prov_data.get("url"):
+                url = prov_data["url"]
+                make_btn(pr, "Open Dashboard →",
+                         lambda u=url: webbrowser.open(u),
+                         fg_color=C["accent"], text_color="white", width=140).pack(side="right")
+                ctk.CTkLabel(pf, text=url, font=FONT_XS, text_color=C["text3"],
+                             wraplength=440).pack(anchor="w", padx=12, pady=(0, 8))
+
+        # New key paste
+        ctk.CTkLabel(win, text="PASTE NEW KEY VALUE", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=20, pady=(14, 2))
+        new_val = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                               border_color=C["border2"], width=440)
+        new_val.pack(padx=20, ipady=4)
+
+        status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"])
+        status_lbl.pack(pady=(4, 0))
+
+        def do_rotate():
+            val = new_val.get().strip()
+            if not val:
+                status_lbl.configure(text="Paste your new key value above")
+                return
+            win.destroy()
+            self._apply_rotation(name, val)
+            self.render_all()
+            if remaining:
+                self.after(300, lambda: self._prompt_rotation_queue(remaining))
+
+        def skip():
+            win.destroy()
+            if remaining:
+                self.after(300, lambda: self._prompt_rotation_queue(remaining))
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=12)
+        make_btn(btn_row, "Rotate & Sync", do_rotate,
+                 fg_color=C["green_bg"], text_color=C["green"], width=140, height=34).pack(side="left")
+        make_btn(btn_row, f"Remind me later ({len(remaining)} more)", skip,
+                 width=200, height=34).pack(side="right")
+
+        new_val.bind("<Return>", lambda e: do_rotate())
 
     def show_log(self):
         entries = _log_decrypt_all()
@@ -1479,8 +1566,16 @@ class AppFrame(ctk.CTkFrame):
                     msg = f"Due in {days_left} day(s) — scheduled every {info.get('rotation_schedule')}d"
                     clr = C["text3"]
                 ctk.CTkLabel(left, text=msg, font=FONT_XS, text_color=clr).pack(anchor="w")
-                make_btn(row, "Rotate Now", lambda n=name: (self.rotate_key(n), self.render_all()),
-                         fg_color=C["amber_bg"], text_color=C["amber"], width=90).pack(side="right", padx=8, pady=8)
+                prov = info.get("provider")
+                prov_url = PROVIDERS.get(prov, {}).get("url")
+                btn_col = ctk.CTkFrame(row, fg_color="transparent")
+                btn_col.pack(side="right", padx=8, pady=8)
+                make_btn(btn_col, "Rotate Now", lambda n=name: (self.rotate_key(n), self.render_all()),
+                         fg_color=C["amber_bg"], text_color=C["amber"], width=90).pack()
+                if prov_url:
+                    make_btn(btn_col, f"Open {prov or 'Dashboard'}",
+                             lambda u=prov_url: webbrowser.open(u),
+                             fg_color="transparent", text_color=C["accent"], width=120).pack(pady=(4, 0))
 
         # Action needed
         if critical + warning > 0:
