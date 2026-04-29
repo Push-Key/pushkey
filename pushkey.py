@@ -109,12 +109,9 @@ def get_or_create_salt():
     return salt
 
 
-def derive_key(password, salt):
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations=600_000)
-
-
 try:
     from cryptography.fernet import Fernet, InvalidToken
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except ImportError:
     _root = tk.Tk()
     _root.withdraw()
@@ -129,24 +126,93 @@ except ImportError:
     _root.destroy()
     raise SystemExit(1)
 
+try:
+    from argon2.low_level import hash_secret_raw, Type as Argon2Type
+    _ARGON2_AVAILABLE = True
+except ImportError:
+    _ARGON2_AVAILABLE = False
 
-def make_fernet(password):
-    salt = get_or_create_salt()
-    key = derive_key(password, salt)
-    return Fernet(base64.urlsafe_b64encode(key))
+# Magic prefix that marks AES-256-GCM encrypted data (v2 format)
+# Legacy Fernet tokens are base64url bytes and never start with this
+_V2_MAGIC   = b'PK2\x00'   # vault + master password
+_V2T_MAGIC  = b'PKT2'      # team vault (includes ephemeral salt)
 
 
-def encrypt_data(data, password):
-    return make_fernet(password).encrypt(data.encode())
+def derive_key(password: str, salt: bytes) -> bytes:
+    """32-byte key via Argon2id (memory-hard). Falls back to PBKDF2 if argon2-cffi missing."""
+    if _ARGON2_AVAILABLE:
+        return hash_secret_raw(
+            secret=password.encode(),
+            salt=salt,
+            time_cost=3,
+            memory_cost=65536,  # 64 MB — GPU-resistant
+            parallelism=4,
+            hash_len=32,
+            type=Argon2Type.ID,
+        )
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations=600_000)
 
 
-def decrypt_data(token, password):
+def _aes_encrypt(data: str, key: bytes) -> bytes:
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, data.encode(), None)
+    return _V2_MAGIC + nonce + ct
+
+
+def _aes_decrypt(token: bytes, key: bytes) -> str:
+    payload = token[len(_V2_MAGIC):]
+    nonce, ct = payload[:12], payload[12:]
     try:
-        return make_fernet(password).decrypt(token).decode()
+        return AESGCM(key).decrypt(nonce, ct, None).decode()
+    except Exception:
+        raise ValueError("wrong_password")
+
+
+def _legacy_fernet_decrypt(token: bytes, password: str) -> str:
+    salt = get_or_create_salt()
+    legacy_key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations=600_000)
+    try:
+        return Fernet(base64.urlsafe_b64encode(legacy_key)).decrypt(token).decode()
     except InvalidToken:
         raise ValueError("wrong_password")
-    except Exception as e:
-        raise ValueError(f"corrupted:{e}")
+
+
+def encrypt_data(data: str, password: str) -> bytes:
+    salt = get_or_create_salt()
+    key = derive_key(password, salt)
+    return _aes_encrypt(data, key)
+
+
+def decrypt_data(token: bytes, password: str) -> str:
+    """Decrypt vault. Auto-detects v2 (AES-256-GCM) vs legacy (Fernet/AES-128-CBC)."""
+    if token.startswith(_V2_MAGIC):
+        salt = get_or_create_salt()
+        key = derive_key(password, salt)
+        return _aes_decrypt(token, key)
+    # Legacy Fernet format — decrypt then signal for migration
+    return _legacy_fernet_decrypt(token, password)
+
+
+# ── Team vault crypto (per-export ephemeral salt, no shared salt file) ──
+
+def team_encrypt(data: str, passphrase: str) -> bytes:
+    salt = secrets.token_bytes(32)           # fresh salt per export
+    key = derive_key(passphrase, salt)
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, data.encode(), None)
+    return _V2T_MAGIC + salt + nonce + ct    # self-contained
+
+
+def team_decrypt(token: bytes, passphrase: str) -> str:
+    if not token.startswith(_V2T_MAGIC):
+        raise ValueError("Not a valid Pushkey team vault file")
+    payload = token[len(_V2T_MAGIC):]
+    salt, nonce, ct = payload[:32], payload[32:44], payload[44:]
+    key = derive_key(passphrase, salt)
+    try:
+        return AESGCM(key).decrypt(nonce, ct, None).decode()
+    except Exception:
+        raise ValueError("wrong_password")
 
 
 def _serialize_vault(vault):
@@ -166,10 +232,16 @@ def load_vault(password):
         return {}
     try:
         raw = VAULT_FILE.read_bytes()
+        is_legacy = not raw.startswith(_V2_MAGIC)
         decrypted = decrypt_data(raw, password)
         data = json.loads(decrypted)
         data = _migrate_vault(data)
-        return _deserialize_vault(data)
+        vault = _deserialize_vault(data)
+        if is_legacy:
+            # Silently upgrade to AES-256-GCM + Argon2id on first unlock
+            save_vault(vault, password)
+            log_event("vault upgraded to AES-256-GCM + Argon2id")
+        return vault
     except ValueError:
         raise
     except Exception as e:
@@ -1116,7 +1188,7 @@ class AppFrame(ctk.CTkFrame):
                 return
             payload = json.dumps({"vault": self.vault, "shared_by": "pushkey",
                                    "exported_at": datetime.now().isoformat()}, indent=2)
-            encrypted = encrypt_data(payload, passphrase)
+            encrypted = team_encrypt(payload, passphrase)
             Path(path).write_bytes(encrypted)
             win.destroy()
             messagebox.showinfo("Shared", f"Team vault saved to:\n{path}\n\n"
@@ -1161,7 +1233,7 @@ class AppFrame(ctk.CTkFrame):
                 return
             try:
                 raw = Path(path).read_bytes()
-                data = json.loads(decrypt_data(raw, passphrase))
+                data = json.loads(team_decrypt(raw, passphrase))
             except ValueError:
                 status.configure(text="Wrong passphrase or corrupted file")
                 return
