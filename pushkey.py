@@ -54,22 +54,87 @@ PROVIDERS_CACHE = VAULT_DIR / "providers.json"
 PROVIDERS_REGISTRY_URL = "https://raw.githubusercontent.com/ebothegreat/pushkey/main/providers.json"
 IMPORT_DIR = VAULT_DIR / "import"
 
-VAULT_SCHEMA_VERSION = 1
+VAULT_SCHEMA_VERSION = 2
+ENV_LEVELS = ["all", "dev", "staging", "prod"]
+ENV_COLORS = {"all": "#3D5166", "dev": "#059669", "staging": "#F59E0B", "prod": "#F87171"}
 
 
 def _migrate_vault(data):
     schema = data.get("_schema", 0)
-    if schema < VAULT_SCHEMA_VERSION:
+    if schema < 2:
+        # v1→v2: stamp env="all" on every key that lacks it
+        for key_data in data.get("keys", {}).values():
+            if isinstance(key_data, dict):
+                key_data.setdefault("env", "all")
         data["_schema"] = VAULT_SCHEMA_VERSION
     return data
+
+
+_LOG_KEY_CACHE = None  # derived once per session
+
+
+def _log_key() -> bytes:
+    global _LOG_KEY_CACHE
+    if _LOG_KEY_CACHE is None:
+        salt = get_or_create_salt()
+        # Derive log key from salt + fixed domain — no password needed
+        _LOG_KEY_CACHE = hashlib.pbkdf2_hmac("sha256", b"pushkey-log-key", salt, iterations=100_000)
+    return _LOG_KEY_CACHE
+
+
+def _log_encrypt(text: str) -> bytes:
+    key = _log_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, text.encode(), None)
+    payload = nonce + ct
+    return len(payload).to_bytes(4, "big") + payload
+
+
+def _log_decrypt_all() -> list[str]:
+    lines = []
+    if not LOG_FILE.exists():
+        return lines
+    raw = LOG_FILE.read_bytes()
+    # Legacy plaintext log (starts with '[')
+    if raw and raw[0:1] == b"[":
+        return raw.decode("utf-8", errors="replace").splitlines()
+    key = _log_key()
+    pos = 0
+    while pos + 4 <= len(raw):
+        length = int.from_bytes(raw[pos:pos+4], "big")
+        pos += 4
+        if pos + length > len(raw):
+            break
+        payload = raw[pos:pos+length]
+        pos += length
+        try:
+            nonce, ct = payload[:12], payload[12:]
+            lines.append(AESGCM(key).decrypt(nonce, ct, None).decode())
+        except Exception:
+            lines.append("[corrupted entry]")
+    return lines
+
+
+def _migrate_plaintext_log() -> None:
+    """Convert legacy plaintext log to encrypted binary format."""
+    if not LOG_FILE.exists():
+        return
+    raw = LOG_FILE.read_bytes()
+    if not raw or raw[0:1] != b"[":
+        return  # already encrypted or empty
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    encrypted_chunks = b"".join(_log_encrypt(ln) for ln in lines if ln.strip())
+    LOG_FILE.write_bytes(encrypted_chunks)
 
 
 def log_event(message: str) -> None:
     try:
         ensure_vault_dir()
+        _migrate_plaintext_log()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with LOG_FILE.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(f"[{ts}] {message}\n")
+        entry = f"[{ts}] {message}"
+        with LOG_FILE.open("ab") as f:
+            f.write(_log_encrypt(entry))
     except Exception:
         pass
 
@@ -757,15 +822,20 @@ def _ensure_gitignore_env(project_dir: Path) -> None:
         log_event(f"gitignore update failed for {project_dir}: {e}")
 
 
-def inject_env_file(project_path, vault, key_names=None):
+def inject_env_file(project_path, vault, key_names=None, target_env="all"):
     """Update .env surgically — only touch keys being written, preserve everything else."""
     project_dir = Path(project_path)
     env_path = project_dir / ".env"
 
+    def _env_match(key_env):
+        return target_env == "all" or key_env == "all" or key_env == target_env
+
     if key_names:
-        keys_to_write = {k: vault[k]["value"] for k in key_names if k in vault}
+        keys_to_write = {k: vault[k]["value"] for k in key_names
+                         if k in vault and _env_match(vault[k].get("env", "all"))}
     else:
-        keys_to_write = {k: v["value"] for k, v in vault.items()}
+        keys_to_write = {k: v["value"] for k, v in vault.items()
+                         if _env_match(v.get("env", "all"))}
 
     if not keys_to_write:
         return True
@@ -1065,6 +1135,8 @@ class AppFrame(ctk.CTkFrame):
         make_btn(top, "Template", self.show_template).pack(side="right", padx=2, pady=10)
         make_btn(top, "Update Providers", self.do_update_providers,
                  fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
+        make_btn(top, "Audit Log", self.show_log,
+                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
         make_btn(top, "Team Share", self.team_share,
                  fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
         make_btn(top, "Team Import", self.team_import,
@@ -1132,6 +1204,26 @@ class AppFrame(ctk.CTkFrame):
         if self._lock_timer_id:
             self.after_cancel(self._lock_timer_id)
         self._lock_timer_id = self.after(self._lock_timeout, self.lock)
+
+    def show_log(self):
+        entries = _log_decrypt_all()
+        win = ctk.CTkToplevel(self)
+        win.title("Audit Log")
+        win.geometry("640x480")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Audit Log", font=FONT_H2, text_color=C["text"]).pack(pady=(14, 2))
+        ctk.CTkLabel(win, text=f"{len(entries)} entries  ·  encrypted at rest",
+                     font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 8))
+
+        box = ctk.CTkTextbox(win, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text2"],
+                              corner_radius=4)
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        box.insert("1.0", "\n".join(reversed(entries)) if entries else "(no entries)")
+        box.configure(state="disabled")
+        make_btn(win, "Close", win.destroy, width=100).pack(pady=(0, 12))
 
     def do_update_providers(self):
         new_c, upd_c, err = update_providers_from_web()
@@ -1440,7 +1532,7 @@ class AppFrame(ctk.CTkFrame):
         self.add_value.pack(fill="x", ipady=2)
 
         cf = ctk.CTkFrame(input_row, fg_color="transparent")
-        cf.pack(side="left", padx=(0, 0))
+        cf.pack(side="left", padx=(0, 6))
         ctk.CTkLabel(cf, text="CATEGORY", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
         self.add_cat = ctk.CTkOptionMenu(
             cf, values=["General", "Trading", "AI", "Database", "Cloud", "Payment", "Comms", "Security", "Crypto"],
@@ -1449,6 +1541,17 @@ class AppFrame(ctk.CTkFrame):
         )
         self.add_cat.set("General")
         self.add_cat.pack(ipady=2)
+
+        ef = ctk.CTkFrame(input_row, fg_color="transparent")
+        ef.pack(side="left", padx=(0, 0))
+        ctk.CTkLabel(ef, text="ENV", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+        self.add_env = ctk.CTkOptionMenu(
+            ef, values=ENV_LEVELS,
+            fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
+            text_color=C["text"], font=FONT_XS, width=90,
+        )
+        self.add_env.set("all")
+        self.add_env.pack(ipady=2)
 
         # Row 2: Action buttons on their own line
         btn_row = ctk.CTkFrame(form, fg_color="transparent")
@@ -1467,6 +1570,17 @@ class AppFrame(ctk.CTkFrame):
                      fg_color=C["bg3"], text_color=C["text"], corner_radius=6,
                      font=FONT_SM).pack(fill="x", ipady=2)
         self._search_var.trace_add("write", lambda *_: self._render_key_rows())
+
+        # Env filter pills
+        pill_bar = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
+        pill_bar.pack(fill="x", padx=16, pady=(6, 0))
+        ctk.CTkLabel(pill_bar, text="ENV:", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 6))
+        self._env_filter_var = tk.StringVar(value="all")
+        for level in ["all"] + ENV_LEVELS[1:]:
+            color = ENV_COLORS.get(level, C["text3"])
+            make_btn(pill_bar, level.upper(),
+                     lambda l=level: (self._env_filter_var.set(l), self._render_key_rows()),
+                     fg_color=C["surface"], text_color=color, width=60, height=22).pack(side="left", padx=2)
 
         # Scrollable key list
         self.keys_scroll = ctk.CTkScrollableFrame(self.keys_frame, fg_color=C["bg"], corner_radius=0)
@@ -1493,14 +1607,17 @@ class AppFrame(ctk.CTkFrame):
         by_file = self._group_by == "file"
         make_btn(toolbar, "By File" if not by_file else "By Category", self._toggle_group_by).pack(side="right")
 
-        # Apply search filter
+        # Apply search + env filter
         query = self._search_var.get().lower().strip()
+        env_filter = getattr(self, "_env_filter_var", None)
+        env_sel = env_filter.get() if env_filter else "all"
         filtered_vault = {
             n: i for n, i in self.vault.items()
-            if not query or query in n.lower()
-            or query in (i.get("provider") or "").lower()
-            or query in (i.get("source_file") or "").lower()
-            or query in (i.get("category") or "").lower()
+            if (not query or query in n.lower()
+                or query in (i.get("provider") or "").lower()
+                or query in (i.get("source_file") or "").lower()
+                or query in (i.get("category") or "").lower())
+            and (env_sel == "all" or i.get("env", "all") in ("all", env_sel))
         }
         if not filtered_vault:
             ctk.CTkLabel(self.keys_scroll, text=f'No keys match "{query}"',
@@ -1572,7 +1689,14 @@ class AppFrame(ctk.CTkFrame):
 
         # Health dot via label
         dot_char = "●"
-        ctk.CTkLabel(row, text=dot_char, font=("Consolas", 8), text_color=health_color(status), width=14).pack(side="left", padx=(2, 4))
+        ctk.CTkLabel(row, text=dot_char, font=("Consolas", 8), text_color=health_color(status), width=14).pack(side="left", padx=(2, 2))
+
+        # Env badge (only for non-all)
+        env = info.get("env", "all")
+        if env != "all":
+            ctk.CTkLabel(row, text=env.upper(), font=("Consolas", 7, "bold"),
+                         text_color=ENV_COLORS.get(env, C["text3"]),
+                         width=46).pack(side="left", padx=(0, 2))
 
         # Info area (clickable)
         info_frame = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
@@ -1605,6 +1729,9 @@ class AppFrame(ctk.CTkFrame):
         if info.get("first_used"):
             use_days = days_since(info["first_used"])
             meta_parts.append(f"In use {use_days}d")
+        env = info.get("env", "all")
+        if env != "all":
+            meta_parts.append(env.upper())
 
         lbl_meta = ctk.CTkLabel(info_frame, text="  ·  ".join(meta_parts) if meta_parts else "",
                                  font=FONT_XS, text_color=C["text3"], cursor="hand2", anchor="w")
@@ -1673,6 +1800,7 @@ class AppFrame(ctk.CTkFrame):
         name = self.add_name.get().strip().upper().replace(" ", "_")
         value = self.add_value.get().strip()
         category = self.add_cat.get()
+        env = self.add_env.get() if hasattr(self, "add_env") else "all"
 
         if not name or not value:
             messagebox.showwarning("Missing info", "Enter both a key name and value")
@@ -1697,6 +1825,7 @@ class AppFrame(ctk.CTkFrame):
             self.vault[name] = {
                 "value": value, "category": category, "provider": provider,
                 "created": now, "rotated": None, "rotation_count": 0, "previous": None,
+                "env": env,
             }
             msg = f"{name} added"
 
@@ -2152,7 +2281,8 @@ class AppFrame(ctk.CTkFrame):
                 path = proj_info.get("path")
                 if path and os.path.isdir(path):
                     try:
-                        inject_env_file(path, self.vault, proj_keys if proj_keys else None)
+                        inject_env_file(path, self.vault, proj_keys if proj_keys else None,
+                                        target_env=proj_info.get("target_env", "all"))
                         self._stamp_keys_used(relevant_keys)
                         count += 1
                     except Exception as e:
@@ -2169,7 +2299,8 @@ class AppFrame(ctk.CTkFrame):
                 if path and os.path.isdir(path):
                     keys_to_write = proj_keys if proj_keys else None
                     try:
-                        inject_env_file(path, self.vault, keys_to_write)
+                        inject_env_file(path, self.vault, keys_to_write,
+                                        target_env=proj_info.get("target_env", "all"))
                         self._stamp_keys_used([key_name])
                         count += 1
                     except Exception as e:
@@ -2377,18 +2508,28 @@ class AppFrame(ctk.CTkFrame):
 
         win = ctk.CTkToplevel(self)
         win.title(f"History: {name}")
-        win.geometry("540x420")
+        win.geometry("560x460")
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
 
         ctk.CTkLabel(win, text=f"Rotation History — {name}", font=FONT_H2,
-                     text_color=C["text"]).pack(pady=(12, 4))
-        ctk.CTkLabel(win, text=f"{len(history)} previous value(s) stored", font=FONT_XS,
-                     text_color=C["text3"]).pack(pady=(0, 8))
+                     text_color=C["text"]).pack(pady=(12, 2))
+        ctk.CTkLabel(win, text=f"{len(history)} previous value(s)  ·  click Rollback to restore",
+                     font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 8))
 
         scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=16)
+
+        def do_rollback(old_val, entry_idx):
+            if not messagebox.askyesno("Rollback?",
+                                        f"Restore this value as the current '{name}'?\n\n"
+                                        f"Current value will be moved to history.",
+                                        parent=win):
+                return
+            win.destroy()
+            msg = self._apply_rotation(name, old_val)
+            messagebox.showinfo("Rolled Back", f"Rolled back to entry #{entry_idx + 1}.\n{msg}")
 
         for i, entry in enumerate(history):
             row = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=4)
@@ -2403,7 +2544,10 @@ class AppFrame(ctk.CTkFrame):
 
             rv = ctk.CTkFrame(row, fg_color="transparent")
             rv.pack(fill="x", padx=10, pady=(0, 6))
-            ctk.CTkLabel(rv, text=masked, font=FONT_MONO_SM, text_color=C["text2"], anchor="w").pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(rv, text=masked, font=FONT_MONO_SM,
+                         text_color=C["text2"], anchor="w").pack(side="left", fill="x", expand=True)
+            make_btn(rv, "Rollback", lambda v=val, idx=i: do_rollback(v, idx),
+                     fg_color=C["amber_bg"], text_color=C["amber"], width=70).pack(side="right", padx=(4, 0))
             make_btn(rv, "Copy", lambda v=val: (self.clipboard_clear(), self.clipboard_append(v),
                      self.after(30000, self.clipboard_clear)), width=50).pack(side="right")
 
@@ -2515,6 +2659,8 @@ class AppFrame(ctk.CTkFrame):
                  width=60).pack(side="right", padx=4)
 
         info_field("CATEGORY", info.get("category", "General"))
+        env = info.get("env", "all")
+        info_field("ENVIRONMENT", env.upper(), fg=ENV_COLORS.get(env, C["text3"]))
         info_field("PROVIDER", provider or "Unknown")
         info_field("CREATED", (info.get("created") or "")[:16].replace("T", " ") or "—", mono=True)
         info_field("LAST ROTATED", (info.get("rotated") or "")[:16].replace("T", " ") or "Never", mono=True)
@@ -2832,7 +2978,23 @@ class AppFrame(ctk.CTkFrame):
         self.proj_name = ctk.CTkEntry(name_row, font=FONT_SM, fg_color=C["bg3"], text_color=C["text"],
                                        border_color=C["border2"])
         self.proj_name.pack(side="left", fill="x", expand=True, ipady=4)
-        make_btn(name_row, "+ Link Project", self.add_project, fg_color=C["green_bg"], text_color=C["green"], width=110).pack(side="left", padx=(6, 0))
+
+        # Target env for this project
+        r2e = ctk.CTkFrame(form, fg_color="transparent")
+        r2e.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(r2e, text="TARGET ENV  (only inject keys matching this env)",
+                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+        self.proj_env = ctk.CTkOptionMenu(
+            r2e, values=ENV_LEVELS,
+            fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
+            text_color=C["text"], font=FONT_XS, width=120,
+        )
+        self.proj_env.set("all")
+        self.proj_env.pack(anchor="w", ipady=2)
+
+        r2b = ctk.CTkFrame(form, fg_color="transparent")
+        r2b.pack(fill="x", padx=12, pady=(0, 12))
+        make_btn(r2b, "+ Link Project", self.add_project, fg_color=C["green_bg"], text_color=C["green"], width=110).pack(side="left")
 
         # Project list
         projects = self.config.get("projects", {})
@@ -2859,6 +3021,10 @@ class AppFrame(ctk.CTkFrame):
             name_row2.pack(anchor="w")
             ctk.CTkLabel(name_row2, text="●", font=("Consolas", 10), text_color=dot_color).pack(side="left", padx=(0, 6))
             ctk.CTkLabel(name_row2, text=proj_name, font=FONT_H3, text_color=C["text"]).pack(side="left")
+            tenv = proj_info.get("target_env", "all")
+            if tenv != "all":
+                ctk.CTkLabel(name_row2, text=f"  {tenv.upper()}",
+                             font=FONT_XS, text_color=ENV_COLORS.get(tenv, C["text3"])).pack(side="left")
 
             ctk.CTkLabel(left, text=proj_info.get("path", ""), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(anchor="w")
 
@@ -2905,15 +3071,17 @@ class AppFrame(ctk.CTkFrame):
         if "projects" not in self.config:
             self.config["projects"] = {}
 
+        target_env = self.proj_env.get() if hasattr(self, "proj_env") else "all"
         matched = self._auto_match_keys(name)
         self.config["projects"][name] = {
             "path": path,
             "keys": matched,
             "added": datetime.now().isoformat(),
+            "target_env": target_env,
         }
 
         try:
-            inject_env_file(path, self.vault)
+            inject_env_file(path, self.vault, target_env=target_env)
         except Exception as e:
             messagebox.showwarning("Sync warning", f"Could not write .env:\n{e}")
 
@@ -3027,7 +3195,8 @@ class AppFrame(ctk.CTkFrame):
         def confirm():
             win.destroy()
             try:
-                inject_env_file(path, self.vault, keys_to_write if keys_to_write else None)
+                inject_env_file(path, self.vault, keys_to_write if keys_to_write else None,
+                                target_env=proj.get("target_env", "all"))
                 self._stamp_keys_used(keys_to_write)
                 log_event(f"sync: wrote {len(keys_to_write)} keys to {path}/.env")
                 messagebox.showinfo("Synced", f".env written to:\n{path}\n\n{len(keys_to_write)} key(s) synced.")
@@ -3143,7 +3312,121 @@ class PushkeyApp:
         self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login)
 
 
+def _cli_main(args):
+    """Headless CLI — no GUI launched."""
+    import argparse, getpass
+
+    parser = argparse.ArgumentParser(prog="pushkey", description="Pushkey CLI — encrypted key vault")
+    parser.add_argument("--password", "-p", help="Master password (or set PUSHKEY_PASSWORD env var)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    # pushkey inject <path> [--env dev]
+    p_inj = sub.add_parser("inject", help="Write .env to a folder")
+    p_inj.add_argument("path", help="Project folder path")
+    p_inj.add_argument("--env", default="all", choices=ENV_LEVELS, help="Target environment")
+    p_inj.add_argument("--keys", nargs="*", help="Specific key names to inject (default: all)")
+
+    # pushkey list [--env dev]
+    p_lst = sub.add_parser("list", help="List keys and health status")
+    p_lst.add_argument("--env", default="all", choices=ENV_LEVELS + ["all"])
+    p_lst.add_argument("--json", action="store_true", dest="as_json", help="Output JSON")
+
+    # pushkey status
+    sub.add_parser("status", help="Health summary")
+
+    # pushkey rotate <key>
+    p_rot = sub.add_parser("rotate", help="Rotate a key value")
+    p_rot.add_argument("key", help="Key name")
+    p_rot.add_argument("--value", "-v", help="New value (prompted if omitted)")
+
+    ns = parser.parse_args(args)
+
+    pw = ns.password or os.environ.get("PUSHKEY_PASSWORD")
+    if not pw:
+        try:
+            pw = getpass.getpass("Pushkey master password: ")
+        except (EOFError, KeyboardInterrupt):
+            print("Aborted.")
+            raise SystemExit(1)
+
+    ensure_vault_dir()
+    try:
+        vault = load_vault(pw)
+    except ValueError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1)
+
+    if ns.cmd == "inject":
+        path = ns.path
+        if not os.path.isdir(path):
+            print(f"Error: folder not found: {path}")
+            raise SystemExit(1)
+        try:
+            inject_env_file(path, vault, key_names=ns.keys, target_env=ns.env)
+            written = [k for k in (ns.keys or vault.keys())
+                       if k in vault and (ns.env == "all" or vault[k].get("env", "all") in ("all", ns.env))]
+            print(f"OK  wrote {len(written)} key(s) to {path}/.env")
+        except Exception as e:
+            print(f"Error: {e}")
+            raise SystemExit(1)
+
+    elif ns.cmd == "list":
+        rows = []
+        for name, info in sorted(vault.items()):
+            env = info.get("env", "all")
+            if ns.env != "all" and env not in ("all", ns.env):
+                continue
+            status = health_status(info)
+            age = days_since(info.get("rotated") or info.get("created"))
+            age_str = f"{age}d" if age != float("inf") else "?"
+            rows.append({"name": name, "status": status, "age": age_str,
+                         "env": env, "provider": info.get("provider", "")})
+        if ns.as_json:
+            print(json.dumps(rows, indent=2))
+        else:
+            status_icon = {"healthy": "✓", "warning": "!", "critical": "✗"}
+            for r in rows:
+                icon = status_icon.get(r["status"], "?")
+                print(f"{icon}  {r['name']:<40} {r['status']:<10} {r['age']:<8} {r['env']:<10} {r['provider']}")
+
+    elif ns.cmd == "status":
+        total = len(vault)
+        by_status = {"healthy": 0, "warning": 0, "critical": 0}
+        for info in vault.values():
+            by_status[health_status(info)] += 1
+        print(f"Pushkey vault — {total} key(s)")
+        print(f"  ✓ healthy:   {by_status['healthy']}")
+        print(f"  ! warning:   {by_status['warning']}")
+        print(f"  ✗ critical:  {by_status['critical']}")
+
+    elif ns.cmd == "rotate":
+        if ns.key not in vault:
+            print(f"Error: key '{ns.key}' not found in vault")
+            raise SystemExit(1)
+        new_val = ns.value
+        if not new_val:
+            try:
+                new_val = getpass.getpass(f"New value for {ns.key}: ")
+            except (EOFError, KeyboardInterrupt):
+                print("Aborted.")
+                raise SystemExit(1)
+        now = __import__("datetime").datetime.now().isoformat()
+        info = vault[ns.key]
+        info.setdefault("history", []).insert(0, {"value": info["value"], "retired": now})
+        info["history"] = info["history"][:10]
+        info["value"] = new_val
+        info["rotated"] = now
+        info["rotation_count"] = info.get("rotation_count", 0) + 1
+        save_vault(vault, pw)
+        print(f"OK  {ns.key} rotated")
+
+
 def main():
+    import sys
+    # If CLI args present (beyond script name), run headless
+    if len(sys.argv) > 1:
+        _cli_main(sys.argv[1:])
+        return
     ensure_vault_dir()
     PushkeyApp()
 
