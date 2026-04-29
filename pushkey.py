@@ -53,6 +53,7 @@ HEALTH_FILE = VAULT_DIR / "health.json"
 PROVIDERS_CACHE = VAULT_DIR / "providers.json"
 PROVIDERS_REGISTRY_URL = "https://raw.githubusercontent.com/ebothegreat/pushkey/main/providers.json"
 IMPORT_DIR = VAULT_DIR / "import"
+MFA_FILE = VAULT_DIR / ".mfa"          # encrypted TOTP secret + backup codes
 
 VAULT_SCHEMA_VERSION = 2
 ENV_LEVELS = ["all", "dev", "staging", "prod"]
@@ -375,18 +376,117 @@ def write_health_sidecar(vault):
         pass
 
 
+_CONFIG_KEY_CACHE = None
+
+
+def _config_key() -> bytes:
+    global _CONFIG_KEY_CACHE
+    if _CONFIG_KEY_CACHE is None:
+        salt = get_or_create_salt()
+        _CONFIG_KEY_CACHE = hashlib.pbkdf2_hmac("sha256", b"pushkey-config-key", salt, iterations=100_000)
+    return _CONFIG_KEY_CACHE
+
+
 def load_config():
-    if CONFIG_FILE.exists():
+    if not CONFIG_FILE.exists():
+        return {"projects": {}}
+    raw = CONFIG_FILE.read_bytes()
+    # Legacy plaintext JSON
+    if raw.lstrip()[:1] == b"{":
         try:
-            return json.loads(CONFIG_FILE.read_text())
+            data = json.loads(raw)
+            save_config(data)   # auto-migrate to encrypted
+            return data
         except Exception:
             pass
-    return {"projects": {}}
+        return {"projects": {}}
+    # Encrypted binary
+    try:
+        key = _config_key()
+        nonce, ct = raw[:12], raw[12:]
+        plaintext = AESGCM(key).decrypt(nonce, ct, None)
+        return json.loads(plaintext)
+    except Exception:
+        return {"projects": {}}
 
 
 def save_config(config):
     ensure_vault_dir()
-    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    key = _config_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(config, indent=2).encode(), None)
+    tmp = CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_bytes(nonce + ct)
+    os.replace(str(tmp), str(CONFIG_FILE))
+
+
+# ═══════════════════════════════════════════════
+# MFA — TOTP (Google Authenticator / Authy)
+# ═══════════════════════════════════════════════
+
+def _mfa_encrypt(data: dict) -> bytes:
+    key = _config_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(data).encode(), None)
+    return nonce + ct
+
+
+def _mfa_decrypt(raw: bytes) -> dict:
+    key = _config_key()
+    nonce, ct = raw[:12], raw[12:]
+    return json.loads(AESGCM(key).decrypt(nonce, ct, None))
+
+
+def mfa_is_enabled() -> bool:
+    return MFA_FILE.exists()
+
+
+def mfa_load() -> dict:
+    if not MFA_FILE.exists():
+        return {}
+    try:
+        return _mfa_decrypt(MFA_FILE.read_bytes())
+    except Exception:
+        return {}
+
+
+def mfa_save(data: dict) -> None:
+    ensure_vault_dir()
+    MFA_FILE.write_bytes(_mfa_encrypt(data))
+
+
+def mfa_verify(code: str) -> bool:
+    data = mfa_load()
+    if not data:
+        return True   # MFA not set up — pass through
+    secret = data.get("secret", "")
+    try:
+        import pyotp
+        totp = pyotp.TOTP(secret)
+        if totp.verify(code.strip(), valid_window=1):
+            return True
+        # Check backup codes
+        backups = data.get("backup_codes", [])
+        if code.strip() in backups:
+            backups.remove(code.strip())
+            data["backup_codes"] = backups
+            mfa_save(data)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def mfa_generate_secret(account_name: str = "Pushkey") -> tuple[str, str]:
+    """Returns (secret, otpauth_uri) for QR code generation."""
+    import pyotp
+    secret = pyotp.random_base32()
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=account_name, issuer_name="Pushkey")
+    return secret, uri
+
+
+def mfa_generate_backup_codes() -> list[str]:
+    return [secrets.token_hex(4).upper() for _ in range(10)]
 
 
 # ═══════════════════════════════════════════════
@@ -938,6 +1038,14 @@ CAT_COLORS = {
     "Incident": "#FCD34D",
 }
 
+CAT_EMOJI = {
+    "AI": "🤖", "Trading": "📈", "Database": "🗄️", "Cloud": "☁️",
+    "Payment": "💳", "Communication": "💬", "Comms": "💬",
+    "Security": "🛡️", "Crypto": "₿", "General": "🔑",
+    "VCS": "🐙", "Monitoring": "📊", "CRM": "👥",
+    "Project Management": "📋", "Incident": "🚨",
+}
+
 
 # ═══════════════════════════════════════════════
 # HELPER WIDGETS (CTK-native)
@@ -1019,9 +1127,9 @@ class LoginFrame(ctk.CTkFrame):
         ctk.CTkFrame(self, fg_color="transparent", height=60).pack()
 
         # Brand
-        ctk.CTkLabel(self, text="●", font=("Consolas", 36), text_color=C["accent"]).pack(pady=(0, 4))
-        ctk.CTkLabel(self, text="PUSHKEY", font=("Consolas", 26, "bold"), text_color=C["text"]).pack()
-        ctk.CTkLabel(self, text="encrypted key vault", font=FONT_XS, text_color=C["text3"]).pack(pady=(2, 0))
+        ctk.CTkLabel(self, text="🔐", font=("Segoe UI Emoji", 40)).pack(pady=(0, 4))
+        ctk.CTkLabel(self, text="PUSHKEY", font=("Consolas", 26, "bold"), text_color=C["accent"]).pack()
+        ctk.CTkLabel(self, text="🛡️  encrypted key vault  🛡️", font=FONT_XS, text_color=C["text3"]).pack(pady=(2, 0))
 
         ctk.CTkFrame(self, fg_color=C["border"], height=1).pack(fill="x", padx=100, pady=24)
 
@@ -1099,7 +1207,10 @@ class LoginFrame(ctk.CTkFrame):
                     raise ValueError("wrong_password")
                 self._failed_attempts = 0
                 self._locked_until = None
-                self.on_login(pw, vault)
+                if mfa_is_enabled():
+                    self._show_mfa_prompt(pw, vault)
+                else:
+                    self.on_login(pw, vault)
             except ValueError as e:
                 self._failed_attempts = getattr(self, '_failed_attempts', 0) + 1
                 if self._failed_attempts >= 5:
@@ -1112,6 +1223,44 @@ class LoginFrame(ctk.CTkFrame):
                     else:
                         self.err.configure(text=f"Wrong password ({5 - self._failed_attempts} attempts left)")
                 self.pw.delete(0, "end")
+
+    def _show_mfa_prompt(self, pw, vault):
+        win = ctk.CTkToplevel(self)
+        win.title("🔐 Two-Factor Authentication")
+        win.geometry("380x260")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+
+        ctk.CTkLabel(win, text="🔐", font=("Segoe UI", 36)).pack(pady=(20, 0))
+        ctk.CTkLabel(win, text="Two-Factor Authentication",
+                     font=FONT_H2, text_color=C["text"]).pack(pady=(4, 2))
+        ctk.CTkLabel(win, text="Enter the 6-digit code from your authenticator app\nor a backup code",
+                     font=FONT_XS, text_color=C["text3"], justify="center").pack()
+
+        code_var = tk.StringVar()
+        code_entry = ctk.CTkEntry(win, textvariable=code_var, font=("Consolas", 20, "bold"),
+                                   fg_color=C["bg3"], text_color=C["green"],
+                                   border_color=C["border2"], width=200, justify="center")
+        code_entry.pack(pady=14, ipady=6)
+        code_entry.focus_set()
+
+        err_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack()
+
+        def verify():
+            code = code_var.get().strip().replace(" ", "")
+            if mfa_verify(code):
+                win.destroy()
+                self.on_login(pw, vault)
+            else:
+                err_lbl.configure(text="❌  Invalid code — try again")
+                code_var.set("")
+
+        code_entry.bind("<Return>", lambda e: verify())
+        make_btn(win, "✓ Verify", verify,
+                 fg_color=C["green_bg"], text_color=C["green"], width=160, height=36).pack(pady=8)
 
 
 # ═══════════════════════════════════════════════
@@ -1143,18 +1292,22 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkLabel(brand, text="PUSHKEY", font=("Consolas", 13, "bold"), text_color=C["text"]).pack(side="left")
         ctk.CTkLabel(brand, text=" vault", font=FONT_XS, text_color=C["text3"]).pack(side="left")
 
-        make_btn(top, "Lock", self.lock, fg_color=C["red_bg"], text_color=C["red"]).pack(side="right", padx=(4, 12), pady=10)
-        make_btn(top, "Password", self.change_master_password).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Export", self.export_vault).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Import", self.import_vault).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Template", self.show_template).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Update Providers", self.do_update_providers,
+        make_btn(top, "🔒 Lock", self.lock, fg_color=C["red_bg"], text_color=C["red"]).pack(side="right", padx=(4, 12), pady=10)
+        make_btn(top, "🔑 Password", self.change_master_password).pack(side="right", padx=2, pady=10)
+        mfa_label = "🔐 MFA ✓" if mfa_is_enabled() else "🔐 MFA"
+        mfa_color = C["green"] if mfa_is_enabled() else C["text2"]
+        make_btn(top, mfa_label, self.manage_mfa,
+                 fg_color=C["bg4"], text_color=mfa_color).pack(side="right", padx=2, pady=10)
+        make_btn(top, "📤 Export", self.export_vault).pack(side="right", padx=2, pady=10)
+        make_btn(top, "📥 Import", self.import_vault).pack(side="right", padx=2, pady=10)
+        make_btn(top, "📋 Template", self.show_template).pack(side="right", padx=2, pady=10)
+        make_btn(top, "🔄 Providers", self.do_update_providers,
                  fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Audit Log", self.show_log,
+        make_btn(top, "📜 Audit Log", self.show_log,
                  fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Team Share", self.team_share,
+        make_btn(top, "👥 Share", self.team_share,
                  fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "Team Import", self.team_import,
+        make_btn(top, "📩 Team Import", self.team_import,
                  fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
 
         # Auto-lock
@@ -1178,15 +1331,15 @@ class AppFrame(ctk.CTkFrame):
         )
         self.tabview.pack(fill="both", expand=True)
 
-        self.tabview.add("Dashboard")
-        self.tabview.add("All Keys")
-        self.tabview.add("Projects")
-        self.tabview.add("Security")
+        self.tabview.add("📊 Dashboard")
+        self.tabview.add("🔑 All Keys")
+        self.tabview.add("📁 Projects")
+        self.tabview.add("🛡️ Security")
 
-        self.dash_frame = self.tabview.tab("Dashboard")
-        self.keys_frame = self.tabview.tab("All Keys")
-        self.proj_frame = self.tabview.tab("Projects")
-        self.scan_frame = self.tabview.tab("Security")
+        self.dash_frame = self.tabview.tab("📊 Dashboard")
+        self.keys_frame = self.tabview.tab("🔑 All Keys")
+        self.proj_frame = self.tabview.tab("📁 Projects")
+        self.scan_frame = self.tabview.tab("🛡️ Security")
 
         # Configure tab frames
         for f in (self.dash_frame, self.keys_frame, self.proj_frame, self.scan_frame):
@@ -1307,6 +1460,115 @@ class AppFrame(ctk.CTkFrame):
 
         new_val.bind("<Return>", lambda e: do_rotate())
 
+    def manage_mfa(self):
+        if mfa_is_enabled():
+            self._disable_mfa()
+        else:
+            self._setup_mfa()
+
+    def _setup_mfa(self):
+        secret, uri = mfa_generate_secret("Pushkey Vault")
+        backup_codes = mfa_generate_backup_codes()
+
+        win = ctk.CTkToplevel(self)
+        win.title("🔐 Set Up Two-Factor Authentication")
+        win.geometry("480x560")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="🔐 Enable Two-Factor Auth",
+                     font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text="Scan the QR code with Google Authenticator or Authy",
+                     font=FONT_XS, text_color=C["text3"]).pack()
+
+        # QR code
+        try:
+            import qrcode
+            from PIL import Image as PILImage
+            qr = qrcode.make(uri)
+            qr = qr.resize((200, 200), PILImage.LANCZOS)
+            img = ctk.CTkImage(light_image=qr, dark_image=qr, size=(200, 200))
+            ctk.CTkLabel(win, image=img, text="").pack(pady=12)
+        except Exception:
+            ctk.CTkLabel(win, text="(install qrcode + pillow to see QR code)",
+                         font=FONT_XS, text_color=C["text3"]).pack(pady=8)
+
+        # Manual secret
+        sf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=4)
+        sf.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(sf, text="MANUAL ENTRY KEY", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
+        ctk.CTkLabel(sf, text=secret, font=FONT_MONO_SM, text_color=C["green"]).pack(anchor="w", padx=10, pady=(0, 6))
+
+        # Verify code before saving
+        ctk.CTkLabel(win, text="ENTER 6-DIGIT CODE TO CONFIRM", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=20, pady=(4, 2))
+        code_var = tk.StringVar()
+        code_entry = ctk.CTkEntry(win, textvariable=code_var, font=("Consolas", 18, "bold"),
+                                   fg_color=C["bg3"], text_color=C["green"],
+                                   width=180, justify="center")
+        code_entry.pack(pady=4, ipady=4)
+        code_entry.focus_set()
+
+        err_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack()
+
+        def activate():
+            import pyotp
+            code = code_var.get().strip()
+            totp = pyotp.TOTP(secret)
+            if not totp.verify(code, valid_window=1):
+                err_lbl.configure(text="❌  Code incorrect — try again")
+                return
+            mfa_save({"secret": secret, "backup_codes": backup_codes, "enabled_at": datetime.now().isoformat()})
+            win.destroy()
+            # Show backup codes
+            self._show_backup_codes(backup_codes)
+            self.render_all()
+            log_event("MFA enabled")
+
+        code_entry.bind("<Return>", lambda e: activate())
+        make_btn(win, "✓ Activate MFA", activate,
+                 fg_color=C["green_bg"], text_color=C["green"], width=180, height=34).pack(pady=8)
+
+    def _show_backup_codes(self, codes):
+        win = ctk.CTkToplevel(self)
+        win.title("🔑 Backup Codes — Save These!")
+        win.geometry("420x400")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="🔑 Save Your Backup Codes",
+                     font=FONT_H2, text_color=C["amber"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text="Each code can only be used once.\nStore them somewhere safe — you need these if you lose your phone.",
+                     font=FONT_XS, text_color=C["text3"], justify="center").pack(pady=(0, 12))
+
+        grid = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        grid.pack(fill="x", padx=20)
+        for i, code in enumerate(codes):
+            row, col = divmod(i, 2)
+            ctk.CTkLabel(grid, text=f"  {code}  ", font=FONT_MONO,
+                         text_color=C["text"], fg_color=C["bg3"], corner_radius=4).grid(
+                row=row, column=col, padx=8, pady=4, sticky="ew")
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        def copy_all():
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(codes))
+        make_btn(win, "📋 Copy All", copy_all, fg_color=C["accent"], text_color="white", width=120).pack(pady=12)
+        make_btn(win, "Done", win.destroy, width=100).pack()
+
+    def _disable_mfa(self):
+        if not messagebox.askyesno("Disable MFA",
+                                    "⚠️  Disable two-factor authentication?\n\nThis will remove the extra security layer."):
+            return
+        MFA_FILE.unlink(missing_ok=True)
+        self.render_all()
+        log_event("MFA disabled")
+        messagebox.showinfo("MFA Disabled", "Two-factor authentication has been disabled.")
+
     def show_log(self):
         entries = _log_decrypt_all()
         win = ctk.CTkToplevel(self)
@@ -1340,58 +1602,100 @@ class AppFrame(ctk.CTkFrame):
                                 f"  {total} total providers loaded")
 
     def team_share(self):
+        ROLES = ["owner", "editor", "viewer"]
+        ROLE_COLORS = {"owner": C["green"], "editor": C["amber"], "viewer": C["text3"]}
+        ROLE_PERMS = {
+            "owner":  {"can_read": True,  "can_rotate": True,  "can_delete": True},
+            "editor": {"can_read": True,  "can_rotate": True,  "can_delete": False},
+            "viewer": {"can_read": True,  "can_rotate": False, "can_delete": False},
+        }
+
         win = ctk.CTkToplevel(self)
-        win.title("Share Team Vault")
-        win.geometry("480x320")
+        win.title("👥 Share Team Vault")
+        win.geometry("560x580")
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
 
-        ctk.CTkLabel(win, text="Share Team Vault", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
-        ctk.CTkLabel(win, text="Encrypt with a team passphrase — share the file via Dropbox, iCloud, or git.\nTeammates decrypt with the same passphrase using 'Team Import'.",
-                     font=FONT_XS, text_color=C["text3"], wraplength=420, justify="left").pack(padx=20)
+        ctk.CTkLabel(win, text="👥 Share Team Vault", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text="Set permissions per key, then encrypt with a shared passphrase.",
+                     font=FONT_XS, text_color=C["text3"]).pack()
 
-        ctk.CTkLabel(win, text="TEAM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(16, 2))
-        tp = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
-                          border_color=C["border2"], show="*", width=420)
-        tp.pack(padx=20, ipady=4)
+        # Per-key role assignment
+        ctk.CTkLabel(win, text="KEY PERMISSIONS", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=16, pady=(12, 4))
+        key_scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=4, height=220)
+        key_scroll.pack(fill="x", padx=16, pady=(0, 8))
 
-        ctk.CTkLabel(win, text="CONFIRM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(10, 2))
-        tp2 = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
-                           border_color=C["border2"], show="*", width=420)
-        tp2.pack(padx=20, ipady=4)
+        role_vars = {}
+        for kname in sorted(self.vault.keys()):
+            row = ctk.CTkFrame(key_scroll, fg_color=C["surface"], corner_radius=4)
+            row.pack(fill="x", pady=1)
+            ctk.CTkLabel(row, text=kname, font=FONT_MONO_SM,
+                         text_color=C["text"], width=220, anchor="w").pack(side="left", padx=8, pady=6)
+            rv = tk.StringVar(value=self.vault[kname].get("team_role", "editor"))
+            role_vars[kname] = rv
+            om = ctk.CTkOptionMenu(row, values=ROLES, variable=rv, width=100,
+                                   fg_color=C["bg3"], button_color=C["bg4"],
+                                   button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_XS)
+            om.pack(side="right", padx=8)
+
+        # Default role
+        def_row = ctk.CTkFrame(win, fg_color="transparent")
+        def_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(def_row, text="SET ALL TO:", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
+        for role in ROLES:
+            make_btn(def_row, role.capitalize(),
+                     lambda r=role: [v.set(r) for v in role_vars.values()],
+                     fg_color=C["surface"], text_color=ROLE_COLORS[role], width=70, height=24).pack(side="left", padx=2)
+
+        # Passphrase
+        pf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=4)
+        pf.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(pf, text="TEAM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(8, 2))
+        tp = ctk.CTkEntry(pf, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                          border_color=C["border2"], show="*")
+        tp.pack(fill="x", padx=10, ipady=4)
+        ctk.CTkLabel(pf, text="CONFIRM", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 2))
+        tp2 = ctk.CTkEntry(pf, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                           border_color=C["border2"], show="*")
+        tp2.pack(fill="x", padx=10, ipady=4, pady=(0, 8))
 
         status = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
-        status.pack(pady=(6, 0))
+        status.pack()
 
         def do_share():
             passphrase = tp.get().strip()
             if not passphrase:
-                status.configure(text="Enter a team passphrase")
-                return
+                status.configure(text="Enter a team passphrase"); return
             if passphrase != tp2.get().strip():
-                status.configure(text="Passphrases don't match")
-                return
+                status.configure(text="Passphrases don't match"); return
             path = filedialog.asksaveasfilename(
-                title="Save team vault",
-                defaultextension=".pushkey-team",
-                filetypes=[("Pushkey Team Vault", "*.pushkey-team"), ("All files", "*.*")],
-                initialfile="team-vault.pushkey-team",
-            )
+                title="Save team vault", defaultextension=".pushkey-team",
+                filetypes=[("Pushkey Team Vault", "*.pushkey-team")],
+                initialfile="team-vault.pushkey-team")
             if not path:
                 return
-            payload = json.dumps({"vault": self.vault, "shared_by": "pushkey",
+            # Build permissions map
+            permissions = {k: {**ROLE_PERMS[rv.get()], "role": rv.get()}
+                           for k, rv in role_vars.items()}
+            # Tag roles back on vault keys for future shares
+            for k, rv in role_vars.items():
+                if k in self.vault:
+                    self.vault[k]["team_role"] = rv.get()
+            payload = json.dumps({"vault": self.vault, "permissions": permissions,
+                                   "shared_by": "pushkey",
                                    "exported_at": datetime.now().isoformat()}, indent=2)
-            encrypted = team_encrypt(payload, passphrase)
-            Path(path).write_bytes(encrypted)
+            Path(path).write_bytes(team_encrypt(payload, passphrase))
             win.destroy()
-            messagebox.showinfo("Shared", f"Team vault saved to:\n{path}\n\n"
-                                          f"Share this file + the passphrase with your team.\n"
-                                          f"They import via 'Team Import'.")
+            messagebox.showinfo("✅ Shared",
+                                f"Team vault saved.\n\nPermissions:\n" +
+                                "\n".join(f"  {k}: {v['role']}" for k, v in list(permissions.items())[:5]) +
+                                (f"\n  ...and {len(permissions)-5} more" if len(permissions) > 5 else ""))
             log_event(f"team vault exported to {path}")
 
-        make_btn(win, "Save & Share", do_share, fg_color=C["green_bg"], text_color=C["green"],
-                 width=160, height=34).pack(pady=14)
+        make_btn(win, "🔒 Encrypt & Share", do_share,
+                 fg_color=C["green_bg"], text_color=C["green"], width=180, height=34).pack(pady=10)
 
     def team_import(self):
         path = filedialog.askopenfilename(
@@ -1435,26 +1739,41 @@ class AppFrame(ctk.CTkFrame):
                 status.configure(text=f"Error: {e}")
                 return
 
-            team_vault = data.get("vault", {})
+            team_vault   = data.get("vault", {})
+            permissions  = data.get("permissions", {})
             new_keys     = [k for k in team_vault if k not in self.vault]
             updated_keys = [k for k in team_vault if k in self.vault
                             and team_vault[k].get("value") != self.vault[k].get("value")]
 
+            # Build role summary for confirm dialog
+            role_summary = {}
+            for k, p in permissions.items():
+                r = p.get("role", "editor")
+                role_summary.setdefault(r, 0)
+                role_summary[r] += 1
+            roles_str = "  ".join(f"{r}: {n}" for r, n in sorted(role_summary.items()))
+
             if not messagebox.askyesno("Confirm Import",
-                                        f"Team vault contains {len(team_vault)} key(s).\n\n"
-                                        f"  {len(new_keys)} new\n"
-                                        f"  {len(updated_keys)} different (will update)\n\n"
+                                        f"Team vault — {len(team_vault)} key(s)\n\n"
+                                        f"  🆕 {len(new_keys)} new\n"
+                                        f"  🔄 {len(updated_keys)} updated\n\n"
+                                        f"Roles: {roles_str or 'none set'}\n\n"
                                         f"Merge into your vault?"):
                 win.destroy()
                 return
 
+            # Apply permissions as metadata on each key
+            for k, key_data in team_vault.items():
+                if k in permissions:
+                    key_data["_rbac"] = permissions[k]
             self.vault.update(team_vault)
             self.save()
             self.render_all()
             win.destroy()
             log_event(f"team vault imported from {path}: {len(new_keys)} new, {len(updated_keys)} updated")
-            messagebox.showinfo("Imported", f"Merged {len(new_keys)} new + {len(updated_keys)} updated keys\n"
-                                            f"from team vault.\n\nAll keys re-encrypted with your master password.")
+            messagebox.showinfo("✅ Imported",
+                                f"Merged {len(new_keys)} new + {len(updated_keys)} updated keys.\n"
+                                f"Permissions applied. Re-encrypted with your master password.")
 
         tp.bind("<Return>", lambda e: do_import())
         make_btn(win, "Decrypt & Merge", do_import, fg_color=C["green_bg"], text_color=C["green"],
@@ -1530,15 +1849,18 @@ class AppFrame(ctk.CTkFrame):
         stats_frame = ctk.CTkFrame(pad, fg_color="transparent")
         stats_frame.pack(fill="x", pady=(0, 16))
 
-        for label, val, color in [
-            ("Total keys", str(total), C["text"]),
-            ("Healthy", str(healthy), C["green"]),
-            ("Needs rotation", str(warning + critical), C["amber"] if warning + critical > 0 else C["green"]),
-            ("Projects linked", str(projects), C["accent"]),
+        for emoji, label, val, color in [
+            ("🔑", "Total keys",      str(total),             C["text"]),
+            ("🟢", "Healthy",         str(healthy),           C["green"]),
+            ("⚠️",  "Needs rotation", str(warning + critical), C["amber"] if warning + critical > 0 else C["green"]),
+            ("📁", "Projects linked", str(projects),          C["accent"]),
         ]:
             card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=6)
             card.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ctk.CTkLabel(card, text=label, font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(8, 0))
+            hrow = ctk.CTkFrame(card, fg_color="transparent")
+            hrow.pack(anchor="w", padx=10, pady=(8, 0))
+            ctk.CTkLabel(hrow, text=emoji, font=("Segoe UI Emoji", 10)).pack(side="left")
+            ctk.CTkLabel(hrow, text=f"  {label}", font=FONT_XS, text_color=C["text3"]).pack(side="left")
             ctk.CTkLabel(card, text=val, font=("Segoe UI", 22, "bold"), text_color=color).pack(anchor="w", padx=10, pady=(0, 8))
 
         # Scheduled rotations due
@@ -1548,7 +1870,7 @@ class AppFrame(ctk.CTkFrame):
                          if days_until_rotation(i) is not None and 0 < days_until_rotation(i) <= 7]
 
         if due_keys or upcoming_keys:
-            ctk.CTkLabel(pad, text="SCHEDULED ROTATIONS", font=FONT_XS,
+            ctk.CTkLabel(pad, text="🔄  SCHEDULED ROTATIONS", font=FONT_XS,
                          text_color=C["amber"]).pack(anchor="w", pady=(8, 4))
             for name, info in sorted(due_keys + upcoming_keys,
                                      key=lambda x: days_until_rotation(x[1]) or 0):
@@ -1579,7 +1901,7 @@ class AppFrame(ctk.CTkFrame):
 
         # Action needed
         if critical + warning > 0:
-            ctk.CTkLabel(pad, text="ACTION NEEDED", font=FONT_XS, text_color=C["red"]).pack(anchor="w", pady=(8, 4))
+            ctk.CTkLabel(pad, text="🚨  ACTION NEEDED", font=FONT_XS, text_color=C["red"]).pack(anchor="w", pady=(8, 4))
             for name, info in sorted(keys, key=lambda x: days_since(x[1].get("rotated") or x[1].get("created")), reverse=True):
                 status = health_status(info)
                 if status in ("critical", "warning"):
@@ -1603,7 +1925,7 @@ class AppFrame(ctk.CTkFrame):
                                  fg_color=C["bg3"]).pack(side="right", padx=8, pady=8)
 
         # All keys health list
-        ctk.CTkLabel(pad, text="ALL KEYS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(16, 4))
+        ctk.CTkLabel(pad, text="🔑  ALL KEYS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(16, 4))
 
         if not keys:
             ctk.CTkLabel(pad, text="No keys yet. Go to 'All Keys' tab to add your first one.",
@@ -1649,7 +1971,7 @@ class AppFrame(ctk.CTkFrame):
         form = ctk.CTkFrame(self.keys_frame, fg_color=C["surface"], corner_radius=6)
         form.pack(fill="x", padx=16, pady=(12, 0))
 
-        ctk.CTkLabel(form, text="Add or rotate a key", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 6))
+        ctk.CTkLabel(form, text="➕  Add or Rotate a Key", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 6))
 
         # Row 1: Name + Value + Category
         input_row = ctk.CTkFrame(form, fg_color="transparent")
@@ -1694,11 +2016,11 @@ class AppFrame(ctk.CTkFrame):
         # Row 2: Action buttons on their own line
         btn_row = ctk.CTkFrame(form, fg_color="transparent")
         btn_row.pack(fill="x", padx=12, pady=(0, 10))
-        make_btn(btn_row, "+ Add Key", self.add_key, fg_color=C["green_bg"], text_color=C["green"]).pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "+ Add Group", self.add_group_manual, fg_color=C["accent2"], text_color="white").pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "✅ Add Key", self.add_key, fg_color=C["green_bg"], text_color=C["green"]).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "🗂️ Add Group", self.add_group_manual, fg_color=C["accent2"], text_color="white").pack(side="left", padx=(0, 6))
         make_btn(btn_row, "📤 Upload File", self.bulk_upload_keys, fg_color=C["accent"], text_color="white").pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "📁 Scan Import Folder", self.scan_import_folder, fg_color=C["btn"], text_color=C["text2"]).pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "Open Folder", self.open_import_folder, fg_color=C["btn"], text_color=C["text3"]).pack(side="left")
+        make_btn(btn_row, "📁 Scan Import", self.scan_import_folder, fg_color=C["btn"], text_color=C["text2"]).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "📂 Open Folder", self.open_import_folder, fg_color=C["btn"], text_color=C["text3"]).pack(side="left")
 
         # Search bar
         search_bar = ctk.CTkFrame(self.keys_frame, fg_color=C["bg2"], corner_radius=0)
@@ -1850,7 +2172,8 @@ class AppFrame(ctk.CTkFrame):
 
         if provider:
             cat = info.get("category", "General")
-            lbl_p = ctk.CTkLabel(name_row, text=f" ({provider})", font=FONT_XS,
+            emoji = CAT_EMOJI.get(cat, "🔑")
+            lbl_p = ctk.CTkLabel(name_row, text=f"  {emoji} {provider}", font=FONT_XS,
                                   text_color=CAT_COLORS.get(cat, C["text3"]), cursor="hand2")
             lbl_p.pack(side="left")
             lbl_p.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
@@ -1870,6 +2193,11 @@ class AppFrame(ctk.CTkFrame):
         env = info.get("env", "all")
         if env != "all":
             meta_parts.append(env.upper())
+        rbac = info.get("_rbac")
+        if rbac:
+            role = rbac.get("role", "editor")
+            role_icons = {"owner": "👑", "editor": "✏️", "viewer": "👁️"}
+            meta_parts.append(f"{role_icons.get(role, '')} {role}")
         if info.get("rotation_schedule"):
             d = days_until_rotation(info)
             if d is not None:
@@ -2476,7 +2804,22 @@ class AppFrame(ctk.CTkFrame):
         job_id = self.after(30000, self.clipboard_clear)
         self._clipboard_jobs.append(job_id)
 
+    def _rbac_check(self, name: str, action: str) -> bool:
+        """Returns True if action allowed. action: 'can_rotate' | 'can_delete' | 'can_read'"""
+        rbac = self.vault.get(name, {}).get("_rbac")
+        if not rbac:
+            return True
+        allowed = rbac.get(action, True)
+        if not allowed:
+            role = rbac.get("role", "viewer")
+            messagebox.showwarning("🔒 Permission Denied",
+                                   f"Your role for '{name}' is '{role}'.\n"
+                                   f"You don't have permission to {action.replace('can_', '')} this key.")
+        return allowed
+
     def delete_key(self, name):
+        if not self._rbac_check(name, "can_delete"):
+            return
         if messagebox.askyesno("Delete?", f"Delete '{name}'?\nThis cannot be undone."):
             del self.vault[name]
             self.revealed.discard(name)
@@ -2505,6 +2848,8 @@ class AppFrame(ctk.CTkFrame):
         return msg
 
     def rotate_key(self, name):
+        if not self._rbac_check(name, "can_rotate"):
+            return
         info = self.vault.get(name)
         if not info:
             return
@@ -3026,7 +3371,7 @@ class AppFrame(ctk.CTkFrame):
         hdr = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0, height=44)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="SECRET SCANNER", font=("Consolas", 11, "bold"),
+        ctk.CTkLabel(hdr, text="🔍  SECRET SCANNER", font=("Consolas", 11, "bold"),
                      text_color=C["text"]).pack(side="left", padx=16)
         if self._scan_ts:
             ctk.CTkLabel(hdr, text=f"Last scan: {self._scan_ts}",
