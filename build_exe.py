@@ -15,6 +15,7 @@ def build():
         "--windowed",
         "--name", "Pushkey",
         "--collect-all", "cryptography",
+        "--collect-all", "customtkinter",
         str(root / "pushkey.py"),
     ]
 
