@@ -991,6 +991,21 @@ def health_color(status):
     return {"healthy": C["green"], "warning": C["amber"], "critical": C["red"]}.get(status, C["text3"])
 
 
+def days_until_rotation(key_info):
+    """Days until scheduled rotation. None if no schedule set. Negative = overdue."""
+    schedule = key_info.get("rotation_schedule")
+    if not schedule:
+        return None
+    try:
+        interval = int(schedule)
+    except (ValueError, TypeError):
+        return None
+    age = days_since(key_info.get("rotated") or key_info.get("created"))
+    if age == float("inf"):
+        return None
+    return interval - age
+
+
 # ═══════════════════════════════════════════════
 # LOGIN SCREEN
 # ═══════════════════════════════════════════════
@@ -1439,6 +1454,34 @@ class AppFrame(ctk.CTkFrame):
             ctk.CTkLabel(card, text=label, font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(8, 0))
             ctk.CTkLabel(card, text=val, font=("Segoe UI", 22, "bold"), text_color=color).pack(anchor="w", padx=10, pady=(0, 8))
 
+        # Scheduled rotations due
+        due_keys = [(n, i) for n, i in keys
+                    if days_until_rotation(i) is not None and days_until_rotation(i) <= 0]
+        upcoming_keys = [(n, i) for n, i in keys
+                         if days_until_rotation(i) is not None and 0 < days_until_rotation(i) <= 7]
+
+        if due_keys or upcoming_keys:
+            ctk.CTkLabel(pad, text="SCHEDULED ROTATIONS", font=FONT_XS,
+                         text_color=C["amber"]).pack(anchor="w", pady=(8, 4))
+            for name, info in sorted(due_keys + upcoming_keys,
+                                     key=lambda x: days_until_rotation(x[1]) or 0):
+                days_left = days_until_rotation(info)
+                overdue = days_left is not None and days_left <= 0
+                row = ctk.CTkFrame(pad, fg_color=C["amber_bg"] if overdue else C["surface"], corner_radius=4)
+                row.pack(fill="x", pady=2)
+                left = ctk.CTkFrame(row, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+                ctk.CTkLabel(left, text=name, font=FONT_MONO, text_color=C["text"]).pack(anchor="w")
+                if overdue:
+                    msg = f"Overdue by {abs(days_left)} day(s) — scheduled every {info.get('rotation_schedule')}d"
+                    clr = C["amber"]
+                else:
+                    msg = f"Due in {days_left} day(s) — scheduled every {info.get('rotation_schedule')}d"
+                    clr = C["text3"]
+                ctk.CTkLabel(left, text=msg, font=FONT_XS, text_color=clr).pack(anchor="w")
+                make_btn(row, "Rotate Now", lambda n=name: (self.rotate_key(n), self.render_all()),
+                         fg_color=C["amber_bg"], text_color=C["amber"], width=90).pack(side="right", padx=8, pady=8)
+
         # Action needed
         if critical + warning > 0:
             ctk.CTkLabel(pad, text="ACTION NEEDED", font=FONT_XS, text_color=C["red"]).pack(anchor="w", pady=(8, 4))
@@ -1732,6 +1775,10 @@ class AppFrame(ctk.CTkFrame):
         env = info.get("env", "all")
         if env != "all":
             meta_parts.append(env.upper())
+        if info.get("rotation_schedule"):
+            d = days_until_rotation(info)
+            if d is not None:
+                meta_parts.append(f"due in {d}d" if d > 0 else f"overdue {abs(d)}d")
 
         lbl_meta = ctk.CTkLabel(info_frame, text="  ·  ".join(meta_parts) if meta_parts else "",
                                  font=FONT_XS, text_color=C["text3"], cursor="hand2", anchor="w")
@@ -2665,6 +2712,45 @@ class AppFrame(ctk.CTkFrame):
         info_field("CREATED", (info.get("created") or "")[:16].replace("T", " ") or "—", mono=True)
         info_field("LAST ROTATED", (info.get("rotated") or "")[:16].replace("T", " ") or "Never", mono=True)
         info_field("ROTATION COUNT", str(info.get("rotation_count", 0)))
+
+        # Rotation schedule — editable inline
+        sched_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
+        sched_frame.pack(fill="x", pady=2)
+        sf_top = ctk.CTkFrame(sched_frame, fg_color="transparent")
+        sf_top.pack(fill="x", padx=10, pady=(6, 4))
+        ctk.CTkLabel(sf_top, text="ROTATION SCHEDULE", font=FONT_XS, text_color=C["text3"]).pack(side="left")
+        days_left = days_until_rotation(info)
+        if days_left is not None:
+            if days_left <= 0:
+                sched_status = f"overdue {abs(days_left)}d"
+                sc = C["amber"]
+            else:
+                sched_status = f"due in {days_left}d"
+                sc = C["green"]
+            ctk.CTkLabel(sf_top, text=sched_status, font=FONT_XS, text_color=sc).pack(side="right")
+        sched_row = ctk.CTkFrame(sched_frame, fg_color="transparent")
+        sched_row.pack(fill="x", padx=10, pady=(0, 6))
+        sched_var = tk.StringVar(value=str(info.get("rotation_schedule", "")))
+        sched_entry = ctk.CTkEntry(sched_row, textvariable=sched_var, font=FONT_MONO_SM,
+                                   fg_color=C["bg3"], text_color=C["text"],
+                                   placeholder_text="days, e.g. 30  (blank = no schedule)", width=200)
+        sched_entry.pack(side="left")
+
+        def save_schedule():
+            val = sched_var.get().strip()
+            if val:
+                try:
+                    int(val)
+                except ValueError:
+                    return
+                info["rotation_schedule"] = int(val)
+            else:
+                info.pop("rotation_schedule", None)
+            self.save()
+            self.render_dashboard()
+
+        make_btn(sched_row, "Set", save_schedule, fg_color=C["accent"], text_color="white",
+                 width=50).pack(side="left", padx=(6, 0))
         if info.get("first_used"):
             use_days = days_since(info["first_used"])
             info_field("FIRST DEPLOYED", (info["first_used"])[:16].replace("T", " "), mono=True)
