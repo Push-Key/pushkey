@@ -1,0 +1,24 @@
+{
+  "name": "pushkey",
+  "displayName": "Pushkey — Key Health",
+  "description": "Shows API key rotation health in .env files from your local Pushkey vault",
+  "version": "0.1.0",
+  "publisher": "pushkey",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onLanguage:dotenv",
+    "onLanguage:plaintext",
+    "workspaceContains:**/.env"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pushkey.refreshHealth",
+        "title": "Pushkey: Refresh Key Health"
+      }
+    ]
+  },
+  "keywords": ["env", "secrets", "api-keys", "security", "rotation"]
+}

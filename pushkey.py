@@ -49,6 +49,9 @@ VAULT_FILE = VAULT_DIR / "vault.enc"
 SALT_FILE = VAULT_DIR / ".salt"
 CONFIG_FILE = VAULT_DIR / "config.json"
 LOG_FILE = VAULT_DIR / "pushkey.log"
+HEALTH_FILE = VAULT_DIR / "health.json"
+PROVIDERS_CACHE = VAULT_DIR / "providers.json"
+PROVIDERS_REGISTRY_URL = "https://raw.githubusercontent.com/ebothegreat/pushkey/main/providers.json"
 IMPORT_DIR = VAULT_DIR / "import"
 
 VAULT_SCHEMA_VERSION = 1
@@ -199,6 +202,42 @@ def save_vault(vault, password):
         pass
 
 
+def write_health_sidecar(vault):
+    try:
+        ensure_vault_dir()
+        health = {}
+        for name, info in vault.items():
+            age = days_since(info.get("rotated") or info.get("created"))
+            use_age = days_since(info.get("first_used"))
+            effective_age = min(age, use_age) if use_age != float("inf") else age
+            provider = info.get("provider")
+            threshold = 90
+            if provider and provider in PROVIDERS:
+                threshold = PROVIDERS[provider].get("rotation_days", 90)
+            if effective_age > threshold:
+                status = "critical"
+            elif effective_age > threshold * 0.67:
+                status = "warning"
+            else:
+                status = "healthy"
+            health[name] = {
+                "status": status,
+                "days_old": effective_age if effective_age != float("inf") else None,
+                "provider": provider,
+                "category": info.get("category", "General"),
+                "first_used": info.get("first_used"),
+                "last_used": info.get("last_used"),
+                "created": info.get("created"),
+                "rotated": info.get("rotated"),
+                "rotation_count": info.get("rotation_count", 0),
+            }
+        tmp = HEALTH_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(health, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(HEALTH_FILE))
+    except Exception:
+        pass
+
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
@@ -214,39 +253,210 @@ def save_config(config):
 
 
 # ═══════════════════════════════════════════════
-# PROVIDER DATABASE
+# PROVIDER DATABASE  (bundled + community registry)
 # ═══════════════════════════════════════════════
 
-PROVIDERS = {
-    "OpenAI": {"url": "https://platform.openai.com/api-keys", "prefix": "sk-", "category": "AI", "patterns": ["openai", "gpt"], "rotation_days": 90},
-    "Anthropic": {"url": "https://console.anthropic.com/settings/keys", "prefix": "sk-ant-", "category": "AI", "patterns": ["anthropic", "claude"], "rotation_days": 90},
-    "Alpaca": {"url": "https://app.alpaca.markets/paper/dashboard/overview", "prefix": "", "category": "Trading", "patterns": ["alpaca"], "rotation_days": 90},
-    "OANDA": {"url": "https://www.oanda.com/account/tpa/personal_token", "prefix": "", "category": "Trading", "patterns": ["oanda"], "rotation_days": 90},
-    "Coinbase": {"url": "https://www.coinbase.com/settings/api", "prefix": "", "category": "Trading", "patterns": ["coinbase"], "rotation_days": 90},
-    "Supabase": {"url": "https://supabase.com/dashboard", "prefix": "eyJ", "category": "Database", "patterns": ["supabase"], "rotation_days": 180},
-    "Stripe": {"url": "https://dashboard.stripe.com/apikeys", "prefix": "sk_", "category": "Payment", "patterns": ["stripe"], "rotation_days": 90},
-    "AWS": {"url": "https://console.aws.amazon.com/iam/home#/security_credentials", "prefix": "AKIA", "category": "Cloud", "patterns": ["aws", "amazon"], "rotation_days": 90},
-    "Vercel": {"url": "https://vercel.com/account/tokens", "prefix": "", "category": "Cloud", "patterns": ["vercel"], "rotation_days": 90},
-    "GitHub": {"url": "https://github.com/settings/tokens", "prefix": "ghp_", "category": "VCS", "patterns": ["github", "gh_", "ghp_"], "rotation_days": 90},
-    "GitLab": {"url": "https://gitlab.com/-/profile/personal_access_tokens", "prefix": "glpat-", "category": "VCS", "patterns": ["gitlab", "glpat"], "rotation_days": 90},
-    "Twilio": {"url": "https://console.twilio.com/?frameUrl=/console/account/keys", "prefix": "", "category": "Communication", "patterns": ["twilio"], "rotation_days": 90},
-    "SendGrid": {"url": "https://app.sendgrid.com/settings/api_keys", "prefix": "SG.", "category": "Communication", "patterns": ["sendgrid"], "rotation_days": 90},
-    "Slack": {"url": "https://api.slack.com/apps", "prefix": "xoxb-", "category": "Communication", "patterns": ["slack", "xoxb", "xoxp"], "rotation_days": 180},
-    "Discord": {"url": "https://discord.com/developers/applications", "prefix": "", "category": "Communication", "patterns": ["discord"], "rotation_days": 90},
-    "Google Cloud": {"url": "https://console.cloud.google.com/apis/credentials", "prefix": "", "category": "Cloud", "patterns": ["google", "gcp"], "rotation_days": 90},
-    "Azure": {"url": "https://portal.azure.com/#view/Microsoft_AAD_IAM/AppIntegrationsMenuBlade", "prefix": "", "category": "Cloud", "patterns": ["azure"], "rotation_days": 90},
-    "DigitalOcean": {"url": "https://cloud.digitalocean.com/account/api/tokens", "prefix": "dop_v1_", "category": "Cloud", "patterns": ["digitalocean", "dop_"], "rotation_days": 90},
-    "Heroku": {"url": "https://dashboard.heroku.com/account", "prefix": "", "category": "Cloud", "patterns": ["heroku"], "rotation_days": 90},
-    "MongoDB Atlas": {"url": "https://cloud.mongodb.com/v2", "prefix": "mongodb+srv://", "category": "Database", "patterns": ["mongodb", "mongo"], "rotation_days": 180},
-    "PostgreSQL": {"url": "https://console.cloud.google.com/sql", "prefix": "postgresql://", "category": "Database", "patterns": ["postgres", "psql"], "rotation_days": 180},
-    "Elastic": {"url": "https://www.elastic.co/cloud/console/", "prefix": "", "category": "Database", "patterns": ["elastic"], "rotation_days": 90},
-    "HashiCorp Vault": {"url": "https://www.vaultproject.io/", "prefix": "s.", "category": "Security", "patterns": ["hashicorp"], "rotation_days": 30},
-    "PagerDuty": {"url": "https://subdomain.pagerduty.com/api_keys", "prefix": "", "category": "Incident", "patterns": ["pagerduty"], "rotation_days": 90},
-    "Datadog": {"url": "https://app.datadoghq.com/organization-settings/api-keys", "prefix": "", "category": "Monitoring", "patterns": ["datadog"], "rotation_days": 90},
-    "New Relic": {"url": "https://one.newrelic.com/launcher/api-keys-ui.launcher", "prefix": "", "category": "Monitoring", "patterns": ["newrelic"], "rotation_days": 90},
-    "HubSpot": {"url": "https://app.hubspot.com/login", "prefix": "pat-", "category": "CRM", "patterns": ["hubspot"], "rotation_days": 90},
-    "Jira": {"url": "https://id.atlassian.com/manage/api-tokens", "prefix": "", "category": "Project Management", "patterns": ["jira", "atlassian"], "rotation_days": 90},
+_BUNDLED_PROVIDERS = {
+    "OpenAI":         {"url": "https://platform.openai.com/api-keys",                          "prefix": "sk-",           "category": "AI",                 "patterns": ["openai", "gpt"],             "rotation_days": 90},
+    "Anthropic":      {"url": "https://console.anthropic.com/settings/keys",                   "prefix": "sk-ant-",       "category": "AI",                 "patterns": ["anthropic", "claude"],       "rotation_days": 90},
+    "Alpaca":         {"url": "https://app.alpaca.markets/paper/dashboard/overview",            "prefix": "",              "category": "Trading",            "patterns": ["alpaca"],                    "rotation_days": 90},
+    "OANDA":          {"url": "https://www.oanda.com/account/tpa/personal_token",               "prefix": "",              "category": "Trading",            "patterns": ["oanda"],                     "rotation_days": 90},
+    "Coinbase":       {"url": "https://www.coinbase.com/settings/api",                          "prefix": "",              "category": "Trading",            "patterns": ["coinbase"],                  "rotation_days": 90},
+    "Supabase":       {"url": "https://supabase.com/dashboard",                                 "prefix": "eyJ",           "category": "Database",           "patterns": ["supabase"],                  "rotation_days": 180},
+    "Stripe":         {"url": "https://dashboard.stripe.com/apikeys",                           "prefix": "sk_",           "category": "Payment",            "patterns": ["stripe"],                    "rotation_days": 90},
+    "AWS":            {"url": "https://console.aws.amazon.com/iam/home#/security_credentials", "prefix": "AKIA",          "category": "Cloud",              "patterns": ["aws", "amazon"],             "rotation_days": 90},
+    "Vercel":         {"url": "https://vercel.com/account/tokens",                              "prefix": "",              "category": "Cloud",              "patterns": ["vercel"],                    "rotation_days": 90},
+    "GitHub":         {"url": "https://github.com/settings/tokens",                            "prefix": "ghp_",          "category": "VCS",                "patterns": ["github", "gh_", "ghp_"],    "rotation_days": 90},
+    "GitLab":         {"url": "https://gitlab.com/-/profile/personal_access_tokens",           "prefix": "glpat-",        "category": "VCS",                "patterns": ["gitlab", "glpat"],           "rotation_days": 90},
+    "Twilio":         {"url": "https://console.twilio.com/?frameUrl=/console/account/keys",    "prefix": "",              "category": "Communication",      "patterns": ["twilio"],                    "rotation_days": 90},
+    "SendGrid":       {"url": "https://app.sendgrid.com/settings/api_keys",                    "prefix": "SG.",           "category": "Communication",      "patterns": ["sendgrid"],                  "rotation_days": 90},
+    "Slack":          {"url": "https://api.slack.com/apps",                                    "prefix": "xoxb-",         "category": "Communication",      "patterns": ["slack", "xoxb", "xoxp"],    "rotation_days": 180},
+    "Discord":        {"url": "https://discord.com/developers/applications",                   "prefix": "",              "category": "Communication",      "patterns": ["discord"],                   "rotation_days": 90},
+    "Google Cloud":   {"url": "https://console.cloud.google.com/apis/credentials",             "prefix": "",              "category": "Cloud",              "patterns": ["google", "gcp"],             "rotation_days": 90},
+    "Azure":          {"url": "https://portal.azure.com/#view/Microsoft_AAD_IAM/AppIntegrationsMenuBlade", "prefix": "", "category": "Cloud",              "patterns": ["azure"],                     "rotation_days": 90},
+    "DigitalOcean":   {"url": "https://cloud.digitalocean.com/account/api/tokens",             "prefix": "dop_v1_",       "category": "Cloud",              "patterns": ["digitalocean", "dop_"],      "rotation_days": 90},
+    "Heroku":         {"url": "https://dashboard.heroku.com/account",                          "prefix": "",              "category": "Cloud",              "patterns": ["heroku"],                    "rotation_days": 90},
+    "MongoDB Atlas":  {"url": "https://cloud.mongodb.com/v2",                                  "prefix": "mongodb+srv://","category": "Database",           "patterns": ["mongodb", "mongo"],          "rotation_days": 180},
+    "PostgreSQL":     {"url": "https://console.cloud.google.com/sql",                          "prefix": "postgresql://", "category": "Database",           "patterns": ["postgres", "psql"],          "rotation_days": 180},
+    "Elastic":        {"url": "https://www.elastic.co/cloud/console/",                         "prefix": "",              "category": "Database",           "patterns": ["elastic"],                   "rotation_days": 90},
+    "HashiCorp Vault":{"url": "https://www.vaultproject.io/",                                  "prefix": "s.",            "category": "Security",           "patterns": ["hashicorp"],                 "rotation_days": 30},
+    "PagerDuty":      {"url": "https://subdomain.pagerduty.com/api_keys",                      "prefix": "",              "category": "Incident",           "patterns": ["pagerduty"],                 "rotation_days": 90},
+    "Datadog":        {"url": "https://app.datadoghq.com/organization-settings/api-keys",      "prefix": "",              "category": "Monitoring",         "patterns": ["datadog"],                   "rotation_days": 90},
+    "New Relic":      {"url": "https://one.newrelic.com/launcher/api-keys-ui.launcher",        "prefix": "",              "category": "Monitoring",         "patterns": ["newrelic"],                  "rotation_days": 90},
+    "HubSpot":        {"url": "https://app.hubspot.com/login",                                 "prefix": "pat-",          "category": "CRM",                "patterns": ["hubspot"],                   "rotation_days": 90},
+    "Jira":           {"url": "https://id.atlassian.com/manage/api-tokens",                    "prefix": "",              "category": "Project Management", "patterns": ["jira", "atlassian"],         "rotation_days": 90},
 }
+
+
+def _load_providers():
+    merged = dict(_BUNDLED_PROVIDERS)
+    if PROVIDERS_CACHE.exists():
+        try:
+            cached = json.loads(PROVIDERS_CACHE.read_text(encoding="utf-8"))
+            merged.update(cached.get("providers", {}))
+        except Exception:
+            pass
+    return merged
+
+
+def update_providers_from_web():
+    """Fetch latest providers.json from GitHub. Returns (new_count, updated_count, error_str)."""
+    import urllib.request, urllib.error
+    try:
+        with urllib.request.urlopen(PROVIDERS_REGISTRY_URL, timeout=10) as r:
+            raw = r.read().decode("utf-8")
+        data = json.loads(raw)
+        remote = data.get("providers", {})
+        if not remote:
+            return 0, 0, "Registry returned empty providers list"
+        existing = _load_providers()
+        new_count     = sum(1 for k in remote if k not in existing)
+        updated_count = sum(1 for k in remote if k in existing and remote[k] != existing.get(k))
+        tmp = PROVIDERS_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(PROVIDERS_CACHE))
+        global PROVIDERS
+        PROVIDERS = _load_providers()
+        log_event(f"providers updated: {new_count} new, {updated_count} changed")
+        return new_count, updated_count, None
+    except urllib.error.URLError as e:
+        return 0, 0, f"Network error: {e.reason}"
+    except Exception as e:
+        return 0, 0, str(e)
+
+
+PROVIDERS = _load_providers()
+
+
+# ═══════════════════════════════════════════════
+# ROTATION API CLIENT
+# ═══════════════════════════════════════════════
+
+class RotationResult:
+    def __init__(self, new_value=None, new_id=None, error=None, partial=False):
+        self.new_value = new_value  # the new key/secret string
+        self.new_id = new_id        # provider's internal key id (for later delete)
+        self.error = error
+        self.partial = partial      # True = new key created but old not deleted
+
+
+def _rotate_openai(old_key_id, admin_key):
+    """Requires an OpenAI Admin API key (sk-admin-...), not a regular key."""
+    import urllib.request, urllib.error
+    headers = {"Authorization": f"Bearer {admin_key}", "Content-Type": "application/json"}
+    # Create new key
+    body = json.dumps({"name": f"pushkey-rotated-{int(time.time())}"}).encode()
+    req = urllib.request.Request("https://api.openai.com/v1/organization/admin_api_keys",
+                                  data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            new_key_data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return RotationResult(error=f"OpenAI create failed: {e.code} {e.read().decode()[:200]}")
+    except Exception as e:
+        return RotationResult(error=f"OpenAI create failed: {e}")
+
+    new_value = new_key_data.get("value")
+    new_id = new_key_data.get("id")
+    if not new_value:
+        return RotationResult(error="OpenAI: no key value in response")
+
+    # Delete old key if we have its id
+    if old_key_id:
+        del_req = urllib.request.Request(
+            f"https://api.openai.com/v1/organization/admin_api_keys/{old_key_id}",
+            headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(del_req, timeout=15)
+        except Exception:
+            return RotationResult(new_value=new_value, new_id=new_id, partial=True)
+
+    return RotationResult(new_value=new_value, new_id=new_id)
+
+
+def _deactivate_anthropic(key_id, admin_key):
+    """Deactivates old Anthropic key. New key must be created manually in console."""
+    import urllib.request, urllib.error
+    if not key_id:
+        return RotationResult(error="Anthropic: provide the key ID to deactivate (from console)")
+    headers = {
+        "x-api-key": admin_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps({"status": "inactive"}).encode()
+    req = urllib.request.Request(
+        f"https://api.anthropic.com/v1/organizations/api_keys/{key_id}",
+        data=body, headers=headers, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=15)
+        return RotationResult(partial=True,
+                              error="Old key deactivated. Create new key in Anthropic console, then paste it here.")
+    except urllib.error.HTTPError as e:
+        return RotationResult(error=f"Anthropic deactivate failed: {e.code} {e.read().decode()[:200]}")
+    except Exception as e:
+        return RotationResult(error=f"Anthropic deactivate failed: {e}")
+
+
+def _rotate_aws(aws_access_key_id, aws_secret, username=None):
+    """Full AWS IAM rotation. Requires iam:CreateAccessKey + iam:DeleteAccessKey perms."""
+    try:
+        import boto3
+        import botocore.exceptions
+    except ImportError:
+        return RotationResult(error="AWS rotation requires boto3: pip install boto3")
+
+    session = boto3.Session(
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret,
+    )
+    iam = session.client("iam")
+
+    # Create new key
+    try:
+        kwargs = {"UserName": username} if username else {}
+        resp = iam.create_access_key(**kwargs)
+        new_key = resp["AccessKey"]["AccessKeyId"]
+        new_secret = resp["AccessKey"]["SecretAccessKey"]
+    except botocore.exceptions.ClientError as e:
+        return RotationResult(error=f"AWS create failed: {e.response['Error']['Message']}")
+    except Exception as e:
+        return RotationResult(error=f"AWS create failed: {e}")
+
+    # Delete old key
+    try:
+        kwargs = {"AccessKeyId": aws_access_key_id}
+        if username:
+            kwargs["UserName"] = username
+        iam.delete_access_key(**kwargs)
+    except Exception:
+        return RotationResult(new_value=f"{new_key}:{new_secret}", new_id=new_key, partial=True)
+
+    return RotationResult(new_value=f"{new_key}:{new_secret}", new_id=new_key)
+
+
+def rotate_key_via_api(provider, key_info, rotation_creds):
+    """
+    rotation_creds: dict of extra credentials needed (admin_key, key_id, username, etc.)
+    Returns RotationResult.
+    """
+    if provider == "OpenAI":
+        return _rotate_openai(
+            old_key_id=rotation_creds.get("key_id"),
+            admin_key=rotation_creds.get("admin_key"),
+        )
+    if provider == "Anthropic":
+        return _deactivate_anthropic(
+            key_id=rotation_creds.get("key_id"),
+            admin_key=rotation_creds.get("admin_key"),
+        )
+    if provider == "AWS":
+        return _rotate_aws(
+            aws_access_key_id=key_info.get("value", "").split(":")[0],
+            aws_secret=rotation_creds.get("aws_secret"),
+            username=rotation_creds.get("username"),
+        )
+    return RotationResult(error=f"{provider} does not support API rotation yet. Use manual rotation.")
 
 
 def detect_provider(key_name, key_value=""):
@@ -625,9 +835,12 @@ def health_status(key_info):
     threshold = 90
     if provider and provider in PROVIDERS:
         threshold = PROVIDERS[provider].get("rotation_days", 90)
-    if age > threshold:
+    # If actively deployed, age counts from first deployment
+    use_age = days_since(key_info.get("first_used"))
+    effective_age = min(age, use_age) if use_age != float("inf") else age
+    if effective_age > threshold:
         return "critical"
-    if age > threshold * 0.67:
+    if effective_age > threshold * 0.67:
         return "warning"
     return "healthy"
 
@@ -778,6 +991,12 @@ class AppFrame(ctk.CTkFrame):
         make_btn(top, "Export", self.export_vault).pack(side="right", padx=2, pady=10)
         make_btn(top, "Import", self.import_vault).pack(side="right", padx=2, pady=10)
         make_btn(top, "Template", self.show_template).pack(side="right", padx=2, pady=10)
+        make_btn(top, "Update Providers", self.do_update_providers,
+                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
+        make_btn(top, "Team Share", self.team_share,
+                 fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
+        make_btn(top, "Team Import", self.team_import,
+                 fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
 
         # Auto-lock
         self._lock_timeout = 5 * 60 * 1000
@@ -803,20 +1022,26 @@ class AppFrame(ctk.CTkFrame):
         self.tabview.add("Dashboard")
         self.tabview.add("All Keys")
         self.tabview.add("Projects")
+        self.tabview.add("Security")
 
         self.dash_frame = self.tabview.tab("Dashboard")
         self.keys_frame = self.tabview.tab("All Keys")
         self.proj_frame = self.tabview.tab("Projects")
+        self.scan_frame = self.tabview.tab("Security")
 
         # Configure tab frames
-        for f in (self.dash_frame, self.keys_frame, self.proj_frame):
+        for f in (self.dash_frame, self.keys_frame, self.proj_frame, self.scan_frame):
             f.configure(fg_color=C["bg"])
+
+        self._scan_results = []   # cache last scan output
+        self._scan_ts = None
 
         self.render_all()
 
     def save(self):
         save_vault(self.vault, self.password)
         save_config(self.config)
+        write_health_sidecar(self.vault)
 
     def lock(self):
         self.revealed.clear()
@@ -835,6 +1060,139 @@ class AppFrame(ctk.CTkFrame):
         if self._lock_timer_id:
             self.after_cancel(self._lock_timer_id)
         self._lock_timer_id = self.after(self._lock_timeout, self.lock)
+
+    def do_update_providers(self):
+        new_c, upd_c, err = update_providers_from_web()
+        if err:
+            messagebox.showerror("Update Failed", f"Could not fetch provider registry:\n{err}\n\nUsing bundled providers.")
+        else:
+            total = len(PROVIDERS)
+            messagebox.showinfo("Providers Updated",
+                                f"Registry updated.\n\n"
+                                f"  {new_c} new provider(s) added\n"
+                                f"  {upd_c} provider(s) updated\n"
+                                f"  {total} total providers loaded")
+
+    def team_share(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Share Team Vault")
+        win.geometry("480x320")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Share Team Vault", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text="Encrypt with a team passphrase — share the file via Dropbox, iCloud, or git.\nTeammates decrypt with the same passphrase using 'Team Import'.",
+                     font=FONT_XS, text_color=C["text3"], wraplength=420, justify="left").pack(padx=20)
+
+        ctk.CTkLabel(win, text="TEAM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(16, 2))
+        tp = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                          border_color=C["border2"], show="*", width=420)
+        tp.pack(padx=20, ipady=4)
+
+        ctk.CTkLabel(win, text="CONFIRM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(10, 2))
+        tp2 = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                           border_color=C["border2"], show="*", width=420)
+        tp2.pack(padx=20, ipady=4)
+
+        status = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        status.pack(pady=(6, 0))
+
+        def do_share():
+            passphrase = tp.get().strip()
+            if not passphrase:
+                status.configure(text="Enter a team passphrase")
+                return
+            if passphrase != tp2.get().strip():
+                status.configure(text="Passphrases don't match")
+                return
+            path = filedialog.asksaveasfilename(
+                title="Save team vault",
+                defaultextension=".pushkey-team",
+                filetypes=[("Pushkey Team Vault", "*.pushkey-team"), ("All files", "*.*")],
+                initialfile="team-vault.pushkey-team",
+            )
+            if not path:
+                return
+            payload = json.dumps({"vault": self.vault, "shared_by": "pushkey",
+                                   "exported_at": datetime.now().isoformat()}, indent=2)
+            encrypted = encrypt_data(payload, passphrase)
+            Path(path).write_bytes(encrypted)
+            win.destroy()
+            messagebox.showinfo("Shared", f"Team vault saved to:\n{path}\n\n"
+                                          f"Share this file + the passphrase with your team.\n"
+                                          f"They import via 'Team Import'.")
+            log_event(f"team vault exported to {path}")
+
+        make_btn(win, "Save & Share", do_share, fg_color=C["green_bg"], text_color=C["green"],
+                 width=160, height=34).pack(pady=14)
+
+    def team_import(self):
+        path = filedialog.askopenfilename(
+            title="Import team vault",
+            filetypes=[("Pushkey Team Vault", "*.pushkey-team"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Import Team Vault")
+        win.geometry("460x240")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Import Team Vault", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text=Path(path).name, font=FONT_MONO_SM, text_color=C["text3"]).pack()
+
+        ctk.CTkLabel(win, text="TEAM PASSPHRASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(16, 2))
+        tp = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
+                          border_color=C["border2"], show="*", width=400)
+        tp.pack(padx=20, ipady=4)
+        tp.focus_set()
+
+        status = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        status.pack(pady=(6, 0))
+
+        def do_import():
+            passphrase = tp.get().strip()
+            if not passphrase:
+                status.configure(text="Enter the team passphrase")
+                return
+            try:
+                raw = Path(path).read_bytes()
+                data = json.loads(decrypt_data(raw, passphrase))
+            except ValueError:
+                status.configure(text="Wrong passphrase or corrupted file")
+                return
+            except Exception as e:
+                status.configure(text=f"Error: {e}")
+                return
+
+            team_vault = data.get("vault", {})
+            new_keys     = [k for k in team_vault if k not in self.vault]
+            updated_keys = [k for k in team_vault if k in self.vault
+                            and team_vault[k].get("value") != self.vault[k].get("value")]
+
+            if not messagebox.askyesno("Confirm Import",
+                                        f"Team vault contains {len(team_vault)} key(s).\n\n"
+                                        f"  {len(new_keys)} new\n"
+                                        f"  {len(updated_keys)} different (will update)\n\n"
+                                        f"Merge into your vault?"):
+                win.destroy()
+                return
+
+            self.vault.update(team_vault)
+            self.save()
+            self.render_all()
+            win.destroy()
+            log_event(f"team vault imported from {path}: {len(new_keys)} new, {len(updated_keys)} updated")
+            messagebox.showinfo("Imported", f"Merged {len(new_keys)} new + {len(updated_keys)} updated keys\n"
+                                            f"from team vault.\n\nAll keys re-encrypted with your master password.")
+
+        tp.bind("<Return>", lambda e: do_import())
+        make_btn(win, "Decrypt & Merge", do_import, fg_color=C["green_bg"], text_color=C["green"],
+                 width=160, height=34).pack(pady=14)
 
     def export_vault(self):
         path = filedialog.asksaveasfilename(
@@ -879,6 +1237,7 @@ class AppFrame(ctk.CTkFrame):
         self.render_dashboard()
         self.render_keys()
         self.render_projects()
+        self.render_scan()
 
     # ═══════════════════════════════════════════
     # DASHBOARD TAB
@@ -1098,6 +1457,12 @@ class AppFrame(ctk.CTkFrame):
             lbl.pack(side="left")
             lbl.bind("<Button-1>", lambda e, gk=group_key: self._toggle_group(gk))
 
+            # Show "+ Add Key" button on manual groups when grouping by file
+            if self._group_by == "file" and group_key != "Manual" and group_key != "manual":
+                clean_name = group_key.replace(".manual", "")
+                make_btn(hdr, "+ Add Key", lambda g=clean_name: self.add_group_manual(prefill_group=g),
+                         fg_color="transparent", text_color=C["text3"], width=70, height=18).pack(side="right")
+
             if not collapsed:
                 for name, info in items:
                     self._render_single_key(name, info)
@@ -1165,6 +1530,9 @@ class AppFrame(ctk.CTkFrame):
             meta_parts.append(f"Rotated {info['rotated'][:10]}")
         if info.get("rotation_count", 0) > 0:
             meta_parts.append(f"{info['rotation_count']}x rotated")
+        if info.get("first_used"):
+            use_days = days_since(info["first_used"])
+            meta_parts.append(f"In use {use_days}d")
 
         lbl_meta = ctk.CTkLabel(info_frame, text="  ·  ".join(meta_parts) if meta_parts else "",
                                  font=FONT_XS, text_color=C["text3"], cursor="hand2", anchor="w")
@@ -1272,35 +1640,105 @@ class AppFrame(ctk.CTkFrame):
         self.render_all()
         messagebox.showinfo("Done", msg)
 
-    def add_group_manual(self):
-        """Dialog to manually add multiple keys under one named group."""
+    def add_group_manual(self, prefill_group=None):
+        """Dialog to add keys to a new or existing group."""
+        # Collect existing groups from vault (source_file ending in .manual)
+        existing_groups = sorted({
+            info["source_file"].replace(".manual", "")
+            for info in self.vault.values()
+            if info.get("source_file", "").endswith(".manual")
+        })
+
         win = ctk.CTkToplevel(self)
-        win.title("Add Key Group")
-        win.geometry("560x540")
+        win.title("Add Keys to Group")
+        win.geometry("560x600")
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
 
-        ctk.CTkLabel(win, text="Add Key Group", font=FONT_H2, text_color=C["text"]).pack(anchor="w", padx=16, pady=(14, 2))
-        ctk.CTkLabel(win, text="All keys in this group will appear together in the vault.",
+        ctk.CTkLabel(win, text="Add Keys to Group", font=FONT_H2, text_color=C["text"]).pack(anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(win, text="Pick an existing group to add keys to it, or type a new name.",
                      font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 10))
 
-        # Group name row
+        # Group name section
         gf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
         gf.pack(fill="x", padx=16, pady=(0, 10))
-        top_row = ctk.CTkFrame(gf, fg_color="transparent")
-        top_row.pack(fill="x", padx=12, pady=10)
-        ctk.CTkLabel(top_row, text="GROUP NAME", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
-        group_var = tk.StringVar()
-        ctk.CTkEntry(top_row, textvariable=group_var, placeholder_text="e.g. plaid, stripe, alpaca",
-                     fg_color=C["bg3"], text_color=C["text"], width=260).pack(side="left")
 
-        # Scrollable key rows
-        ctk.CTkLabel(win, text="KEYS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 4))
-        scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0, height=280)
+        # Existing group picker (only shown if groups exist)
+        group_var = tk.StringVar(value=prefill_group or "")
+
+        if existing_groups:
+            picker_row = ctk.CTkFrame(gf, fg_color="transparent")
+            picker_row.pack(fill="x", padx=12, pady=(10, 4))
+            ctk.CTkLabel(picker_row, text="EXISTING GROUP", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left", padx=(0, 8))
+
+            existing_options = ["— new group —"] + existing_groups
+            picker_var = tk.StringVar(value=prefill_group if prefill_group in existing_groups else "— new group —")
+            picker = ctk.CTkOptionMenu(
+                picker_row, values=existing_options, variable=picker_var,
+                fg_color=C["bg3"], button_color=C["accent"], button_hover_color=C["accent2"],
+                text_color=C["text"], font=FONT_SM, width=240,
+            )
+            picker.pack(side="left")
+
+            def on_pick(choice):
+                if choice == "— new group —":
+                    group_var.set("")
+                    name_entry.configure(state="normal")
+                    name_entry.focus_set()
+                    _refresh_existing_preview("")
+                else:
+                    group_var.set(choice)
+                    name_entry.configure(state="normal")
+                    name_entry.delete(0, "end")
+                    name_entry.insert(0, choice)
+                    name_entry.configure(state="disabled")
+                    _refresh_existing_preview(choice)
+
+            picker.configure(command=on_pick)
+
+        name_row = ctk.CTkFrame(gf, fg_color="transparent")
+        name_row.pack(fill="x", padx=12, pady=(4, 10))
+        ctk.CTkLabel(name_row, text="GROUP NAME", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
+        name_entry = ctk.CTkEntry(name_row, textvariable=group_var,
+                                   placeholder_text="e.g. plaid, stripe, alpaca",
+                                   fg_color=C["bg3"], text_color=C["text"], width=260)
+        name_entry.pack(side="left")
+
+        # Existing keys preview (populated when picking an existing group)
+        preview_frame = ctk.CTkFrame(win, fg_color="transparent")
+        preview_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        def _refresh_existing_preview(group_name):
+            for w in preview_frame.winfo_children():
+                w.destroy()
+            if not group_name:
+                return
+            label = f"{group_name}.manual"
+            members = [(n, i) for n, i in self.vault.items() if i.get("source_file") == label]
+            if not members:
+                return
+            ctk.CTkLabel(preview_frame, text=f"EXISTING KEYS IN '{group_name.upper()}'",
+                         font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+            for kname, _ in sorted(members):
+                r = ctk.CTkFrame(preview_frame, fg_color=C["surface"], corner_radius=4)
+                r.pack(fill="x", pady=1)
+                ctk.CTkLabel(r, text=kname, font=FONT_MONO_SM,
+                             text_color=C["text2"]).pack(anchor="w", padx=10, pady=4)
+
+        # Pre-fill if coming from context menu
+        if prefill_group and prefill_group in existing_groups:
+            name_entry.configure(state="disabled")
+            _refresh_existing_preview(prefill_group)
+
+        # New key rows
+        ctk.CTkLabel(win, text="NEW KEYS TO ADD", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=16, pady=(4, 4))
+        scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0, height=200)
         scroll.pack(fill="x", padx=16)
 
-        key_rows = []  # list of (name_var, value_var, secret_var)
+        key_rows = []
 
         def add_row(name_hint="", secret=False):
             row = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=4)
@@ -1332,11 +1770,13 @@ class AppFrame(ctk.CTkFrame):
             make_btn(row, "✕", remove, fg_color=C["red_bg"], text_color=C["red"], width=30).pack(side="left", padx=(0, 8), pady=6)
             key_rows.append((nv, vv, sv))
 
-        # Start with two rows (common case: id + secret)
-        add_row("CLIENT_ID", False)
-        add_row("SECRET", True)
+        # Start with one blank row when adding to existing group, two for new
+        if prefill_group and prefill_group in existing_groups:
+            add_row()
+        else:
+            add_row("CLIENT_ID", False)
+            add_row("SECRET", True)
 
-        # Add row button
         btn_bar = ctk.CTkFrame(win, fg_color="transparent")
         btn_bar.pack(fill="x", padx=16, pady=(6, 0))
         make_btn(btn_bar, "+ Add Another Key", add_row).pack(side="left")
@@ -1641,6 +2081,7 @@ class AppFrame(ctk.CTkFrame):
                 if path and os.path.isdir(path):
                     try:
                         inject_env_file(path, self.vault, proj_keys if proj_keys else None)
+                        self._stamp_keys_used(relevant_keys)
                         count += 1
                     except Exception as e:
                         errors.append(f"{proj_name}: {e}")
@@ -1657,11 +2098,24 @@ class AppFrame(ctk.CTkFrame):
                     keys_to_write = proj_keys if proj_keys else None
                     try:
                         inject_env_file(path, self.vault, keys_to_write)
+                        self._stamp_keys_used([key_name])
                         count += 1
                     except Exception as e:
                         log_event(f"env inject failed for {path}: {e}")
                         errors.append(f"{proj_name}: {e}")
         return count, errors
+
+    def _stamp_keys_used(self, key_names):
+        now = datetime.now().isoformat()
+        changed = False
+        for name in key_names:
+            if name in self.vault:
+                if not self.vault[name].get("first_used"):
+                    self.vault[name]["first_used"] = now
+                self.vault[name]["last_used"] = now
+                changed = True
+        if changed:
+            self.save()
 
     def toggle_reveal(self, name):
         if name in self.revealed:
@@ -1684,6 +2138,27 @@ class AppFrame(ctk.CTkFrame):
             self.save()
             self.render_all()
 
+    def _apply_rotation(self, name, new_value):
+        info = self.vault[name]
+        now = datetime.now().isoformat()
+        old_val = info["value"]
+        info.setdefault("history", [])
+        info["history"].insert(0, {"value": old_val, "retired": now})
+        info["history"] = info["history"][:10]
+        info["previous"] = old_val
+        info["value"] = new_value
+        info["rotated"] = now
+        info["rotation_count"] = info.get("rotation_count", 0) + 1
+        self.save()
+        injected, errors = self._auto_inject_key(name)
+        self.render_all()
+        msg = f"{name} rotated"
+        if injected:
+            msg += f" and synced to {injected} project(s)"
+        if errors:
+            msg += f"\n\nSync failed for {len(errors)} project(s):\n" + "\n".join(errors)
+        return msg
+
     def rotate_key(self, name):
         info = self.vault.get(name)
         if not info:
@@ -1691,22 +2166,78 @@ class AppFrame(ctk.CTkFrame):
         provider = info.get("provider")
         prov_data = PROVIDERS.get(provider, {})
 
-        if prov_data.get("url"):
-            webbrowser.open(prov_data["url"])
+        API_ROTATE_PROVIDERS = {"OpenAI", "Anthropic", "AWS"}
+        can_api_rotate = provider in API_ROTATE_PROVIDERS
 
         win = ctk.CTkToplevel(self)
         win.title(f"Rotate {name}")
-        win.geometry("500x240")
+        win.geometry("520x420" if can_api_rotate else "500x240")
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
 
         ctk.CTkLabel(win, text=f"Rotate {name}", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
-        if provider:
-            ctk.CTkLabel(win, text=f"{provider} dashboard opened in browser — copy your new key",
-                         font=FONT_XS, text_color=C["text3"]).pack()
 
-        ctk.CTkLabel(win, text="PASTE NEW KEY VALUE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20, pady=(16, 2))
+        if can_api_rotate:
+            # ── API auto-rotation section ──
+            api_frame = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=4)
+            api_frame.pack(fill="x", padx=16, pady=(4, 8))
+            ctk.CTkLabel(api_frame, text="AUTO-ROTATE VIA API", font=FONT_XS,
+                         text_color=C["green"]).pack(anchor="w", padx=10, pady=(8, 2))
+
+            api_fields = {}
+            field_specs = {
+                "OpenAI": [("admin_key", "Admin API key (sk-admin-...)", True),
+                            ("key_id",   "Old key ID (optional, for deletion)", False)],
+                "Anthropic": [("admin_key", "Admin API key (sk-ant-admin-...)", True),
+                               ("key_id",   "Old key ID (to deactivate)", False)],
+                "AWS":      [("aws_secret", "Current AWS Secret Access Key", True),
+                              ("username",  "IAM username (blank = current user)", False)],
+            }
+            for field_key, label, required in field_specs.get(provider, []):
+                ctk.CTkLabel(api_frame, text=label.upper(), font=FONT_XS,
+                             text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 0))
+                e = ctk.CTkEntry(api_frame, font=FONT_MONO_SM, fg_color=C["bg3"],
+                                 text_color=C["text"], border_color=C["border2"], show="*" if required else "")
+                e.pack(fill="x", padx=10, pady=(0, 4))
+                api_fields[field_key] = e
+
+            status_lbl = ctk.CTkLabel(api_frame, text="", font=FONT_XS, text_color=C["text3"])
+            status_lbl.pack(anchor="w", padx=10, pady=(2, 8))
+
+            def do_api_rotate():
+                creds = {k: v.get().strip() for k, v in api_fields.items()}
+                status_lbl.configure(text="Rotating...", text_color=C["amber"])
+                win.update()
+                result = rotate_key_via_api(provider, info, creds)
+                if result.error and not result.partial:
+                    status_lbl.configure(text=result.error[:120], text_color=C["red"])
+                    return
+                if result.new_value and not result.partial:
+                    win.destroy()
+                    msg = self._apply_rotation(name, result.new_value)
+                    messagebox.showinfo("Auto-Rotated", msg)
+                elif result.partial:
+                    # Anthropic: old key deactivated, need new key pasted
+                    status_lbl.configure(text=result.error or "Old key deactivated. Paste new key below.", text_color=C["amber"])
+                    if prov_data.get("url"):
+                        webbrowser.open(prov_data["url"])
+
+            make_btn(api_frame, "Auto-Rotate Now", do_api_rotate,
+                     fg_color=C["green_bg"], text_color=C["green"], width=160).pack(padx=10, pady=(0, 8))
+
+            ctk.CTkLabel(win, text="— or paste manually —", font=FONT_XS,
+                         text_color=C["text3"]).pack(pady=(4, 0))
+        else:
+            if prov_data.get("url"):
+                webbrowser.open(prov_data["url"])
+            if provider:
+                ctk.CTkLabel(win, text=f"{provider} dashboard opened in browser — copy your new key",
+                             font=FONT_XS, text_color=C["text3"]).pack()
+
+        # ── Manual paste section (always shown) ──
+        ctk.CTkLabel(win, text="PASTE NEW KEY VALUE", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=20, pady=(12, 2))
         new_val = ctk.CTkEntry(win, font=FONT_MONO, fg_color=C["bg3"], text_color=C["text"],
                                border_color=C["border2"], width=440)
         new_val.pack(padx=20, ipady=4)
@@ -1717,28 +2248,13 @@ class AppFrame(ctk.CTkFrame):
             if not val:
                 messagebox.showwarning("Empty", "Paste the new key value")
                 return
-            now = datetime.now().isoformat()
-            old_val = info["value"]
-            info.setdefault("history", [])
-            info["history"].insert(0, {"value": old_val, "retired": now})
-            info["history"] = info["history"][:10]
-            info["previous"] = old_val
-            info["value"] = val
-            info["rotated"] = now
-            info["rotation_count"] = info.get("rotation_count", 0) + 1
-            self.save()
-            injected, errors = self._auto_inject_key(name)
             win.destroy()
-            self.render_all()
-            msg = f"{name} rotated"
-            if injected:
-                msg += f" and synced to {injected} project(s)"
-            if errors:
-                msg += f"\n\nSync failed for {len(errors)} project(s):\n" + "\n".join(errors)
+            msg = self._apply_rotation(name, val)
             messagebox.showinfo("Rotated", msg)
 
         new_val.bind("<Return>", lambda e: do_rotate())
-        make_btn(win, "Save & Sync", do_rotate, fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(pady=16)
+        make_btn(win, "Save & Sync", do_rotate, fg_color=C["green_bg"], text_color=C["green"],
+                 width=160, height=34).pack(pady=12)
 
     def show_source(self, name):
         info = self.vault.get(name, {})
@@ -1931,6 +2447,12 @@ class AppFrame(ctk.CTkFrame):
         info_field("CREATED", (info.get("created") or "")[:16].replace("T", " ") or "—", mono=True)
         info_field("LAST ROTATED", (info.get("rotated") or "")[:16].replace("T", " ") or "Never", mono=True)
         info_field("ROTATION COUNT", str(info.get("rotation_count", 0)))
+        if info.get("first_used"):
+            use_days = days_since(info["first_used"])
+            info_field("FIRST DEPLOYED", (info["first_used"])[:16].replace("T", " "), mono=True)
+            info_field("IN USE FOR", f"{use_days} days", fg=health_color(health_status(info)))
+        if info.get("last_used"):
+            info_field("LAST DEPLOYED", (info["last_used"])[:16].replace("T", " "), mono=True)
 
         age = days_since(info.get("rotated") or info.get("created"))
         age_str = f"{age} days" if age != float("inf") else "Unknown"
@@ -2032,6 +2554,168 @@ class AppFrame(ctk.CTkFrame):
         if template_path.exists():
             make_btn(btn_bar, "Open in Editor", lambda: os.startfile(str(template_path))).pack(side="left")
         make_btn(btn_bar, "Close", win.destroy, width=80).pack(side="right")
+
+    # ═══════════════════════════════════════════
+    # SECURITY SCAN TAB
+    # ═══════════════════════════════════════════
+
+    SCAN_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".json",
+                       ".yaml", ".yml", ".toml", ".sh", ".env.example",
+                       ".md", ".txt", ".cfg", ".ini", ".conf"}
+    SCAN_SKIP_DIRS  = {".git", "__pycache__", "node_modules", ".venv",
+                       "venv", ".mypy_cache", "dist", "build", ".next"}
+
+    def _run_scan(self):
+        findings = []
+        projects = self.config.get("projects", {})
+        scan_roots = {info["path"] for info in projects.values()
+                      if info.get("path") and os.path.isdir(info["path"])}
+        if not scan_roots:
+            return findings
+
+        # Build lookup: value -> key_name (skip very short / empty values)
+        value_map = {}
+        for name, info in self.vault.items():
+            val = info.get("value", "")
+            if val and len(val) >= 8:
+                value_map[val] = name
+
+        if not value_map:
+            return findings
+
+        for root in scan_roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                # Prune skip dirs in-place
+                dirnames[:] = [d for d in dirnames if d not in self.SCAN_SKIP_DIRS]
+                for fname in filenames:
+                    _, ext = os.path.splitext(fname)
+                    # Always skip .env (that's the intended home)
+                    if fname == ".env":
+                        continue
+                    if ext.lower() not in self.SCAN_EXTENSIONS and fname not in {".env.example"}:
+                        continue
+                    fpath = os.path.join(dirpath, fname)
+                    try:
+                        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                            for lineno, line in enumerate(f, 1):
+                                for val, key_name in value_map.items():
+                                    if val in line:
+                                        findings.append({
+                                            "key":    key_name,
+                                            "file":   fpath,
+                                            "line":   lineno,
+                                            "snippet": line.rstrip()[:120],
+                                        })
+                    except Exception:
+                        pass
+        return findings
+
+    def run_security_scan(self):
+        self._scan_results = self._run_scan()
+        self._scan_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_event(f"security scan: {len(self._scan_results)} finding(s)")
+        self.render_scan()
+
+    def render_scan(self):
+        for w in self.scan_frame.winfo_children():
+            w.destroy()
+
+        outer = ctk.CTkFrame(self.scan_frame, fg_color=C["bg"], corner_radius=0)
+        outer.pack(fill="both", expand=True)
+
+        # Header bar
+        hdr = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0, height=44)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="SECRET SCANNER", font=("Consolas", 11, "bold"),
+                     text_color=C["text"]).pack(side="left", padx=16)
+        if self._scan_ts:
+            ctk.CTkLabel(hdr, text=f"Last scan: {self._scan_ts}",
+                         font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=8)
+        make_btn(hdr, "Run Scan", self.run_security_scan,
+                 fg_color=C["amber_bg"], text_color=C["amber"]).pack(side="right", padx=12, pady=8)
+
+        scroll = ctk.CTkScrollableFrame(outer, fg_color=C["bg"], corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=0, pady=0)
+        pad = ctk.CTkFrame(scroll, fg_color="transparent")
+        pad.pack(fill="x", padx=20, pady=16)
+
+        if not self._scan_ts:
+            # Pre-scan state
+            ctk.CTkFrame(pad, fg_color="transparent", height=40).pack()
+            ctk.CTkLabel(pad, text="⚠", font=("Segoe UI", 32), text_color=C["amber"]).pack()
+            ctk.CTkLabel(pad, text="Scan your projects for exposed secrets",
+                         font=FONT_H2, text_color=C["text"]).pack(pady=(8, 4))
+            ctk.CTkLabel(pad, text="Finds vault key values hardcoded in source files outside of .env",
+                         font=FONT_XS, text_color=C["text3"]).pack()
+            exts = "  ".join(sorted(self.SCAN_EXTENSIONS))
+            ctk.CTkLabel(pad, text=f"Scans: {exts}", font=FONT_XS,
+                         text_color=C["text3"], wraplength=560).pack(pady=(8, 0))
+            make_btn(pad, "Run Scan Now", self.run_security_scan,
+                     fg_color=C["amber_bg"], text_color=C["amber"], width=160, height=34).pack(pady=24)
+            return
+
+        findings = self._scan_results
+        if not findings:
+            ctk.CTkFrame(pad, fg_color="transparent", height=40).pack()
+            ctk.CTkLabel(pad, text="✓", font=("Segoe UI", 32), text_color=C["green"]).pack()
+            ctk.CTkLabel(pad, text="No exposed secrets found", font=FONT_H2,
+                         text_color=C["green"]).pack(pady=(8, 4))
+            ctk.CTkLabel(pad, text="All scanned project files look clean.",
+                         font=FONT_XS, text_color=C["text3"]).pack()
+            return
+
+        # Group findings by key name
+        by_key = {}
+        for f in findings:
+            by_key.setdefault(f["key"], []).append(f)
+
+        ctk.CTkLabel(pad, text=f"{len(findings)} EXPOSURE(S) FOUND ACROSS {len(by_key)} KEY(S)",
+                     font=FONT_XS, text_color=C["red"]).pack(anchor="w", pady=(0, 12))
+
+        for key_name, hits in sorted(by_key.items()):
+            grp = ctk.CTkFrame(pad, fg_color=C["red_bg"], corner_radius=6)
+            grp.pack(fill="x", pady=(0, 10))
+
+            # Group header
+            ghdr = ctk.CTkFrame(grp, fg_color="transparent")
+            ghdr.pack(fill="x", padx=12, pady=(8, 4))
+            ctk.CTkLabel(ghdr, text=key_name, font=("Consolas", 10, "bold"),
+                         text_color=C["red"]).pack(side="left")
+            ctk.CTkLabel(ghdr, text=f"{len(hits)} file(s)", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left", padx=8)
+            make_btn(ghdr, "Rotate Now", lambda n=key_name: (self.rotate_key(n), self.render_scan()),
+                     fg_color=C["red_bg"], text_color=C["red"], width=90).pack(side="right")
+
+            # Hits
+            for hit in hits:
+                row = ctk.CTkFrame(grp, fg_color=C["surface"], corner_radius=4)
+                row.pack(fill="x", padx=10, pady=(0, 4))
+                loc = ctk.CTkFrame(row, fg_color="transparent")
+                loc.pack(fill="x", padx=10, pady=(6, 2))
+                short_path = hit["file"]
+                # Trim to last 3 path components for readability
+                parts = Path(hit["file"]).parts
+                short_path = str(Path(*parts[-3:])) if len(parts) > 3 else hit["file"]
+                ctk.CTkLabel(loc, text=f"{short_path}:{hit['line']}",
+                             font=FONT_MONO_SM, text_color=C["amber"]).pack(side="left")
+                make_btn(loc, "Open", lambda fp=hit["file"], ln=hit["line"]: self._open_file_at_line(fp, ln),
+                         width=50).pack(side="right")
+                snippet = hit["snippet"].strip()[:100]
+                ctk.CTkLabel(row, text=snippet, font=FONT_MONO_SM,
+                             text_color=C["text3"], anchor="w",
+                             wraplength=540).pack(anchor="w", padx=10, pady=(0, 6))
+
+    def _open_file_at_line(self, filepath, lineno):
+        try:
+            # Try VS Code first, fall back to OS default
+            import subprocess
+            result = subprocess.run(["code", "--goto", f"{filepath}:{lineno}"],
+                                    capture_output=True, timeout=3)
+            if result.returncode != 0:
+                raise OSError
+        except Exception:
+            webbrowser.open(f"file:///{filepath}")
 
     # ═══════════════════════════════════════════
     # PROJECTS TAB
@@ -2272,6 +2956,7 @@ class AppFrame(ctk.CTkFrame):
             win.destroy()
             try:
                 inject_env_file(path, self.vault, keys_to_write if keys_to_write else None)
+                self._stamp_keys_used(keys_to_write)
                 log_event(f"sync: wrote {len(keys_to_write)} keys to {path}/.env")
                 messagebox.showinfo("Synced", f".env written to:\n{path}\n\n{len(keys_to_write)} key(s) synced.")
             except Exception as e:
@@ -2382,6 +3067,7 @@ class PushkeyApp:
         self.switch(LoginFrame, on_login=self.on_login)
 
     def on_login(self, pw, vault):
+        write_health_sidecar(vault)
         self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login)
 
 
