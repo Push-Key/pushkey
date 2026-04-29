@@ -566,6 +566,154 @@ PROVIDERS = _load_providers()
 
 
 # ═══════════════════════════════════════════════
+# CI / CLOUD PLATFORM SYNC
+# ═══════════════════════════════════════════════
+
+def _github_encrypt_secret(public_key_b64: str, secret_value: str) -> str:
+    """Encrypt secret for GitHub Actions using libsodium sealed box."""
+    from nacl import encoding, public
+    pk = public.PublicKey(public_key_b64.encode(), encoding.Base64Encoder())
+    box = public.SealedBox(pk)
+    encrypted = box.encrypt(secret_value.encode())
+    import base64
+    return base64.b64encode(encrypted).decode()
+
+
+def sync_github_actions(owner: str, repo: str, token: str,
+                        keys: dict[str, str]) -> tuple[int, list[str]]:
+    """Push keys to GitHub Actions secrets. Returns (success_count, errors)."""
+    import urllib.request, urllib.error
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+    }
+    # Fetch repo public key
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/public-key",
+        headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            pk_data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return 0, [f"GitHub: failed to fetch public key: {e.code} {e.read().decode()[:200]}"]
+    except Exception as e:
+        return 0, [f"GitHub: {e}"]
+
+    pk_value = pk_data["key"]
+    pk_id = pk_data["key_id"]
+    success, errors = 0, []
+
+    for key_name, value in keys.items():
+        try:
+            encrypted = _github_encrypt_secret(pk_value, value)
+            body = json.dumps({"encrypted_value": encrypted, "key_id": pk_id}).encode()
+            put_req = urllib.request.Request(
+                f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/{key_name}",
+                data=body, headers=headers, method="PUT")
+            with urllib.request.urlopen(put_req, timeout=10) as r:
+                if r.status in (201, 204):
+                    success += 1
+                else:
+                    errors.append(f"{key_name}: unexpected status {r.status}")
+        except urllib.error.HTTPError as e:
+            errors.append(f"{key_name}: {e.code} {e.read().decode()[:100]}")
+        except Exception as e:
+            errors.append(f"{key_name}: {e}")
+
+    return success, errors
+
+
+def sync_vercel(token: str, project_id: str, env_target: str,
+                keys: dict[str, str]) -> tuple[int, list[str]]:
+    """Push keys to Vercel project environment variables."""
+    import urllib.request, urllib.error
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    success, errors = 0, []
+    targets = [env_target] if env_target != "all" else ["production", "preview", "development"]
+
+    for key_name, value in keys.items():
+        try:
+            body = json.dumps({
+                "key": key_name, "value": value,
+                "type": "encrypted", "target": targets,
+            }).encode()
+            req = urllib.request.Request(
+                f"https://api.vercel.com/v10/projects/{project_id}/env",
+                data=body, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10):
+                    success += 1
+            except urllib.error.HTTPError as e:
+                body_txt = e.read().decode()
+                if e.code == 409:   # already exists — try PATCH
+                    # list envs to find id
+                    list_req = urllib.request.Request(
+                        f"https://api.vercel.com/v10/projects/{project_id}/env",
+                        headers=headers)
+                    with urllib.request.urlopen(list_req, timeout=10) as r:
+                        envs = json.loads(r.read()).get("envs", [])
+                    existing = next((e for e in envs if e["key"] == key_name), None)
+                    if existing:
+                        patch_body = json.dumps({"value": value, "type": "encrypted",
+                                                  "target": targets}).encode()
+                        patch_req = urllib.request.Request(
+                            f"https://api.vercel.com/v10/projects/{project_id}/env/{existing['id']}",
+                            data=patch_body, headers=headers, method="PATCH")
+                        with urllib.request.urlopen(patch_req, timeout=10):
+                            success += 1
+                    else:
+                        errors.append(f"{key_name}: 409 conflict")
+                else:
+                    errors.append(f"{key_name}: {e.code} {body_txt[:100]}")
+        except Exception as e:
+            errors.append(f"{key_name}: {e}")
+
+    return success, errors
+
+
+def sync_railway(token: str, project_id: str, environment_id: str,
+                 keys: dict[str, str]) -> tuple[int, list[str]]:
+    """Push keys to Railway via GraphQL API."""
+    import urllib.request, urllib.error
+    query = """
+    mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
+      variableCollectionUpsert(input: $input)
+    }
+    """
+    variables_dict = {k: v for k, v in keys.items()}
+    body = json.dumps({
+        "query": query,
+        "variables": {
+            "input": {
+                "projectId": project_id,
+                "environmentId": environment_id,
+                "variables": variables_dict,
+            }
+        }
+    }).encode()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        req = urllib.request.Request("https://backboard.railway.app/graphql/v2",
+                                     data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            result = json.loads(r.read())
+        if result.get("errors"):
+            errs = [e.get("message", str(e)) for e in result["errors"]]
+            return 0, errs
+        return len(keys), []
+    except Exception as e:
+        return 0, [str(e)]
+
+
+# ═══════════════════════════════════════════════
 # ROTATION API CLIENT
 # ═══════════════════════════════════════════════
 
@@ -1305,6 +1453,8 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
         make_btn(top, "📜 Audit Log", self.show_log,
                  fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
+        make_btn(top, "🏛️ Policies", self.manage_policies,
+                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
         make_btn(top, "👥 Share", self.team_share,
                  fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
         make_btn(top, "📩 Team Import", self.team_import,
@@ -1345,7 +1495,8 @@ class AppFrame(ctk.CTkFrame):
         for f in (self.dash_frame, self.keys_frame, self.proj_frame, self.scan_frame):
             f.configure(fg_color=C["bg"])
 
-        self._scan_results = []   # cache last scan output
+        self._scan_results = []       # file scan cache
+        self._git_scan_results = []   # git history scan cache
         self._scan_ts = None
 
         self.render_all()
@@ -1569,6 +1720,105 @@ class AppFrame(ctk.CTkFrame):
         log_event("MFA disabled")
         messagebox.showinfo("MFA Disabled", "Two-factor authentication has been disabled.")
 
+    def manage_policies(self):
+        """Policy group editor — named permission sets for team sharing."""
+        policies = self.vault.get("_policies", {})
+
+        win = ctk.CTkToplevel(self)
+        win.title("🏛️ Policy Groups")
+        win.geometry("580x560")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="🏛️  Policy Groups", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text="Named permission sets for team vault exports. Apply a policy when sharing.",
+                     font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 10))
+
+        list_frame = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0, height=200)
+        list_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        def refresh_list():
+            for w in list_frame.winfo_children():
+                w.destroy()
+            if not policies:
+                ctk.CTkLabel(list_frame, text="No policies yet — create one below.",
+                             font=FONT_XS, text_color=C["text3"]).pack(pady=12)
+                return
+            for pname, pdata in policies.items():
+                row = ctk.CTkFrame(list_frame, fg_color=C["surface"], corner_radius=4)
+                row.pack(fill="x", pady=2)
+                left = ctk.CTkFrame(row, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+                ctk.CTkLabel(left, text=pname, font=("Consolas", 10, "bold"),
+                             text_color=C["accent"]).pack(anchor="w")
+                cats = ", ".join(pdata.get("allowed_categories", [])) or "all categories"
+                role = pdata.get("default_role", "editor")
+                ctk.CTkLabel(left, text=f"Role: {role}  ·  Categories: {cats}",
+                             font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+                make_btn(row, "🗑️", lambda p=pname: (policies.pop(p), _save_and_refresh()),
+                         fg_color=C["red_bg"], text_color=C["red"], width=30).pack(side="right", padx=8, pady=8)
+
+        def _save_and_refresh():
+            self.vault["_policies"] = policies
+            self.save()
+            refresh_list()
+
+        refresh_list()
+
+        # Create new policy
+        ctk.CTkFrame(win, fg_color=C["border"], height=1).pack(fill="x", padx=16, pady=(4, 8))
+        ctk.CTkLabel(win, text="CREATE NEW POLICY", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16)
+
+        nf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        nf.pack(fill="x", padx=16, pady=(4, 8))
+
+        nr = ctk.CTkFrame(nf, fg_color="transparent")
+        nr.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(nr, text="NAME", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
+        name_entry = ctk.CTkEntry(nr, font=FONT_SM, fg_color=C["bg3"],
+                                   text_color=C["text"], width=200, placeholder_text="e.g. frontend-team")
+        name_entry.pack(side="left")
+
+        rr = ctk.CTkFrame(nf, fg_color="transparent")
+        rr.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(rr, text="DEFAULT ROLE", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
+        role_var = tk.StringVar(value="editor")
+        ctk.CTkOptionMenu(rr, values=["owner", "editor", "viewer"], variable=role_var,
+                          fg_color=C["bg3"], button_color=C["bg4"], text_color=C["text"],
+                          font=FONT_XS, width=110).pack(side="left")
+
+        ctk.CTkLabel(nf, text="ALLOWED CATEGORIES  (unchecked = blocked)",
+                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 2))
+        cat_frame = ctk.CTkFrame(nf, fg_color="transparent")
+        cat_frame.pack(fill="x", padx=10, pady=(0, 8))
+        cat_vars = {}
+        all_cats = sorted(CAT_COLORS.keys())
+        for i, cat in enumerate(all_cats):
+            cv = tk.BooleanVar(value=True)
+            cat_vars[cat] = cv
+            emoji = CAT_EMOJI.get(cat, "🔑")
+            ctk.CTkCheckBox(cat_frame, text=f"{emoji} {cat}", variable=cv,
+                            fg_color=C["accent"], hover_color=C["accent2"],
+                            text_color=CAT_COLORS.get(cat, C["text"]),
+                            font=FONT_XS).grid(row=i//3, column=i%3, sticky="w", padx=4, pady=2)
+
+        def create_policy():
+            pname = name_entry.get().strip()
+            if not pname:
+                return
+            allowed = [c for c, v in cat_vars.items() if v.get()]
+            policies[pname] = {
+                "default_role": role_var.get(),
+                "allowed_categories": allowed,
+                "created": datetime.now().isoformat(),
+            }
+            name_entry.delete(0, "end")
+            _save_and_refresh()
+
+        make_btn(nf, "✅ Create Policy", create_policy,
+                 fg_color=C["green_bg"], text_color=C["green"], width=160).pack(pady=(0, 8))
+
     def show_log(self):
         entries = _log_decrypt_all()
         win = ctk.CTkToplevel(self)
@@ -1640,14 +1890,31 @@ class AppFrame(ctk.CTkFrame):
                                    button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_XS)
             om.pack(side="right", padx=8)
 
-        # Default role
+        # Policy group quick-apply
+        policies = self.vault.get("_policies", {})
         def_row = ctk.CTkFrame(win, fg_color="transparent")
-        def_row.pack(fill="x", padx=16, pady=(0, 8))
+        def_row.pack(fill="x", padx=16, pady=(0, 4))
         ctk.CTkLabel(def_row, text="SET ALL TO:", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
         for role in ROLES:
             make_btn(def_row, role.capitalize(),
                      lambda r=role: [v.set(r) for v in role_vars.values()],
                      fg_color=C["surface"], text_color=ROLE_COLORS[role], width=70, height=24).pack(side="left", padx=2)
+
+        if policies:
+            pol_row = ctk.CTkFrame(win, fg_color="transparent")
+            pol_row.pack(fill="x", padx=16, pady=(0, 8))
+            ctk.CTkLabel(pol_row, text="🏛️ APPLY POLICY:", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left", padx=(0, 8))
+            for pname, pdata in policies.items():
+                def apply_policy(pd=pdata):
+                    allowed_cats = set(pd.get("allowed_categories", list(CAT_COLORS.keys())))
+                    default_role = pd.get("default_role", "editor")
+                    for kname, rv in role_vars.items():
+                        cat = self.vault.get(kname, {}).get("category", "General")
+                        rv.set(default_role if cat in allowed_cats else "viewer")
+                make_btn(pol_row, pname, apply_policy,
+                         fg_color=C["bg4"], text_color=C["accent"],
+                         width=100, height=24).pack(side="left", padx=2)
 
         # Passphrase
         pf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=4)
@@ -3354,10 +3621,89 @@ class AppFrame(ctk.CTkFrame):
                         pass
         return findings
 
+    def _run_git_scan(self):
+        """Scan git history of linked projects for committed vault key values."""
+        findings = []
+        value_map = {info["value"]: name for name, info in self.vault.items()
+                     if info.get("value") and len(info["value"]) >= 8}
+        if not value_map:
+            return findings
+
+        import subprocess
+        scan_roots = {info["path"] for info in self.config.get("projects", {}).values()
+                      if info.get("path") and os.path.isdir(info["path"])}
+
+        for root in scan_roots:
+            # Check it's a git repo
+            check = subprocess.run(["git", "rev-parse", "--git-dir"],
+                                   cwd=root, capture_output=True, timeout=5)
+            if check.returncode != 0:
+                continue
+            try:
+                result = subprocess.run(
+                    ["git", "log", "--all", "-p", "--no-color", "--format=COMMIT:%H|%an|%ad|%s"],
+                    cwd=root, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=60
+                )
+                lines = result.stdout.splitlines()
+                current_commit = {}
+                current_file = ""
+                lineno = 0
+                for line in lines:
+                    if line.startswith("COMMIT:"):
+                        parts = line[7:].split("|", 3)
+                        current_commit = {
+                            "hash": parts[0][:8] if len(parts) > 0 else "?",
+                            "author": parts[1] if len(parts) > 1 else "?",
+                            "date": parts[2][:10] if len(parts) > 2 else "?",
+                            "message": parts[3][:60] if len(parts) > 3 else "",
+                        }
+                        lineno = 0
+                    elif line.startswith("diff --git"):
+                        # Extract file name
+                        parts = line.split(" b/", 1)
+                        current_file = parts[1] if len(parts) > 1 else line
+                        lineno = 0
+                    elif line.startswith("@@"):
+                        # Parse line number from hunk header
+                        try:
+                            hunk = line.split("+")[1].split(",")[0]
+                            lineno = int(hunk) - 1
+                        except Exception:
+                            lineno = 0
+                    elif line.startswith("+") and not line.startswith("+++"):
+                        lineno += 1
+                        for val, key_name in value_map.items():
+                            if val in line:
+                                findings.append({
+                                    "key": key_name,
+                                    "repo": root,
+                                    "file": current_file,
+                                    "line": lineno,
+                                    "commit": current_commit.get("hash", "?"),
+                                    "author": current_commit.get("author", "?"),
+                                    "date": current_commit.get("date", "?"),
+                                    "message": current_commit.get("message", ""),
+                                    "snippet": line[1:].strip()[:100],
+                                })
+                    elif line.startswith("-"):
+                        pass  # don't count deleted lines
+                    else:
+                        lineno += 1
+            except subprocess.TimeoutExpired:
+                findings.append({"key": "__error__", "repo": root,
+                                  "message": "Git scan timed out (large repo)", "file": "", "line": 0,
+                                  "commit": "", "author": "", "date": "", "snippet": ""})
+            except Exception as e:
+                pass
+        return findings
+
     def run_security_scan(self):
         self._scan_results = self._run_scan()
+        self._git_scan_results = self._run_git_scan()
         self._scan_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_event(f"security scan: {len(self._scan_results)} finding(s)")
+        log_event(f"security scan: {len(self._scan_results)} file finding(s), "
+                  f"{len(self._git_scan_results)} git finding(s)")
         self.render_scan()
 
     def render_scan(self):
@@ -3449,6 +3795,64 @@ class AppFrame(ctk.CTkFrame):
                 ctk.CTkLabel(row, text=snippet, font=FONT_MONO_SM,
                              text_color=C["text3"], anchor="w",
                              wraplength=540).pack(anchor="w", padx=10, pady=(0, 6))
+
+        # ── Git history scan results ──
+        git_findings = getattr(self, "_git_scan_results", [])
+        real_git = [f for f in git_findings if f.get("key") != "__error__"]
+        errors = [f for f in git_findings if f.get("key") == "__error__"]
+
+        ctk.CTkFrame(pad, fg_color=C["border"], height=1).pack(fill="x", pady=(16, 8))
+        ctk.CTkLabel(pad, text="🕵️  GIT HISTORY SCAN", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+
+        if not self._scan_ts:
+            ctk.CTkLabel(pad, text="Run scan above to also check git commit history.",
+                         font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+        elif not real_git and not errors:
+            ctk.CTkLabel(pad, text="✅  No secrets found in git history.",
+                         font=FONT_XS, text_color=C["green"]).pack(anchor="w")
+        else:
+            if errors:
+                for e in errors:
+                    ctk.CTkLabel(pad, text=f"⚠️  {e.get('message', 'scan error')} — {e.get('repo', '')}",
+                                 font=FONT_XS, text_color=C["amber"]).pack(anchor="w")
+
+            if real_git:
+                by_key = {}
+                for f in real_git:
+                    by_key.setdefault(f["key"], []).append(f)
+
+                ctk.CTkLabel(pad,
+                             text=f"⚠️  {len(real_git)} commit(s) contain vault key values — rotation alone is NOT enough.\n"
+                                  f"    Use BFG Repo-Cleaner or git filter-repo to purge history.",
+                             font=FONT_XS, text_color=C["amber"], wraplength=560, justify="left").pack(anchor="w", pady=(0, 8))
+
+                for key_name, hits in sorted(by_key.items()):
+                    grp = ctk.CTkFrame(pad, fg_color=C["amber_bg"], corner_radius=6)
+                    grp.pack(fill="x", pady=(0, 8))
+                    ghdr = ctk.CTkFrame(grp, fg_color="transparent")
+                    ghdr.pack(fill="x", padx=12, pady=(8, 4))
+                    ctk.CTkLabel(ghdr, text=key_name, font=("Consolas", 10, "bold"),
+                                 text_color=C["amber"]).pack(side="left")
+                    ctk.CTkLabel(ghdr, text=f"{len(hits)} commit(s)", font=FONT_XS,
+                                 text_color=C["text3"]).pack(side="left", padx=8)
+                    make_btn(ghdr, "Rotate Now",
+                             lambda n=key_name: (self.rotate_key(n), self.render_scan()),
+                             fg_color=C["amber_bg"], text_color=C["amber"], width=90).pack(side="right")
+
+                    for hit in hits[:5]:   # cap at 5 per key to avoid huge lists
+                        row = ctk.CTkFrame(grp, fg_color=C["surface"], corner_radius=4)
+                        row.pack(fill="x", padx=10, pady=(0, 3))
+                        meta = f"commit {hit['commit']}  ·  {hit['author']}  ·  {hit['date']}  ·  {hit['file']}"
+                        ctk.CTkLabel(row, text=meta, font=FONT_XS,
+                                     text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 0))
+                        ctk.CTkLabel(row, text=hit.get("message", ""), font=FONT_XS,
+                                     text_color=C["text2"]).pack(anchor="w", padx=10)
+                        ctk.CTkLabel(row, text=hit.get("snippet", "")[:100], font=FONT_MONO_SM,
+                                     text_color=C["red"], wraplength=520).pack(anchor="w", padx=10, pady=(0, 6))
+                    if len(hits) > 5:
+                        ctk.CTkLabel(grp, text=f"  …and {len(hits)-5} more commit(s)",
+                                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=12, pady=(0, 6))
 
     def _open_file_at_line(self, filepath, lineno):
         try:
@@ -3567,11 +3971,13 @@ class AppFrame(ctk.CTkFrame):
 
             btn_f = ctk.CTkFrame(card, fg_color="transparent")
             btn_f.pack(side="right", padx=8, pady=8)
-            make_btn(btn_f, "Sync now", lambda p=proj_name: self.sync_project(p),
-                     fg_color=C["accent"], text_color="white", width=80).pack(pady=2)
-            make_btn(btn_f, "Assign Keys", lambda p=proj_name: self.assign_keys_to_project(p), width=80).pack(pady=2)
-            make_btn(btn_f, "Remove", lambda p=proj_name: self.remove_project(p),
-                     fg_color=C["red_bg"], text_color="#FCA5A5", width=80).pack(pady=2)
+            make_btn(btn_f, "🔄 Sync .env", lambda p=proj_name: self.sync_project(p),
+                     fg_color=C["accent"], text_color="white", width=90).pack(pady=2)
+            make_btn(btn_f, "☁️ CI Sync", lambda p=proj_name: self.ci_sync_project(p),
+                     fg_color=C["bg4"], text_color=C["accent"], width=90).pack(pady=2)
+            make_btn(btn_f, "🔑 Assign Keys", lambda p=proj_name: self.assign_keys_to_project(p), width=90).pack(pady=2)
+            make_btn(btn_f, "🗑️ Remove", lambda p=proj_name: self.remove_project(p),
+                     fg_color=C["red_bg"], text_color="#FCA5A5", width=90).pack(pady=2)
 
     def browse_folder(self):
         onedrive_desktop = Path.home() / "OneDrive" / "Desktop"
@@ -3731,6 +4137,127 @@ class AppFrame(ctk.CTkFrame):
 
         make_btn(btn_f, "Confirm & Write .env", confirm, fg_color=C["green_bg"], text_color=C["green"], width=160).pack(side="left")
         make_btn(btn_f, "Cancel", win.destroy, width=80).pack(side="left", padx=(8, 0))
+
+    def ci_sync_project(self, proj_name):
+        proj = self.config["projects"].get(proj_name, {})
+        assigned = set(proj.get("keys", []))
+        keys_to_sync = {k: self.vault[k]["value"] for k in assigned if k in self.vault}
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"☁️ CI Sync — {proj_name}")
+        win.geometry("540x560")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="☁️  CI / Cloud Sync", font=FONT_H2,
+                     text_color=C["text"]).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"Push {len(keys_to_sync)} key(s) to your cloud platform",
+                     font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 12))
+
+        # Platform selector
+        platform_var = tk.StringVar(value=proj.get("ci_platform", "GitHub Actions"))
+        platforms = ["GitHub Actions", "Vercel", "Railway"]
+        ctk.CTkLabel(win, text="PLATFORM", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20)
+        platform_menu = ctk.CTkOptionMenu(win, values=platforms, variable=platform_var,
+                                          fg_color=C["bg3"], button_color=C["accent"],
+                                          button_hover_color=C["accent2"],
+                                          text_color=C["text"], font=FONT_SM, width=200)
+        platform_menu.pack(anchor="w", padx=20, pady=(2, 10))
+
+        # Dynamic fields frame
+        fields_frame = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        fields_frame.pack(fill="x", padx=20, pady=(0, 8))
+        field_entries = {}
+
+        PLATFORM_FIELDS = {
+            "GitHub Actions": [
+                ("github_owner", "GitHub owner / org", False),
+                ("github_repo",  "Repository name",   False),
+                ("github_token", "Personal access token (repo scope)", True),
+            ],
+            "Vercel": [
+                ("vercel_token",      "Vercel API token",  True),
+                ("vercel_project_id", "Project ID",        False),
+                ("vercel_target",     "Environment (production/preview/development/all)", False),
+            ],
+            "Railway": [
+                ("railway_token",      "Railway API token",  True),
+                ("railway_project_id", "Project ID",         False),
+                ("railway_env_id",     "Environment ID",     False),
+            ],
+        }
+
+        def refresh_fields(*_):
+            for w in fields_frame.winfo_children():
+                w.destroy()
+            field_entries.clear()
+            plat = platform_var.get()
+            for key, label, secret in PLATFORM_FIELDS.get(plat, []):
+                ctk.CTkLabel(fields_frame, text=label.upper(),
+                             font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
+                saved = proj.get(key, "")
+                e = ctk.CTkEntry(fields_frame, font=FONT_MONO_SM, fg_color=C["bg3"],
+                                 text_color=C["text"], show="*" if secret else "",
+                                 border_color=C["border2"])
+                if saved:
+                    e.insert(0, saved)
+                e.pack(fill="x", padx=10, pady=(0, 4), ipady=2)
+                field_entries[key] = e
+
+        platform_var.trace_add("write", refresh_fields)
+        refresh_fields()
+
+        status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"],
+                                   wraplength=480, justify="left")
+        status_lbl.pack(padx=20, pady=(4, 0))
+
+        def do_sync():
+            plat = platform_var.get()
+            creds = {k: e.get().strip() for k, e in field_entries.items()}
+            # Persist non-secret creds
+            for k, v in creds.items():
+                if "token" not in k:
+                    proj[k] = v
+            proj["ci_platform"] = plat
+            save_config(self.config)
+
+            status_lbl.configure(text="Syncing…", text_color=C["amber"])
+            win.update()
+
+            if plat == "GitHub Actions":
+                ok, errs = sync_github_actions(
+                    creds.get("github_owner", ""),
+                    creds.get("github_repo", ""),
+                    creds.get("github_token", ""),
+                    keys_to_sync)
+            elif plat == "Vercel":
+                ok, errs = sync_vercel(
+                    creds.get("vercel_token", ""),
+                    creds.get("vercel_project_id", ""),
+                    creds.get("vercel_target", "production"),
+                    keys_to_sync)
+            elif plat == "Railway":
+                ok, errs = sync_railway(
+                    creds.get("railway_token", ""),
+                    creds.get("railway_project_id", ""),
+                    creds.get("railway_env_id", ""),
+                    keys_to_sync)
+            else:
+                ok, errs = 0, ["Unknown platform"]
+
+            if errs:
+                status_lbl.configure(
+                    text=f"⚠️  {ok} synced, {len(errs)} error(s):\n" + "\n".join(errs[:3]),
+                    text_color=C["amber"])
+            else:
+                log_event(f"CI sync: {ok} key(s) → {plat} for {proj_name}")
+                status_lbl.configure(
+                    text=f"✅  {ok} key(s) synced to {plat} successfully.",
+                    text_color=C["green"])
+
+        make_btn(win, "☁️ Push to Cloud", do_sync,
+                 fg_color=C["accent"], text_color="white", width=180, height=34).pack(pady=12)
 
     def _auto_match_keys(self, proj_name):
         prefix = re.sub(r"[^A-Z0-9]", "_", proj_name.upper())
