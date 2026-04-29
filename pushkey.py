@@ -54,6 +54,98 @@ PROVIDERS_CACHE = VAULT_DIR / "providers.json"
 PROVIDERS_REGISTRY_URL = "https://raw.githubusercontent.com/ebothegreat/pushkey/main/providers.json"
 IMPORT_DIR = VAULT_DIR / "import"
 MFA_FILE = VAULT_DIR / ".mfa"          # encrypted TOTP secret + backup codes
+LICENSE_FILE = VAULT_DIR / ".license"  # encrypted license record
+
+# ── Tier definitions ──────────────────────────────────────────
+TIERS = {
+    "free": {
+        "label": "Free",
+        "max_keys": 15,
+        "max_projects": 1,
+        "max_devices": 1,
+        "cloud_sync": False,
+        "ci_sync": False,
+        "team_rbac": False,
+        "hardware_mfa": False,
+        "sso": False,
+        "dynamic_secrets": False,
+        "git_scan": False,
+        "color": "#64748B",
+        "emoji": "🆓",
+    },
+    "starter": {
+        "label": "Starter",
+        "max_keys": 50,
+        "max_projects": 3,
+        "max_devices": 1,
+        "cloud_sync": True,
+        "ci_sync": False,
+        "team_rbac": False,
+        "hardware_mfa": False,
+        "sso": False,
+        "dynamic_secrets": False,
+        "git_scan": True,
+        "color": "#60A5FA",
+        "emoji": "🚀",
+    },
+    "pro": {
+        "label": "Pro",
+        "max_keys": None,
+        "max_projects": None,
+        "max_devices": 3,
+        "cloud_sync": True,
+        "ci_sync": True,
+        "team_rbac": False,
+        "hardware_mfa": False,
+        "sso": False,
+        "dynamic_secrets": False,
+        "git_scan": True,
+        "color": "#A78BFA",
+        "emoji": "⚡",
+    },
+    "team": {
+        "label": "Team",
+        "max_keys": None,
+        "max_projects": None,
+        "max_devices": 5,
+        "cloud_sync": True,
+        "ci_sync": True,
+        "team_rbac": True,
+        "hardware_mfa": False,
+        "sso": False,
+        "dynamic_secrets": False,
+        "git_scan": True,
+        "color": "#34D399",
+        "emoji": "👥",
+    },
+    "enterprise": {
+        "label": "Enterprise",
+        "max_keys": None,
+        "max_projects": None,
+        "max_devices": None,
+        "cloud_sync": True,
+        "ci_sync": True,
+        "team_rbac": True,
+        "hardware_mfa": True,
+        "sso": True,
+        "dynamic_secrets": True,
+        "git_scan": True,
+        "color": "#F59E0B",
+        "emoji": "🏛️",
+    },
+}
+
+UPGRADE_MESSAGES = {
+    "max_keys":        ("🔑 Key limit reached",         "Upgrade to add more keys.",             "starter"),
+    "max_projects":    ("📁 Project limit reached",     "Upgrade to link more projects.",        "starter"),
+    "cloud_sync":      ("☁️ Cloud sync is Pro+",        "Upgrade for encrypted cloud backup.",   "starter"),
+    "ci_sync":         ("⚡ CI sync is Pro+",            "Upgrade to push to GitHub/Vercel.",     "pro"),
+    "team_rbac":       ("👥 Team RBAC is Team+",         "Upgrade to share with your team.",      "team"),
+    "hardware_mfa":    ("🔐 YubiKey is Enterprise",     "Upgrade for hardware MFA.",             "enterprise"),
+    "sso":             ("🏛️ SSO is Enterprise",          "Upgrade for SAML/Okta/Azure AD.",       "enterprise"),
+    "dynamic_secrets": ("⚙️ Dynamic secrets is Enterprise", "Upgrade for lease-based secrets.", "enterprise"),
+    "git_scan":        ("🕵️ Git scan is Starter+",       "Upgrade to scan commit history.",       "starter"),
+}
 
 VAULT_SCHEMA_VERSION = 2
 ENV_LEVELS = ["all", "dev", "staging", "prod"]
@@ -487,6 +579,160 @@ def mfa_generate_secret(account_name: str = "Pushkey") -> tuple[str, str]:
 
 def mfa_generate_backup_codes() -> list[str]:
     return [secrets.token_hex(4).upper() for _ in range(10)]
+
+
+# ═══════════════════════════════════════════════
+# LICENSE ENGINE
+# ═══════════════════════════════════════════════
+
+_LICENSE_CACHE: dict | None = None
+_LICENSE_GRACE_DAYS = 3   # offline grace period
+
+
+def _license_key() -> bytes:
+    salt = get_or_create_salt()
+    return hashlib.pbkdf2_hmac("sha256", b"pushkey-license-key", salt, iterations=100_000)
+
+
+def _license_encrypt(data: dict) -> bytes:
+    key = _license_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(data).encode(), None)
+    return nonce + ct
+
+
+def _license_decrypt(raw: bytes) -> dict:
+    key = _license_key()
+    nonce, ct = raw[:12], raw[12:]
+    return json.loads(AESGCM(key).decrypt(nonce, ct, None))
+
+
+def load_license() -> dict:
+    global _LICENSE_CACHE
+    if _LICENSE_CACHE is not None:
+        return _LICENSE_CACHE
+    if not LICENSE_FILE.exists():
+        _LICENSE_CACHE = {"tier": "free"}
+        return _LICENSE_CACHE
+    try:
+        data = _license_decrypt(LICENSE_FILE.read_bytes())
+        # Validate expiry
+        expires = data.get("expires")
+        if expires:
+            exp_dt = datetime.fromisoformat(expires)
+            grace = exp_dt + timedelta(days=_LICENSE_GRACE_DAYS)
+            if datetime.now() > grace:
+                _LICENSE_CACHE = {"tier": "free", "_expired": True}
+                return _LICENSE_CACHE
+        _LICENSE_CACHE = data
+        return data
+    except Exception:
+        _LICENSE_CACHE = {"tier": "free"}
+        return _LICENSE_CACHE
+
+
+def save_license(data: dict) -> None:
+    global _LICENSE_CACHE
+    ensure_vault_dir()
+    LICENSE_FILE.write_bytes(_license_encrypt(data))
+    _LICENSE_CACHE = data
+
+
+def current_tier() -> str:
+    return load_license().get("tier", "free")
+
+
+def tier_limits() -> dict:
+    return TIERS.get(current_tier(), TIERS["free"])
+
+
+def can_do(feature: str) -> bool:
+    """Check boolean feature flag for current tier."""
+    return bool(tier_limits().get(feature, False))
+
+
+def within_limit(resource: str, current_count: int) -> bool:
+    """Check numeric limit. None = unlimited."""
+    limit = tier_limits().get(resource)
+    if limit is None:
+        return True
+    return current_count < limit
+
+
+def activate_license(license_key: str) -> tuple[bool, str]:
+    """
+    Validate and activate a license key.
+    Format: TIER-XXXXXXXX-XXXXXXXX-XXXXXXXX (base32 encoded payload + checksum)
+    Returns (success, message).
+    """
+    try:
+        parts = license_key.strip().upper().split("-")
+        if len(parts) < 2:
+            return False, "Invalid license key format"
+
+        tier_code = parts[0].lower()
+        tier_map = {"free": "free", "strt": "starter", "pro": "pro",
+                    "team": "team", "ent": "enterprise",
+                    "ltdp": "pro", "ltdt": "team"}   # LTD codes
+        tier = tier_map.get(tier_code)
+        if not tier:
+            return False, f"Unknown tier code: {tier_code}"
+
+        # Checksum: last segment must match SHA-256 of joined middle segments
+        payload_parts = parts[1:-1]
+        checksum = parts[-1]
+        expected = hashlib.sha256("-".join(payload_parts).encode()).hexdigest()[:8].upper()
+        if checksum != expected:
+            return False, "License key checksum invalid — check for typos"
+
+        # Decode payload: base32 → JSON with tier, expiry, seats, email
+        import base64 as _b64
+        try:
+            raw_payload = _b64.b32decode("".join(payload_parts) + "=" * 4)
+            payload = json.loads(raw_payload)
+        except Exception:
+            # Simple license: no payload, just tier + valid checksum
+            payload = {}
+
+        expiry = payload.get("expires")    # ISO date string or None (lifetime)
+        seats  = payload.get("seats", 1)
+        email  = payload.get("email", "")
+
+        data = {
+            "tier": tier,
+            "license_key": license_key.strip(),
+            "activated": datetime.now().isoformat(),
+            "expires": expiry,
+            "seats": seats,
+            "email": email,
+            "lifetime": expiry is None,
+        }
+        save_license(data)
+        log_event(f"license activated: {tier} {'(lifetime)' if not expiry else expiry}")
+        return True, f"✅ {TIERS[tier]['emoji']} {TIERS[tier]['label']} license activated!"
+
+    except Exception as e:
+        return False, f"Activation error: {e}"
+
+
+def generate_license_key(tier: str, expires: str | None = None,
+                         seats: int = 1, email: str = "") -> str:
+    """
+    Dev utility — generate a valid license key for testing.
+    Production keys should be generated server-side.
+    """
+    import base64 as _b64
+    tier_codes = {"free": "FREE", "starter": "STRT", "pro": "PRO",
+                  "team": "TEAM", "enterprise": "ENT"}
+    code = tier_codes.get(tier, "PRO")
+    payload = json.dumps({"tier": tier, "expires": expires,
+                           "seats": seats, "email": email}).encode()
+    b32 = _b64.b32encode(payload).decode().rstrip("=")
+    # Split into 8-char chunks
+    chunks = [b32[i:i+8] for i in range(0, len(b32), 8)]
+    payload_str = "-".join(chunks)
+    checksum = hashlib.sha256(payload_str.encode()).hexdigest()[:8].upper()
+    return f"{code}-{payload_str}-{checksum}"
 
 
 # ═══════════════════════════════════════════════
@@ -1439,6 +1685,12 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkLabel(brand, text="●", font=("Segoe UI", 10), text_color=C["accent"]).pack(side="left", padx=(0, 6))
         ctk.CTkLabel(brand, text="PUSHKEY", font=("Consolas", 13, "bold"), text_color=C["text"]).pack(side="left")
         ctk.CTkLabel(brand, text=" vault", font=FONT_XS, text_color=C["text3"]).pack(side="left")
+        # Tier badge
+        t = TIERS[current_tier()]
+        tier_lbl = ctk.CTkLabel(brand, text=f"  {t['emoji']} {t['label']}",
+                                 font=FONT_XS, text_color=t["color"], cursor="hand2")
+        tier_lbl.pack(side="left", padx=(8, 0))
+        tier_lbl.bind("<Button-1>", lambda e: self._enter_license())
 
         make_btn(top, "🔒 Lock", self.lock, fg_color=C["red_bg"], text_color=C["red"]).pack(side="right", padx=(4, 12), pady=10)
         make_btn(top, "🔑 Password", self.change_master_password).pack(side="right", padx=2, pady=10)
@@ -1506,6 +1758,106 @@ class AppFrame(ctk.CTkFrame):
         save_vault(self.vault, self.password)
         save_config(self.config)
         write_health_sidecar(self.vault)
+
+    # ── License gate ─────────────────────────────────────────
+    def _gate(self, feature: str, current_count: int = 0) -> bool:
+        """
+        Returns True if allowed. Shows upgrade prompt and returns False if blocked.
+        feature: key from UPGRADE_MESSAGES or 'max_keys'/'max_projects' etc.
+        """
+        # Numeric limits
+        if feature in ("max_keys", "max_projects"):
+            if within_limit(feature, current_count):
+                return True
+        # Boolean feature flags
+        elif can_do(feature):
+            return True
+
+        if feature not in UPGRADE_MESSAGES:
+            return True   # unknown feature — let through
+
+        title, body, min_tier = UPGRADE_MESSAGES[feature]
+        tier_data = TIERS[min_tier]
+        limits = tier_limits()
+        tier_name = TIERS[current_tier()]["label"]
+
+        win = ctk.CTkToplevel(self)
+        win.title("Upgrade Pushkey")
+        win.geometry("440x320")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text=title, font=FONT_H2, text_color=C["amber"]).pack(pady=(20, 4))
+        ctk.CTkLabel(win, text=body, font=FONT_XS, text_color=C["text3"]).pack()
+
+        # Current vs needed
+        sf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        sf.pack(fill="x", padx=24, pady=16)
+        row = ctk.CTkFrame(sf, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=12)
+        ctk.CTkLabel(row, text=f"Your plan:  {TIERS[current_tier()]['emoji']} {tier_name}",
+                     font=FONT_SM, text_color=C["text3"]).pack(anchor="w")
+        ctk.CTkLabel(row, text=f"Required:   {tier_data['emoji']} {tier_data['label']}+",
+                     font=FONT_SM, text_color=tier_data["color"]).pack(anchor="w", pady=(4, 0))
+
+        if feature == "max_keys":
+            limit = tier_limits().get("max_keys")
+            ctk.CTkLabel(row, text=f"Keys used:  {current_count} / {limit}",
+                         font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(4, 0))
+        if feature == "max_projects":
+            limit = tier_limits().get("max_projects")
+            ctk.CTkLabel(row, text=f"Projects:   {current_count} / {limit}",
+                         font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(4, 0))
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(0, 16))
+        make_btn(btn_row, f"Enter License Key", lambda: (win.destroy(), self._enter_license()),
+                 fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(side="left")
+        make_btn(btn_row, "Not now", win.destroy, width=90, height=34).pack(side="right")
+
+        return False
+
+    def _enter_license(self):
+        win = ctk.CTkToplevel(self)
+        win.title("🔑 Activate License")
+        win.geometry("480x260")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        tier_data = TIERS[current_tier()]
+        ctk.CTkLabel(win, text="🔑 Activate License", font=FONT_H2,
+                     text_color=C["text"]).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"Current plan: {tier_data['emoji']} {tier_data['label']}",
+                     font=FONT_XS, text_color=tier_data["color"]).pack()
+
+        ctk.CTkLabel(win, text="LICENSE KEY", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=20, pady=(16, 2))
+        key_entry = ctk.CTkEntry(win, font=FONT_MONO_SM, fg_color=C["bg3"],
+                                  text_color=C["text"], border_color=C["border2"],
+                                  placeholder_text="PRO-XXXXXXXX-XXXXXXXX-XXXXXXXX")
+        key_entry.pack(fill="x", padx=20, ipady=4)
+        key_entry.focus_set()
+
+        msg_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"],
+                                wraplength=420)
+        msg_lbl.pack(pady=(6, 0))
+
+        def activate():
+            ok, msg = activate_license(key_entry.get())
+            if ok:
+                global _LICENSE_CACHE
+                _LICENSE_CACHE = None   # force reload
+                msg_lbl.configure(text=msg, text_color=C["green"])
+                self.render_all()
+                self.after(1500, win.destroy)
+            else:
+                msg_lbl.configure(text=f"❌ {msg}", text_color=C["red"])
+
+        key_entry.bind("<Return>", lambda e: activate())
+        make_btn(win, "✅ Activate", activate,
+                 fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(pady=12)
 
     def lock(self):
         self.revealed.clear()
@@ -1852,6 +2204,8 @@ class AppFrame(ctk.CTkFrame):
                                 f"  {total} total providers loaded")
 
     def team_share(self):
+        if not self._gate("team_rbac"):
+            return
         ROLES = ["owner", "editor", "viewer"]
         ROLE_COLORS = {"owner": C["green"], "editor": C["amber"], "viewer": C["text3"]}
         ROLE_PERMS = {
@@ -2106,18 +2460,22 @@ class AppFrame(ctk.CTkFrame):
         pad.pack(fill="x", padx=20, pady=(16, 0))
 
         keys = list(self.vault.items())
-        total = len(keys)
-        healthy = sum(1 for _, v in keys if health_status(v) == "healthy")
-        warning = sum(1 for _, v in keys if health_status(v) == "warning")
-        critical = sum(1 for _, v in keys if health_status(v) == "critical")
+        real_keys = [(n, v) for n, v in keys if not n.startswith("_")]
+        total = len(real_keys)
+        healthy = sum(1 for _, v in real_keys if health_status(v) == "healthy")
+        warning = sum(1 for _, v in real_keys if health_status(v) == "warning")
+        critical = sum(1 for _, v in real_keys if health_status(v) == "critical")
         projects = len(self.config.get("projects", {}))
+        key_limit = tier_limits().get("max_keys")
 
         # Stats row
         stats_frame = ctk.CTkFrame(pad, fg_color="transparent")
         stats_frame.pack(fill="x", pady=(0, 16))
 
+        key_display = f"{total} / {key_limit}" if key_limit else str(total)
+        key_color = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
         for emoji, label, val, color in [
-            ("🔑", "Total keys",      str(total),             C["text"]),
+            ("🔑", "Total keys",      key_display,            key_color),
             ("🟢", "Healthy",         str(healthy),           C["green"]),
             ("⚠️",  "Needs rotation", str(warning + critical), C["amber"] if warning + critical > 0 else C["green"]),
             ("📁", "Projects linked", str(projects),          C["accent"]),
@@ -2542,6 +2900,12 @@ class AppFrame(ctk.CTkFrame):
         if not name or not value:
             messagebox.showwarning("Missing info", "Enter both a key name and value")
             return
+
+        # Only gate new keys, not rotations of existing
+        if name not in self.vault:
+            real_keys = [k for k in self.vault if not k.startswith("_")]
+            if not self._gate("max_keys", len(real_keys)):
+                return
 
         provider = detect_provider(name, value)
         now = datetime.now().isoformat()
@@ -3700,7 +4064,7 @@ class AppFrame(ctk.CTkFrame):
 
     def run_security_scan(self):
         self._scan_results = self._run_scan()
-        self._git_scan_results = self._run_git_scan()
+        self._git_scan_results = self._run_git_scan() if self._gate("git_scan") else []
         self._scan_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_event(f"security scan: {len(self._scan_results)} file finding(s), "
                   f"{len(self._git_scan_results)} git finding(s)")
@@ -4000,6 +4364,10 @@ class AppFrame(ctk.CTkFrame):
             messagebox.showwarning("Invalid path", f"Folder not found:\n{path}")
             return
 
+        proj_count = len(self.config.get("projects", {}))
+        if not self._gate("max_projects", proj_count):
+            return
+
         if "projects" not in self.config:
             self.config["projects"] = {}
 
@@ -4139,6 +4507,8 @@ class AppFrame(ctk.CTkFrame):
         make_btn(btn_f, "Cancel", win.destroy, width=80).pack(side="left", padx=(8, 0))
 
     def ci_sync_project(self, proj_name):
+        if not self._gate("ci_sync"):
+            return
         proj = self.config["projects"].get(proj_name, {})
         assigned = set(proj.get("keys", []))
         keys_to_sync = {k: self.vault[k]["value"] for k in assigned if k in self.vault}
