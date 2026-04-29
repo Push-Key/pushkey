@@ -55,6 +55,14 @@ PROVIDERS_REGISTRY_URL = "https://raw.githubusercontent.com/ebothegreat/pushkey/
 IMPORT_DIR = VAULT_DIR / "import"
 MFA_FILE = VAULT_DIR / ".mfa"          # encrypted TOTP secret + backup codes
 LICENSE_FILE = VAULT_DIR / ".license"  # encrypted license record
+TOKEN_FILE   = VAULT_DIR / ".token"    # activation token from server
+FIDO2_FILE   = VAULT_DIR / ".fido2"   # encrypted FIDO2 credential
+SSO_FILE     = VAULT_DIR / ".sso"     # encrypted OIDC session
+LEASES_FILE  = VAULT_DIR / "leases.json"  # dynamic secret leases
+HEALTH_PORT  = 7654                   # local HTTP for browser extension
+
+ACTIVATION_SERVER  = os.environ.get("PUSHKEY_SERVER", "https://api.pushkey.dev")
+_TOKEN_GRACE_DAYS  = 10   # days offline before paid tier downgrades to free
 
 # ── Tier definitions ──────────────────────────────────────────
 TIERS = {
@@ -589,6 +597,163 @@ _LICENSE_CACHE: dict | None = None
 _LICENSE_GRACE_DAYS = 3   # offline grace period
 
 
+# ── Machine fingerprint ───────────────────────────────────────────────────────
+
+def get_machine_fingerprint() -> str:
+    import platform, uuid
+    parts = [platform.node(), platform.machine(), str(uuid.getnode()), platform.system()]
+    raw = "|".join(p for p in parts if p)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# ── Token store (activation token returned by server) ────────────────────────
+
+def _token_encrypt(data: dict) -> bytes:
+    key = _license_key()   # reuse same derived key as license file
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(data).encode(), None)
+    return nonce + ct
+
+
+def _token_decrypt(raw: bytes) -> dict:
+    key = _license_key()
+    nonce, ct = raw[:12], raw[12:]
+    return json.loads(AESGCM(key).decrypt(nonce, ct, None))
+
+
+def load_token() -> dict | None:
+    if not TOKEN_FILE.exists():
+        return None
+    try:
+        return _token_decrypt(TOKEN_FILE.read_bytes())
+    except Exception:
+        return None
+
+
+def save_token(data: dict) -> None:
+    ensure_vault_dir()
+    TOKEN_FILE.write_bytes(_token_encrypt(data))
+    TOKEN_FILE.chmod(0o600)
+
+
+# ── Server calls ──────────────────────────────────────────────────────────────
+
+def _server_post(path: str, payload: dict, timeout: int = 8) -> dict | None:
+    try:
+        import urllib.request
+        url  = f"{ACTIVATION_SERVER.rstrip('/')}{path}"
+        body = json.dumps(payload).encode()
+        req  = urllib.request.Request(url, data=body,
+                                       headers={"Content-Type": "application/json"},
+                                       method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None   # server unreachable — caller handles grace period
+
+
+def server_activate(license_key: str, tier: str, email: str = "") -> tuple[bool, str, dict]:
+    """Call /v1/activate. Returns (ok, message, response_dict)."""
+    import platform as _pl
+    resp = _server_post("/v1/activate", {
+        "license_key": license_key,
+        "fingerprint": get_machine_fingerprint(),
+        "tier":        tier,
+        "platform":    f"{_pl.system()} {_pl.release()}",
+        "email":       email,
+    })
+    if resp is None:
+        return False, "Could not reach activation server. Check your internet connection.", {}
+    if not resp.get("ok"):
+        return False, resp.get("error", "Activation rejected by server."), resp
+    return True, "", resp
+
+
+def server_heartbeat(license_key: str) -> dict | None:
+    """Call /v1/heartbeat. Returns server response or None if unreachable."""
+    token = load_token()
+    return _server_post("/v1/heartbeat", {
+        "license_key": license_key,
+        "fingerprint": get_machine_fingerprint(),
+        "token":       token.get("token", "") if token else "",
+    })
+
+
+def server_deactivate(license_key: str) -> bool:
+    """Call /v1/deactivate. Returns True on success."""
+    resp = _server_post("/v1/deactivate", {
+        "license_key": license_key,
+        "fingerprint": get_machine_fingerprint(),
+    })
+    return bool(resp and resp.get("ok"))
+
+
+def maybe_heartbeat() -> None:
+    """Called after every successful vault unlock. Refreshes token at most once per 24 h."""
+    lic = load_license()
+    if lic.get("tier", "free") == "free":
+        return   # free tier — no server check needed
+    license_key = lic.get("license_key", "")
+    if not license_key:
+        return
+
+    token = load_token()
+    now   = datetime.now()
+
+    # Token still fresh — skip
+    if token:
+        refreshed_at = token.get("refreshed_at")
+        if refreshed_at:
+            try:
+                age = now - datetime.fromisoformat(refreshed_at)
+                if age < timedelta(hours=24):
+                    return
+            except Exception:
+                pass
+
+    resp = server_heartbeat(license_key)
+    if resp and resp.get("ok"):
+        save_token({
+            "token":        resp["token"],
+            "tier":         resp["tier"],
+            "refreshed_at": now.isoformat(),
+        })
+        return
+
+    # Server unreachable — check grace period
+    if token:
+        refreshed_at = token.get("refreshed_at")
+        if refreshed_at:
+            try:
+                age = now - datetime.fromisoformat(refreshed_at)
+                if age < timedelta(days=_TOKEN_GRACE_DAYS):
+                    return  # still within grace, let them work
+            except Exception:
+                pass
+
+    # Grace expired — downgrade
+    global _LICENSE_CACHE
+    _LICENSE_CACHE = {"tier": "free", "_server_unreachable": True}
+    log_event("license downgraded: server unreachable beyond grace period")
+
+
+def deactivate_device() -> tuple[bool, str]:
+    """Remove this machine from the activation server and clear local token."""
+    lic = load_license()
+    license_key = lic.get("license_key", "")
+    if not license_key:
+        return False, "No active license to deactivate."
+    ok = server_deactivate(license_key)
+    if TOKEN_FILE.exists():
+        TOKEN_FILE.unlink(missing_ok=True)
+    global _LICENSE_CACHE
+    _LICENSE_CACHE = None
+    log_event("device deactivated")
+    if ok:
+        return True, "Device deactivated. You can now activate on another machine."
+    return False, "Server unreachable — local token cleared. Deactivation will sync when server is online."
+
+
 def _license_key() -> bytes:
     salt = get_or_create_salt()
     return hashlib.pbkdf2_hmac("sha256", b"pushkey-license-key", salt, iterations=100_000)
@@ -698,6 +863,11 @@ def activate_license(license_key: str) -> tuple[bool, str]:
         seats  = payload.get("seats", 1)
         email  = payload.get("email", "")
 
+        # ── Server-side device registration ──────────────────────────────
+        ok, err_msg, srv = server_activate(license_key.strip(), tier, email)
+        if not ok:
+            return False, err_msg
+
         data = {
             "tier": tier,
             "license_key": license_key.strip(),
@@ -708,8 +878,16 @@ def activate_license(license_key: str) -> tuple[bool, str]:
             "lifetime": expiry is None,
         }
         save_license(data)
+        save_token({
+            "token":        srv.get("token", ""),
+            "tier":         tier,
+            "refreshed_at": datetime.now().isoformat(),
+        })
         log_event(f"license activated: {tier} {'(lifetime)' if not expiry else expiry}")
-        return True, f"✅ {TIERS[tier]['emoji']} {TIERS[tier]['label']} license activated!"
+        devices_used = srv.get("devices_used", 1)
+        devices_max  = srv.get("devices_max")
+        slot_msg     = f" ({devices_used}/{devices_max} devices)" if devices_max else ""
+        return True, f"✅ {TIERS[tier]['emoji']} {TIERS[tier]['label']} license activated!{slot_msg}"
 
     except Exception as e:
         return False, f"Activation error: {e}"
@@ -733,6 +911,340 @@ def generate_license_key(tier: str, expires: str | None = None,
     payload_str = "-".join(chunks)
     checksum = hashlib.sha256(payload_str.encode()).hexdigest()[:8].upper()
     return f"{code}-{payload_str}-{checksum}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# FIDO2 / YUBIKEY HARDWARE MFA  (#23)
+# ═══════════════════════════════════════════════════════════════
+
+def _fido2_encrypt(data: dict) -> bytes:
+    key = _config_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(data).encode(), None)
+    return nonce + ct
+
+def _fido2_decrypt(raw: bytes) -> dict:
+    key = _config_key()
+    nonce, ct = raw[:12], raw[12:]
+    return json.loads(AESGCM(key).decrypt(nonce, ct, None))
+
+def fido2_is_enabled() -> bool:
+    return FIDO2_FILE.exists()
+
+def fido2_load() -> dict:
+    if not FIDO2_FILE.exists():
+        return {}
+    try:
+        return _fido2_decrypt(FIDO2_FILE.read_bytes())
+    except Exception:
+        return {}
+
+def fido2_save(data: dict) -> None:
+    ensure_vault_dir()
+    FIDO2_FILE.write_bytes(_fido2_encrypt(data))
+
+def fido2_list_devices() -> list:
+    try:
+        from fido2.hid import CtapHidDevice
+        return list(CtapHidDevice.list_devices())
+    except ImportError:
+        raise RuntimeError("python-fido2 not installed.\nRun: pip install fido2>=1.1.2")
+
+def fido2_register() -> dict:
+    """Register a FIDO2 device. Returns credential dict to persist."""
+    from fido2.hid import CtapHidDevice
+    from fido2.client import Fido2Client, UserInteraction
+    from fido2.server import Fido2Server
+
+    devices = list(CtapHidDevice.list_devices())
+    if not devices:
+        raise RuntimeError("No FIDO2/YubiKey device found.\nConnect your key and try again.")
+
+    rp = {"id": "pushkey.local", "name": "Pushkey Vault"}
+    server = Fido2Server(rp)
+    user = {"id": b"pushkey-local-user", "name": "pushkey", "displayName": "Pushkey User"}
+    create_options, state = server.register_begin(user, user_verification="discouraged")
+
+    class _Silent(UserInteraction):
+        def prompt_up(self): pass
+        def request_pin(self, permissions, rp_id): return ""
+        def request_uv(self, permissions, rp_id): return True
+
+    client = Fido2Client(devices[0], "https://pushkey.local", user_interaction=_Silent())
+    result = client.make_credential(create_options["publicKey"])
+    auth_data = server.register_complete(state, result)
+    cred = auth_data.credential_data
+    return {
+        "credential_id": base64.b64encode(bytes(cred.credential_id)).decode(),
+        "public_key":    base64.b64encode(bytes(cred.public_key)).decode(),
+        "registered":    datetime.now().isoformat(),
+        "device_name":   str(devices[0]),
+    }
+
+def fido2_authenticate() -> bool:
+    """Verify stored FIDO2 credential. Returns True on success."""
+    from fido2.hid import CtapHidDevice
+    from fido2.client import Fido2Client, UserInteraction
+    from fido2.server import Fido2Server
+    from fido2.webauthn import AttestedCredentialData
+
+    stored = fido2_load()
+    if not stored:
+        return False
+    devices = list(CtapHidDevice.list_devices())
+    if not devices:
+        raise RuntimeError("No FIDO2/YubiKey device found.")
+
+    rp = {"id": "pushkey.local", "name": "Pushkey Vault"}
+    server = Fido2Server(rp)
+    cred_id = base64.b64decode(stored["credential_id"])
+    pub_key = base64.b64decode(stored["public_key"])
+    credential = AttestedCredentialData.create(b"\x00" * 16, cred_id, pub_key)
+
+    req_options, state = server.authenticate_begin([credential], user_verification="discouraged")
+
+    class _Silent(UserInteraction):
+        def prompt_up(self): pass
+        def request_pin(self, permissions, rp_id): return ""
+
+    client = Fido2Client(devices[0], "https://pushkey.local", user_interaction=_Silent())
+    selection = client.get_assertion(req_options["publicKey"])
+    resp = selection.get_response(0)
+    server.authenticate_complete(
+        state, [credential],
+        resp.credential_id, resp.client_data,
+        resp.authenticator_data, resp.signature,
+    )
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
+# SSO / OIDC DEVICE FLOW  (#25)
+# ═══════════════════════════════════════════════════════════════
+
+_SSO_PROVIDERS = {
+    "Okta":     {"device_auth": "{issuer}/v1/device/authorize",   "token": "{issuer}/v1/token"},
+    "Azure AD": {"device_auth": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode",
+                 "token":       "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"},
+    "Google":   {"device_auth": "https://oauth2.googleapis.com/device/code",
+                 "token":       "https://oauth2.googleapis.com/token"},
+    "Custom":   {"device_auth": "{issuer}/device_authorization",  "token": "{issuer}/token"},
+}
+
+def _sso_encrypt(data: dict) -> bytes:
+    key = _config_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(data).encode(), None)
+    return nonce + ct
+
+def _sso_decrypt(raw: bytes) -> dict:
+    key = _config_key()
+    nonce, ct = raw[:12], raw[12:]
+    return json.loads(AESGCM(key).decrypt(nonce, ct, None))
+
+def sso_load() -> dict:
+    if not SSO_FILE.exists():
+        return {}
+    try:
+        return _sso_decrypt(SSO_FILE.read_bytes())
+    except Exception:
+        return {}
+
+def sso_save(data: dict) -> None:
+    ensure_vault_dir()
+    SSO_FILE.write_bytes(_sso_encrypt(data))
+
+def sso_logout() -> None:
+    SSO_FILE.unlink(missing_ok=True)
+    log_event("SSO logout")
+
+def sso_is_logged_in() -> bool:
+    sess = sso_load()
+    if not sess.get("access_token"):
+        return False
+    expires = sess.get("expires_at")
+    if expires:
+        try:
+            return datetime.fromisoformat(expires) > datetime.now()
+        except Exception:
+            pass
+    return True
+
+def sso_device_flow_start(client_id: str, device_auth_url: str,
+                           scope: str = "openid email profile") -> dict:
+    """RFC 8628 — start device authorization. Returns server response."""
+    import urllib.request
+    import urllib.parse
+    data = urllib.parse.urlencode({"client_id": client_id, "scope": scope}).encode()
+    req = urllib.request.Request(device_auth_url, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Accept", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+def sso_device_flow_poll(client_id: str, token_url: str, device_code: str) -> dict | None:
+    """Poll for OIDC token. Returns dict on success, None if still pending."""
+    import urllib.request
+    import urllib.parse
+    data = urllib.parse.urlencode({
+        "client_id":   client_id,
+        "device_code": device_code,
+        "grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
+    }).encode()
+    req = urllib.request.Request(token_url, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            if "access_token" in result:
+                return result
+    except Exception:
+        pass
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# DYNAMIC SECRETS  (#26)
+# ═══════════════════════════════════════════════════════════════
+
+def load_leases() -> list:
+    if not LEASES_FILE.exists():
+        return []
+    try:
+        return json.loads(LEASES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+def save_leases(leases: list) -> None:
+    ensure_vault_dir()
+    LEASES_FILE.write_text(json.dumps(leases, indent=2), encoding="utf-8")
+
+def create_aws_lease(iam_user: str, admin_key_id: str, admin_secret: str,
+                     ttl_hours: int = 24) -> dict:
+    """Create a temporary IAM access key and store lease record."""
+    import boto3
+    iam = boto3.client("iam", aws_access_key_id=admin_key_id,
+                       aws_secret_access_key=admin_secret)
+    resp = iam.create_access_key(UserName=iam_user)
+    new_key = resp["AccessKey"]
+    expires = (datetime.now() + timedelta(hours=ttl_hours)).isoformat()
+    lease = {
+        "id":               secrets.token_hex(8),
+        "type":             "aws_iam",
+        "iam_user":         iam_user,
+        "access_key_id":    new_key["AccessKeyId"],
+        "secret_access_key": new_key["SecretAccessKey"],
+        "expires":          expires,
+        "ttl_hours":        ttl_hours,
+        "created":          datetime.now().isoformat(),
+        "status":           "active",
+    }
+    leases = load_leases()
+    leases.append(lease)
+    save_leases(leases)
+    log_event(f"dynamic lease created: aws_iam/{iam_user} ttl={ttl_hours}h")
+    return lease
+
+def revoke_lease(lease_id: str, admin_key_id: str = "", admin_secret: str = "") -> bool:
+    leases = load_leases()
+    lease = next((l for l in leases if l["id"] == lease_id), None)
+    if not lease:
+        return False
+    if lease["type"] == "aws_iam" and admin_key_id and admin_secret:
+        try:
+            import boto3
+            iam = boto3.client("iam", aws_access_key_id=admin_key_id,
+                               aws_secret_access_key=admin_secret)
+            iam.delete_access_key(UserName=lease["iam_user"],
+                                  AccessKeyId=lease["access_key_id"])
+        except Exception:
+            pass
+    save_leases([l for l in leases if l["id"] != lease_id])
+    log_event(f"dynamic lease revoked: {lease_id}")
+    return True
+
+def check_expired_leases() -> list:
+    now = datetime.now()
+    return [l for l in load_leases()
+            if l.get("expires") and datetime.fromisoformat(l["expires"]) <= now]
+
+
+# ═══════════════════════════════════════════════════════════════
+# CLOUD SYNC CLIENT  (#28)
+# ═══════════════════════════════════════════════════════════════
+
+def cloud_push(endpoint: str, token: str, vault_bytes: bytes) -> str:
+    """PUT encrypted vault blob. Returns server ETag."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/v1/vault", data=vault_bytes, method="PUT")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/octet-stream")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read()).get("etag", "")
+
+def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
+    """GET vault blob. Returns (bytes, etag) or (None, etag) if unchanged."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/v1/vault", method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    if current_etag:
+        req.add_header("If-None-Match", current_etag)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            etag = resp.headers.get("ETag", "")
+            return resp.read(), etag
+    except Exception as exc:
+        if "304" in str(exc):
+            return None, current_etag
+        raise
+
+def cloud_login(endpoint: str, email: str, pw: str) -> str:
+    """Auth to cloud sync server. Returns Bearer token."""
+    import urllib.request
+    data = json.dumps({"email": email, "password": pw}).encode()
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/v1/auth/login", data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read()).get("token", "")
+
+
+# ── Local health HTTP server for browser extension ────────────
+def _start_health_server(port: int = HEALTH_PORT) -> None:
+    """Serve health.json on 127.0.0.1:{port}/health for the browser extension."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/health":
+                self.send_response(404); self.end_headers(); return
+            try:
+                data = HEALTH_FILE.read_bytes() if HEALTH_FILE.exists() else b"{}"
+            except Exception:
+                data = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        def log_message(self, *_): pass
+
+    def _serve():
+        try:
+            srv = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+            srv.serve_forever()
+        except Exception:
+            pass
+
+    threading.Thread(target=_serve, daemon=True).start()
 
 
 # ═══════════════════════════════════════════════
@@ -1601,6 +2113,9 @@ class LoginFrame(ctk.CTkFrame):
                     raise ValueError("wrong_password")
                 self._failed_attempts = 0
                 self._locked_until = None
+                # Refresh server token in background (non-blocking)
+                import threading
+                threading.Thread(target=maybe_heartbeat, daemon=True).start()
                 if mfa_is_enabled():
                     self._show_mfa_prompt(pw, vault)
                 else:
@@ -1737,22 +2252,28 @@ class AppFrame(ctk.CTkFrame):
         self.tabview.add("🔑 All Keys")
         self.tabview.add("📁 Projects")
         self.tabview.add("🛡️ Security")
+        self.tabview.add("☁️ Cloud")
 
-        self.dash_frame = self.tabview.tab("📊 Dashboard")
-        self.keys_frame = self.tabview.tab("🔑 All Keys")
-        self.proj_frame = self.tabview.tab("📁 Projects")
-        self.scan_frame = self.tabview.tab("🛡️ Security")
+        self.dash_frame  = self.tabview.tab("📊 Dashboard")
+        self.keys_frame  = self.tabview.tab("🔑 All Keys")
+        self.proj_frame  = self.tabview.tab("📁 Projects")
+        self.scan_frame  = self.tabview.tab("🛡️ Security")
+        self.cloud_frame = self.tabview.tab("☁️ Cloud")
 
-        # Configure tab frames
-        for f in (self.dash_frame, self.keys_frame, self.proj_frame, self.scan_frame):
+        for f in (self.dash_frame, self.keys_frame, self.proj_frame,
+                  self.scan_frame, self.cloud_frame):
             f.configure(fg_color=C["bg"])
 
-        self._scan_results = []       # file scan cache
-        self._git_scan_results = []   # git history scan cache
+        self._scan_results = []
+        self._git_scan_results = []
         self._scan_ts = None
 
         self.render_all()
         self.after(600, self._check_rotation_schedule)
+        # Start local health HTTP server for browser extension
+        _start_health_server()
+        # Start cloud auto-sync background thread
+        self._start_cloud_sync()
 
     def save(self):
         save_vault(self.vault, self.password)
@@ -1856,8 +2377,23 @@ class AppFrame(ctk.CTkFrame):
                 msg_lbl.configure(text=f"❌ {msg}", text_color=C["red"])
 
         key_entry.bind("<Return>", lambda e: activate())
-        make_btn(win, "✅ Activate", activate,
-                 fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(pady=12)
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(pady=12)
+        make_btn(btn_row, "✅ Activate", activate,
+                 fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(side="left", padx=4)
+
+        if current_tier() != "free":
+            def do_deactivate():
+                ok, msg = deactivate_device()
+                color = C["green"] if ok else C["amber"]
+                msg_lbl.configure(text=msg, text_color=color)
+                global _LICENSE_CACHE
+                _LICENSE_CACHE = None
+                self.render_all()
+
+            make_btn(btn_row, "🗑 Deactivate Device", do_deactivate,
+                     fg_color=C["bg3"], text_color=C["text3"], width=160, height=34).pack(side="left", padx=4)
 
     def lock(self):
         self.revealed.clear()
@@ -2071,6 +2607,422 @@ class AppFrame(ctk.CTkFrame):
         self.render_all()
         log_event("MFA disabled")
         messagebox.showinfo("MFA Disabled", "Two-factor authentication has been disabled.")
+
+    # ── Hardware MFA (YubiKey / FIDO2) ───────────────────────────
+    def manage_hardware_mfa(self):
+        if not self._gate("hardware_mfa"):
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("🔐 YubiKey / FIDO2 Hardware MFA")
+        win.geometry("480x400")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self); win.grab_set()
+
+        ctk.CTkLabel(win, text="🔐  Hardware MFA", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        is_enrolled = fido2_is_enabled()
+        stored = fido2_load() if is_enrolled else {}
+
+        if is_enrolled:
+            ctk.CTkLabel(win, text="✓  YubiKey enrolled", font=FONT_XS, text_color=C["green"]).pack()
+            ctk.CTkLabel(win, text=f"Registered: {stored.get('registered','?')[:10]}  ·  Device: {stored.get('device_name','?')}",
+                         font=FONT_XS, text_color=C["text3"]).pack(pady=4)
+
+            status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"], wraplength=420)
+            status_lbl.pack(pady=4)
+
+            def test_key():
+                status_lbl.configure(text="Touch your YubiKey…", text_color=C["amber"])
+                win.update()
+                try:
+                    ok = fido2_authenticate()
+                    if ok:
+                        status_lbl.configure(text="✓ Authentication successful!", text_color=C["green"])
+                    else:
+                        status_lbl.configure(text="✗ Verification failed", text_color=C["red"])
+                except Exception as e:
+                    status_lbl.configure(text=f"Error: {e}", text_color=C["red"])
+
+            def remove_key():
+                if messagebox.askyesno("Remove YubiKey", "Remove enrolled YubiKey?\nYou can re-enroll at any time."):
+                    FIDO2_FILE.unlink(missing_ok=True)
+                    win.destroy()
+                    log_event("FIDO2 credential removed")
+                    messagebox.showinfo("Removed", "YubiKey credential removed.")
+
+            make_btn(win, "Test YubiKey", test_key, fg_color=C["accent"], text_color="white", width=160, height=34).pack(pady=8)
+            make_btn(win, "Remove Enrollment", remove_key, fg_color=C["red_bg"], text_color=C["red"], width=160).pack(pady=4)
+        else:
+            ctk.CTkLabel(win, text="No hardware key enrolled.\nConnect your YubiKey and click Enroll.",
+                         font=FONT_XS, text_color=C["text3"], justify="center").pack(pady=12)
+
+            status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"], wraplength=420)
+            status_lbl.pack(pady=4)
+
+            def enroll():
+                status_lbl.configure(text="Searching for FIDO2 device…", text_color=C["amber"])
+                win.update()
+                try:
+                    cred = fido2_register()
+                    fido2_save(cred)
+                    status_lbl.configure(text="✓ YubiKey enrolled!", text_color=C["green"])
+                    log_event("FIDO2 credential registered")
+                    win.after(1200, lambda: (win.destroy(), self.render_all()))
+                except Exception as e:
+                    status_lbl.configure(text=f"Error: {e}", text_color=C["red"])
+
+            make_btn(win, "Enroll YubiKey", enroll,
+                     fg_color=C["green_bg"], text_color=C["green"], width=160, height=34).pack(pady=12)
+
+        ctk.CTkLabel(win, text="Hardware MFA requires Enterprise tier.\nOnly one key per vault is supported in this release.",
+                     font=FONT_XS, text_color=C["text3"], justify="center").pack(pady=(16, 8))
+
+    # ── SSO / OIDC Device Flow ────────────────────────────────────
+    def manage_sso(self):
+        if not self._gate("sso"):
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("🏛️ SSO / OIDC Login")
+        win.geometry("520x480")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self); win.grab_set()
+
+        ctk.CTkLabel(win, text="🏛️  SSO Authentication", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+
+        is_in = sso_is_logged_in()
+        sess = sso_load()
+        if is_in:
+            ctk.CTkLabel(win, text=f"✓  Signed in via {sess.get('provider','OIDC')}",
+                         font=FONT_XS, text_color=C["green"]).pack(pady=4)
+            email = sess.get("email", sess.get("sub", ""))
+            if email:
+                ctk.CTkLabel(win, text=email, font=FONT_MONO_SM, text_color=C["text3"]).pack()
+
+            def logout():
+                sso_logout()
+                win.destroy()
+                messagebox.showinfo("SSO", "Signed out of SSO.")
+
+            make_btn(win, "Sign Out", logout, fg_color=C["red_bg"], text_color=C["red"], width=140, height=34).pack(pady=12)
+            return
+
+        # Provider selector
+        prov_var = tk.StringVar(value="Okta")
+        ctk.CTkLabel(win, text="PROVIDER", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20)
+        ctk.CTkOptionMenu(win, values=list(_SSO_PROVIDERS.keys()), variable=prov_var,
+                          fg_color=C["bg3"], button_color=C["accent"],
+                          button_hover_color=C["accent2"],
+                          text_color=C["text"], font=FONT_SM, width=200).pack(anchor="w", padx=20, pady=(2, 8))
+
+        fields_f = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        fields_f.pack(fill="x", padx=20, pady=(0, 8))
+        field_entries: dict = {}
+
+        def refresh_fields(*_):
+            for w in fields_f.winfo_children(): w.destroy()
+            field_entries.clear()
+            p = prov_var.get()
+            for key, label in [("client_id", "Client ID"), ("issuer", "Issuer URL / Tenant")]:
+                ctk.CTkLabel(fields_f, text=label.upper(), font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
+                e = ctk.CTkEntry(fields_f, font=FONT_MONO_SM, fg_color=C["bg3"],
+                                 text_color=C["text"], border_color=C["border2"])
+                saved = self.config.get("sso_settings", {}).get(key, "")
+                if saved: e.insert(0, saved)
+                e.pack(fill="x", padx=10, pady=(0, 4), ipady=2)
+                field_entries[key] = e
+
+        prov_var.trace_add("write", refresh_fields)
+        refresh_fields()
+
+        status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"], wraplength=460)
+        status_lbl.pack(padx=20, pady=4)
+
+        def start_flow():
+            p = prov_var.get()
+            client_id = field_entries["client_id"].get().strip()
+            issuer    = field_entries["issuer"].get().strip()
+            if not client_id or not issuer:
+                status_lbl.configure(text="Client ID and Issuer required.", text_color=C["red"]); return
+
+            tmpl = _SSO_PROVIDERS[p]
+            device_url = tmpl["device_auth"].replace("{issuer}", issuer).replace("{tenant}", issuer)
+            token_url  = tmpl["token"].replace("{issuer}", issuer).replace("{tenant}", issuer)
+
+            # Persist non-secret settings
+            self.config.setdefault("sso_settings", {}).update(
+                {"provider": p, "client_id": client_id, "issuer": issuer})
+            save_config(self.config)
+
+            status_lbl.configure(text="Starting device flow…", text_color=C["amber"])
+            win.update()
+
+            try:
+                resp = sso_device_flow_start(client_id, device_url)
+            except Exception as e:
+                status_lbl.configure(text=f"Error: {e}", text_color=C["red"]); return
+
+            user_code = resp.get("user_code", "")
+            verify_uri = resp.get("verification_uri_complete") or resp.get("verification_uri", "")
+            device_code = resp.get("device_code", "")
+            interval = int(resp.get("interval", 5))
+
+            msg = f"Visit: {verify_uri}\nCode: {user_code}"
+            status_lbl.configure(text=msg, text_color=C["amber"])
+            if verify_uri:
+                webbrowser.open(verify_uri)
+            win.update()
+
+            # Poll for token
+            def poll():
+                token_resp = sso_device_flow_poll(client_id, token_url, device_code)
+                if token_resp:
+                    exp = datetime.now() + timedelta(seconds=int(token_resp.get("expires_in", 3600)))
+                    sso_save({
+                        "provider":     p,
+                        "access_token": token_resp["access_token"],
+                        "expires_at":   exp.isoformat(),
+                        "email":        token_resp.get("email", ""),
+                        "sub":          token_resp.get("sub", ""),
+                    })
+                    status_lbl.configure(text="✓ Signed in!", text_color=C["green"])
+                    log_event(f"SSO login via {p}")
+                    win.after(1200, win.destroy)
+                else:
+                    win.after(interval * 1000, poll)
+
+            win.after(interval * 1000, poll)
+
+        make_btn(win, "Sign In with SSO", start_flow,
+                 fg_color=C["green_bg"], text_color=C["green"], width=180, height=34).pack(pady=8)
+
+    # ── Cloud sync helpers ────────────────────────────────────────
+    def _start_cloud_sync(self):
+        import threading
+        def _loop():
+            while True:
+                time.sleep(300)
+                try:
+                    self._cloud_sync_once(silent=True)
+                except Exception:
+                    pass
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def _cloud_sync_once(self, silent: bool = False):
+        cfg = self.config.get("cloud", {})
+        endpoint = cfg.get("endpoint", "").strip()
+        token    = cfg.get("token", "").strip()
+        if not endpoint or not token:
+            if not silent:
+                raise RuntimeError("Cloud sync not configured. Enter endpoint and token.")
+            return
+        vault_bytes = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
+        if not vault_bytes:
+            return
+        etag = cloud_push(endpoint, token, vault_bytes)
+        self.config.setdefault("cloud", {})["last_synced"] = datetime.now().isoformat()
+        self.config["cloud"]["etag"] = etag
+        save_config(self.config)
+
+    # ── Cloud tab renderer ────────────────────────────────────────
+    def render_cloud(self):
+        for w in self.cloud_frame.winfo_children():
+            w.destroy()
+
+        outer = ctk.CTkFrame(self.cloud_frame, fg_color=C["bg"], corner_radius=0)
+        outer.pack(fill="both", expand=True)
+
+        hdr = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0, height=44)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        ctk.CTkLabel(hdr, text="☁️  CLOUD SYNC", font=("Consolas", 11, "bold"),
+                     text_color=C["text"]).pack(side="left", padx=16)
+        make_btn(hdr, "Sync Now", lambda: self._do_cloud_sync_now(),
+                 fg_color=C["accent"], text_color="white").pack(side="right", padx=12, pady=8)
+
+        scroll = ctk.CTkScrollableFrame(outer, fg_color=C["bg"], corner_radius=0)
+        scroll.pack(fill="both", expand=True)
+        pad = ctk.CTkFrame(scroll, fg_color="transparent")
+        pad.pack(fill="x", padx=24, pady=16)
+
+        tier = current_tier()
+        if not can_do("cloud_sync"):
+            ctk.CTkLabel(pad, text="☁️", font=("Segoe UI", 36)).pack(pady=(20, 0))
+            ctk.CTkLabel(pad, text="Cloud Sync requires Starter or higher",
+                         font=FONT_H2, text_color=C["text"]).pack(pady=(8, 4))
+            ctk.CTkLabel(pad, text="Zero-knowledge encrypted backup — server never sees your keys.",
+                         font=FONT_XS, text_color=C["text3"]).pack()
+            make_btn(pad, "Upgrade Now", lambda: self._gate("cloud_sync"),
+                     fg_color=C["amber_bg"], text_color=C["amber"], width=160, height=34).pack(pady=20)
+            return
+
+        cfg = self.config.get("cloud", {})
+        last_sync = cfg.get("last_synced", "")
+
+        # Status banner
+        if last_sync:
+            banner_color = C["green_bg"]
+            banner_text  = f"✓  Last synced {last_sync[:16]}  ·  {VAULT_FILE.stat().st_size // 1024 + 1} KB"
+            banner_fg    = C["green"]
+        else:
+            banner_color = C["surface"]
+            banner_text  = "Not yet synced"
+            banner_fg    = C["text3"]
+        banner = ctk.CTkFrame(pad, fg_color=banner_color, corner_radius=6)
+        banner.pack(fill="x", pady=(0, 16))
+        ctk.CTkLabel(banner, text=banner_text, font=FONT_XS, text_color=banner_fg).pack(padx=12, pady=8)
+
+        # Settings form
+        form = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6)
+        form.pack(fill="x", pady=(0, 12))
+
+        entries = {}
+        for key, label, is_secret in [
+            ("endpoint", "Sync Endpoint URL", False),
+            ("token",    "Bearer Token",       True),
+        ]:
+            ctk.CTkLabel(form, text=label.upper(), font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=12, pady=(8, 0))
+            e = ctk.CTkEntry(form, font=FONT_MONO_SM, fg_color=C["bg3"],
+                             text_color=C["text"], border_color=C["border2"],
+                             show="*" if is_secret else "")
+            saved = cfg.get(key, "")
+            if saved: e.insert(0, saved)
+            e.pack(fill="x", padx=12, pady=(0, 6), ipady=2)
+            entries[key] = e
+
+        status_lbl = ctk.CTkLabel(pad, text="", font=FONT_XS, text_color=C["text3"], wraplength=500)
+        status_lbl.pack(pady=4)
+
+        def save_settings():
+            self.config.setdefault("cloud", {}).update({
+                "endpoint": entries["endpoint"].get().strip(),
+                "token":    entries["token"].get().strip(),
+            })
+            save_config(self.config)
+            status_lbl.configure(text="Settings saved.", text_color=C["green"])
+
+        btn_row = ctk.CTkFrame(pad, fg_color="transparent")
+        btn_row.pack(fill="x")
+        make_btn(btn_row, "Save Settings", save_settings,
+                 fg_color=C["accent"], text_color="white", width=140, height=32).pack(side="left", padx=(0, 8))
+
+        # Self-host hint
+        hint = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6)
+        hint.pack(fill="x", pady=(16, 0))
+        ctk.CTkLabel(hint, text="SELF-HOSTED BACKEND",
+                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(hint,
+                     text="Run pushkey_cloud_api.py (FastAPI + SQLite) on your own server.\n"
+                          "API: PUT /api/v1/vault, GET /api/v1/vault, POST /api/v1/auth/login",
+                     font=FONT_XS, text_color=C["text3"], justify="left", wraplength=500).pack(anchor="w", padx=12, pady=(4, 8))
+
+    def _do_cloud_sync_now(self):
+        try:
+            self._cloud_sync_once(silent=False)
+            self.render_cloud()
+            messagebox.showinfo("Cloud Sync", "✓ Vault synced to cloud.")
+        except Exception as e:
+            messagebox.showerror("Cloud Sync", f"Sync failed:\n{e}")
+
+    # ── Dynamic Secrets (Enterprise) ──────────────────────────────
+    def manage_dynamic_secrets(self):
+        if not self._gate("dynamic_secrets"):
+            return
+
+        leases = load_leases()
+        now = datetime.now()
+
+        win = ctk.CTkToplevel(self)
+        win.title("⚙️ Dynamic Secrets")
+        win.geometry("620x560")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self); win.grab_set()
+
+        ctk.CTkLabel(win, text="⚙️  Dynamic Secrets", font=FONT_H2, text_color=C["text"]).pack(pady=(16, 4))
+        ctk.CTkLabel(win, text="Lease-based on-demand credentials. Automatically expire.",
+                     font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 10))
+
+        # Lease list
+        list_frame = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0, height=200)
+        list_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        def refresh_leases():
+            for w in list_frame.winfo_children(): w.destroy()
+            leases[:] = load_leases()
+            if not leases:
+                ctk.CTkLabel(list_frame, text="No active leases.", font=FONT_XS,
+                             text_color=C["text3"]).pack(pady=12)
+                return
+            for l in leases:
+                exp = datetime.fromisoformat(l["expires"]) if l.get("expires") else None
+                expired = exp and exp <= now
+                row = ctk.CTkFrame(list_frame, fg_color=C["red_bg"] if expired else C["surface"], corner_radius=4)
+                row.pack(fill="x", pady=2)
+                left = ctk.CTkFrame(row, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=10, pady=6)
+                ctk.CTkLabel(left, text=f"{l['type'].upper()} / {l.get('iam_user', l['id'])}",
+                             font=("Consolas", 10, "bold"),
+                             text_color=C["red"] if expired else C["accent"]).pack(anchor="w")
+                exp_str = exp.strftime("%Y-%m-%d %H:%M") if exp else "?"
+                status_str = "EXPIRED" if expired else "active"
+                ctk.CTkLabel(left,
+                             text=f"ID: {l['id']}  ·  Expires: {exp_str}  ·  {status_str}",
+                             font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+
+                def do_revoke(lid=l["id"]):
+                    revoke_lease(lid)
+                    refresh_leases()
+
+                make_btn(row, "Revoke", do_revoke,
+                         fg_color=C["red_bg"], text_color=C["red"], width=70).pack(side="right", padx=8, pady=6)
+
+        refresh_leases()
+
+        # New AWS IAM lease
+        sep = ctk.CTkFrame(win, fg_color=C["border"], height=1)
+        sep.pack(fill="x", padx=16, pady=8)
+        ctk.CTkLabel(win, text="NEW AWS IAM LEASE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=20)
+
+        form = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        form.pack(fill="x", padx=16, pady=(4, 8))
+        f_entries = {}
+
+        for key, label, secret in [
+            ("iam_user",      "IAM Username",                  False),
+            ("admin_key_id",  "Admin AWS Access Key ID",       False),
+            ("admin_secret",  "Admin AWS Secret Access Key",   True),
+            ("ttl_hours",     "TTL (hours, default 24)",       False),
+        ]:
+            ctk.CTkLabel(form, text=label.upper(), font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
+            e = ctk.CTkEntry(form, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
+                             border_color=C["border2"], show="*" if secret else "")
+            e.pack(fill="x", padx=10, pady=(0, 4), ipady=2)
+            f_entries[key] = e
+
+        status_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["text3"], wraplength=560)
+        status_lbl.pack(pady=4)
+
+        def create_lease():
+            iam_user    = f_entries["iam_user"].get().strip()
+            key_id      = f_entries["admin_key_id"].get().strip()
+            secret_key  = f_entries["admin_secret"].get().strip()
+            ttl_str     = f_entries["ttl_hours"].get().strip()
+            ttl_hours   = int(ttl_str) if ttl_str.isdigit() else 24
+            if not iam_user or not key_id or not secret_key:
+                status_lbl.configure(text="All fields required.", text_color=C["red"]); return
+            status_lbl.configure(text="Creating IAM key…", text_color=C["amber"]); win.update()
+            try:
+                lease = create_aws_lease(iam_user, key_id, secret_key, ttl_hours)
+                status_lbl.configure(
+                    text=f"✓ Key created: {lease['access_key_id']}\nSecret shown once — copy now.",
+                    text_color=C["green"])
+                self.clipboard_clear()
+                self.clipboard_append(f"{lease['access_key_id']}\n{lease['secret_access_key']}")
+                refresh_leases()
+            except Exception as e:
+                status_lbl.configure(text=f"Error: {e}", text_color=C["red"])
+
+        make_btn(win, "Create AWS Lease", create_lease,
+                 fg_color=C["green_bg"], text_color=C["green"], width=180, height=34).pack(pady=8)
 
     def manage_policies(self):
         """Policy group editor — named permission sets for team sharing."""
@@ -2444,6 +3396,7 @@ class AppFrame(ctk.CTkFrame):
         self.render_keys()
         self.render_projects()
         self.render_scan()
+        self.render_cloud()
 
     # ═══════════════════════════════════════════
     # DASHBOARD TAB
@@ -4093,6 +5046,18 @@ class AppFrame(ctk.CTkFrame):
         scroll.pack(fill="both", expand=True, padx=0, pady=0)
         pad = ctk.CTkFrame(scroll, fg_color="transparent")
         pad.pack(fill="x", padx=20, pady=16)
+
+        # ── Enterprise feature strip ──────────────────────────────
+        ent_row = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6)
+        ent_row.pack(fill="x", pady=(0, 14))
+        ctk.CTkLabel(ent_row, text="ENTERPRISE", font=FONT_XS,
+                     text_color=C["amber"]).pack(side="left", padx=12, pady=8)
+        make_btn(ent_row, "🔐 YubiKey MFA",     self.manage_hardware_mfa,
+                 fg_color=C["bg3"], text_color=C["text"], width=120, height=28).pack(side="left", padx=4, pady=8)
+        make_btn(ent_row, "🏛️ SSO Login",       self.manage_sso,
+                 fg_color=C["bg3"], text_color=C["text"], width=110, height=28).pack(side="left", padx=4)
+        make_btn(ent_row, "⚙️ Dynamic Secrets", self.manage_dynamic_secrets,
+                 fg_color=C["bg3"], text_color=C["text"], width=140, height=28).pack(side="left", padx=4)
 
         if not self._scan_ts:
             # Pre-scan state

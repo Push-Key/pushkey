@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pushkey</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { width: 320px; font-family: 'Segoe UI', system-ui, sans-serif;
+           background: #0F172A; color: #E2E8F0; font-size: 13px; }
+    .header { background: #1E293B; padding: 12px 16px; display: flex;
+              align-items: center; gap: 8px; border-bottom: 1px solid #334155; }
+    .header h1 { font-size: 15px; font-weight: 700; color: #F1F5F9; }
+    .header .sub { font-size: 11px; color: #64748B; margin-top: 1px; }
+    .stats { display: flex; gap: 0; border-bottom: 1px solid #1E293B; }
+    .stat { flex: 1; text-align: center; padding: 12px 4px; }
+    .stat .num { font-size: 22px; font-weight: 700; }
+    .stat .lbl { font-size: 10px; color: #64748B; margin-top: 2px; }
+    .green { color: #34D399; } .amber { color: #F59E0B; } .red { color: #F87171; }
+    .list { max-height: 260px; overflow-y: auto; }
+    .item { display: flex; align-items: center; padding: 8px 16px;
+            border-bottom: 1px solid #1E293B; gap: 10px; }
+    .item:hover { background: #1E293B; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.healthy { background: #34D399; }
+    .dot.warning { background: #F59E0B; }
+    .dot.critical { background: #EF4444; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+    .key-name { flex: 1; font-family: Consolas, monospace; font-size: 11px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .key-age { font-size: 10px; color: #64748B; flex-shrink: 0; }
+    .footer { background: #1E293B; padding: 8px 16px; display: flex;
+              justify-content: space-between; align-items: center; }
+    .footer .ts { font-size: 10px; color: #475569; }
+    .btn { background: #334155; border: none; color: #E2E8F0; padding: 4px 10px;
+           border-radius: 4px; cursor: pointer; font-size: 11px; }
+    .btn:hover { background: #3B82F6; }
+    .offline { padding: 32px 16px; text-align: center; color: #64748B; }
+    .offline .icon { font-size: 32px; margin-bottom: 8px; }
+    .filter-row { display: flex; gap: 4px; padding: 6px 12px; background: #0F172A;
+                  border-bottom: 1px solid #1E293B; }
+    .filter-btn { flex: 1; background: transparent; border: 1px solid #334155;
+                  color: #64748B; padding: 3px; border-radius: 3px; cursor: pointer;
+                  font-size: 10px; }
+    .filter-btn.active { background: #1E293B; color: #E2E8F0; border-color: #64748B; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>🔑 Pushkey</h1>
+      <div class="sub">API Key Health Monitor</div>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><div class="num green" id="ct-healthy">—</div><div class="lbl">Healthy</div></div>
+    <div class="stat"><div class="num amber" id="ct-warning">—</div><div class="lbl">Warning</div></div>
+    <div class="stat"><div class="num red"   id="ct-critical">—</div><div class="lbl">Critical</div></div>
+  </div>
+
+  <div class="filter-row">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn"        data-filter="critical">Critical</button>
+    <button class="filter-btn"        data-filter="warning">Warning</button>
+    <button class="filter-btn"        data-filter="healthy">Healthy</button>
+  </div>
+
+  <div class="list" id="key-list"></div>
+
+  <div class="footer">
+    <span class="ts" id="last-updated">Not synced</span>
+    <button class="btn" id="refresh-btn">Refresh</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
