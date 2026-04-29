@@ -49,6 +49,7 @@ VAULT_FILE = VAULT_DIR / "vault.enc"
 SALT_FILE = VAULT_DIR / ".salt"
 CONFIG_FILE = VAULT_DIR / "config.json"
 LOG_FILE = VAULT_DIR / "pushkey.log"
+IMPORT_DIR = VAULT_DIR / "import"
 
 VAULT_SCHEMA_VERSION = 1
 
@@ -72,6 +73,25 @@ def log_event(message: str) -> None:
 
 def ensure_vault_dir():
     VAULT_DIR.mkdir(mode=0o700, exist_ok=True)
+    IMPORT_DIR.mkdir(exist_ok=True)
+    # Drop a README in the import folder so users know what to do
+    readme = IMPORT_DIR / "README.txt"
+    if not readme.exists():
+        readme.write_text(
+            "PUSHKEY IMPORT FOLDER\n"
+            "═══════════════════════════════════════\n\n"
+            "Drop your key files here (.txt, .env)\n"
+            "then click 'Scan Import Folder' in Pushkey\n"
+            "to import them all at once.\n\n"
+            "Supported formats:\n"
+            "  KEY=value\n"
+            "  key\n"
+            "  value\n"
+            "  client id = value\n"
+            "  Label: value\n\n"
+            "The file name becomes the key prefix.\n"
+            "Example: alpaca.txt → ALPACA_KEY, ALPACA_SECRET\n"
+        )
 
 
 def get_or_create_salt():
@@ -268,6 +288,8 @@ _ENV_LINE_RE = re.compile(
 _COLON_LINE_RE = re.compile(r'^([A-Za-z][A-Za-z0-9 _-]{1,40})\s*:\s*(?!//)(.+)$')
 _LABEL_RE = re.compile(r'^[A-Za-z][A-Za-z0-9 _\-/()\[\]]{0,79}$')
 _SECRET_META_RE = re.compile(r'^#\s*secret\s*:\s*(true|false|yes|no|1|0)\s*$', re.IGNORECASE)
+# Handles "client id = value", "sandbox secret = value" (spaces allowed in key)
+_SPACED_KEY_RE = re.compile(r'^([A-Za-z][A-Za-z0-9 _-]{1,50}?)\s*=\s*(.+)$')
 
 _TYPE_WORDS = {
     "key": ("KEY", False),
@@ -365,6 +387,33 @@ def _parse_env_file(path):
                 errors.append(f"line {line_num}: {name} skipped (no value)")
             continue
 
+        # Try spaced-key format: "client id = value", "sandbox secret = value"
+        m = _SPACED_KEY_RE.match(line)
+        if m:
+            spaced_key = m.group(1).strip()
+            value = m.group(2).strip()
+            suffix = re.sub(r'[^A-Z0-9]', '_', spaced_key.upper())
+            suffix = re.sub(r'_+', '_', suffix).strip('_')
+            # Check if the suffix itself is a type word
+            type_info = _TYPE_WORDS.get(spaced_key.lower())
+            auto_secret = type_info[1] if type_info else any(
+                w in spaced_key.lower() for w in ('secret', 'password', 'private', 'passphrase')
+            )
+            if type_info:
+                suffix = type_info[0]
+            if pending_label is not None:
+                # "plaid" label becomes the prefix for all spaced-key lines that follow
+                lbl = re.sub(r'[^A-Z0-9]', '_', pending_label.upper())
+                lbl = re.sub(r'_+', '_', lbl).strip('_')
+                key = f"{lbl}_{suffix}"
+                # Keep pending_label so subsequent spaced-key lines also use it
+            else:
+                key = f"{prefix}_{suffix}" if prefix else suffix
+            is_secret = next_secret if next_secret is not None else auto_secret
+            entries.append({"name": key, "value": value, "line": line_num, "raw_line": raw_line, "secret": is_secret})
+            next_secret = None
+            continue
+
         if pending_label is not None:
             type_info = _TYPE_WORDS.get(pending_label.lower())
             if type_info:
@@ -386,7 +435,8 @@ def _parse_env_file(path):
         else:
             errors.append(f"line {line_num}: could not parse '{line[:40]}'")
 
-    if pending_label:
+    if pending_label and not any(e.get("name", "").startswith(
+            re.sub(r'[^A-Z0-9]', '_', pending_label.upper()).strip('_')) for e in entries):
         errors.append(f"line {pending_label_line}: label '{pending_label}' had no value (skipped)")
 
     return entries, errors
@@ -426,33 +476,57 @@ def _ensure_gitignore_env(project_dir: Path) -> None:
 
 
 def inject_env_file(project_path, vault, key_names=None):
+    """Update .env surgically — only touch keys being written, preserve everything else."""
     project_dir = Path(project_path)
     env_path = project_dir / ".env"
-
-    existing = {}
-    if env_path.exists():
-        for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            result = _parse_env_line(raw_line)
-            if result:
-                k, v = result
-                existing[k] = v
 
     if key_names:
         keys_to_write = {k: vault[k]["value"] for k in key_names if k in vault}
     else:
         keys_to_write = {k: v["value"] for k, v in vault.items()}
 
-    merged = {**existing, **keys_to_write}
+    if not keys_to_write:
+        return True
 
-    lines = [
-        "# Managed by Pushkey",
-        f"# Last synced: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        "# Do NOT commit this file to git!\n",
-    ]
-    for k in sorted(merged.keys()):
-        lines.append(f"{k}={_format_env_value(merged[k])}")
+    # Backup existing .env before any changes
+    import shutil
+    if env_path.exists():
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup = env_path.with_name(f".env.pushkey_backup_{ts}")
+        shutil.copy2(str(env_path), str(backup))
+        # Keep only the 5 most recent backups
+        backups = sorted(env_path.parent.glob(".env.pushkey_backup_*"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in backups[5:]:
+            old.unlink(missing_ok=True)
 
-    _atomic_write_text(env_path, "\n".join(lines) + "\n")
+    # Read existing file preserving ALL lines (comments, blanks, structure)
+    existing_lines = []
+    if env_path.exists():
+        existing_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    # Pass 1: update keys that already exist in the file in-place
+    updated = set()
+    new_lines = []
+    for line in existing_lines:
+        result = _parse_env_line(line)
+        if result and result[0] in keys_to_write:
+            key = result[0]
+            new_lines.append(f"{key}={_format_env_value(keys_to_write[key])}")
+            updated.add(key)
+        else:
+            new_lines.append(line)
+
+    # Pass 2: append new keys that didn't exist yet
+    new_keys = {k: v for k, v in keys_to_write.items() if k not in updated}
+    if new_keys:
+        if new_lines and new_lines[-1].strip() != "":
+            new_lines.append("")
+        new_lines.append(f"# Added by Pushkey {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        for k in sorted(new_keys.keys()):
+            new_lines.append(f"{k}={_format_env_value(new_keys[k])}")
+
+    _atomic_write_text(env_path, "\n".join(new_lines) + "\n")
     _ensure_gitignore_env(project_dir)
     return True
 
@@ -914,20 +988,19 @@ class AppFrame(ctk.CTkFrame):
         form = ctk.CTkFrame(self.keys_frame, fg_color=C["surface"], corner_radius=6)
         form.pack(fill="x", padx=16, pady=(12, 0))
 
-        ctk.CTkLabel(form, text="Add or rotate a key", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 8))
+        ctk.CTkLabel(form, text="Add or rotate a key", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 6))
 
+        # Row 1: Name + Value + Category
         input_row = ctk.CTkFrame(form, fg_color="transparent")
-        input_row.pack(fill="x", padx=12, pady=(0, 10))
+        input_row.pack(fill="x", padx=12, pady=(0, 6))
 
-        # Name field
         nf = ctk.CTkFrame(input_row, fg_color="transparent")
         nf.pack(side="left", padx=(0, 6))
         ctk.CTkLabel(nf, text="NAME", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
         self.add_name = ctk.CTkEntry(nf, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
-                                     border_color=C["border2"], width=160)
+                                     border_color=C["border2"], width=180)
         self.add_name.pack(ipady=2)
 
-        # Value field
         vf = ctk.CTkFrame(input_row, fg_color="transparent")
         vf.pack(side="left", padx=(0, 6), fill="x", expand=True)
         ctk.CTkLabel(vf, text="VALUE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
@@ -935,22 +1008,25 @@ class AppFrame(ctk.CTkFrame):
                                       show="●", border_color=C["border2"])
         self.add_value.pack(fill="x", ipady=2)
 
-        # Category
         cf = ctk.CTkFrame(input_row, fg_color="transparent")
-        cf.pack(side="left", padx=(0, 6))
+        cf.pack(side="left", padx=(0, 0))
         ctk.CTkLabel(cf, text="CATEGORY", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
         self.add_cat = ctk.CTkOptionMenu(
-            cf, values=["General", "Trading", "AI", "Database", "Cloud", "Payment", "Communication", "Security"],
+            cf, values=["General", "Trading", "AI", "Database", "Cloud", "Payment", "Comms", "Security", "Crypto"],
             fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
-            text_color=C["text"], font=FONT_XS, width=120,
+            text_color=C["text"], font=FONT_XS, width=110,
         )
         self.add_cat.set("General")
         self.add_cat.pack(ipady=2)
 
-        btn_row = ctk.CTkFrame(input_row, fg_color="transparent")
-        btn_row.pack(side="left", pady=(16, 0))
-        make_btn(btn_row, "+ Add", self.add_key, fg_color=C["green_bg"], text_color=C["green"]).pack(side="left", padx=(0, 4))
-        make_btn(btn_row, "Bulk Upload", self.bulk_upload_keys, fg_color=C["accent"], text_color="white").pack(side="left")
+        # Row 2: Action buttons on their own line
+        btn_row = ctk.CTkFrame(form, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 10))
+        make_btn(btn_row, "+ Add Key", self.add_key, fg_color=C["green_bg"], text_color=C["green"]).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "+ Add Group", self.add_group_manual, fg_color=C["accent2"], text_color="white").pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "📤 Upload File", self.bulk_upload_keys, fg_color=C["accent"], text_color="white").pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "📁 Scan Import Folder", self.scan_import_folder, fg_color=C["btn"], text_color=C["text2"]).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Open Folder", self.open_import_folder, fg_color=C["btn"], text_color=C["text3"]).pack(side="left")
 
         # Search bar
         search_bar = ctk.CTkFrame(self.keys_frame, fg_color=C["bg2"], corner_radius=0)
@@ -1195,6 +1271,215 @@ class AppFrame(ctk.CTkFrame):
         self.add_value.delete(0, "end")
         self.render_all()
         messagebox.showinfo("Done", msg)
+
+    def add_group_manual(self):
+        """Dialog to manually add multiple keys under one named group."""
+        win = ctk.CTkToplevel(self)
+        win.title("Add Key Group")
+        win.geometry("560x540")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="Add Key Group", font=FONT_H2, text_color=C["text"]).pack(anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(win, text="All keys in this group will appear together in the vault.",
+                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # Group name row
+        gf = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        gf.pack(fill="x", padx=16, pady=(0, 10))
+        top_row = ctk.CTkFrame(gf, fg_color="transparent")
+        top_row.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(top_row, text="GROUP NAME", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 8))
+        group_var = tk.StringVar()
+        ctk.CTkEntry(top_row, textvariable=group_var, placeholder_text="e.g. plaid, stripe, alpaca",
+                     fg_color=C["bg3"], text_color=C["text"], width=260).pack(side="left")
+
+        # Scrollable key rows
+        ctk.CTkLabel(win, text="KEYS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 4))
+        scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0, height=280)
+        scroll.pack(fill="x", padx=16)
+
+        key_rows = []  # list of (name_var, value_var, secret_var)
+
+        def add_row(name_hint="", secret=False):
+            row = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=4)
+            row.pack(fill="x", pady=2)
+
+            nv = tk.StringVar(value=name_hint)
+            vv = tk.StringVar()
+            sv = tk.BooleanVar(value=secret)
+
+            nf = ctk.CTkFrame(row, fg_color="transparent")
+            nf.pack(side="left", padx=(8, 4), pady=6, fill="x", expand=True)
+            ctk.CTkLabel(nf, text="KEY NAME", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+            ctk.CTkEntry(nf, textvariable=nv, fg_color=C["bg3"], text_color=C["text"],
+                         placeholder_text="e.g. CLIENT_ID").pack(fill="x", ipady=2)
+
+            vf = ctk.CTkFrame(row, fg_color="transparent")
+            vf.pack(side="left", padx=(0, 4), pady=6, fill="x", expand=True)
+            ctk.CTkLabel(vf, text="VALUE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+            ctk.CTkEntry(vf, textvariable=vv, fg_color=C["bg3"], text_color=C["text"],
+                         show="●", placeholder_text="paste value").pack(fill="x", ipady=2)
+
+            ctk.CTkCheckBox(row, text="🔒", variable=sv, fg_color=C["accent"],
+                            hover_color=C["accent2"], width=40).pack(side="left", padx=(0, 6), pady=6)
+
+            def remove(r=row, entry=(nv, vv, sv)):
+                key_rows.remove(entry)
+                r.destroy()
+
+            make_btn(row, "✕", remove, fg_color=C["red_bg"], text_color=C["red"], width=30).pack(side="left", padx=(0, 8), pady=6)
+            key_rows.append((nv, vv, sv))
+
+        # Start with two rows (common case: id + secret)
+        add_row("CLIENT_ID", False)
+        add_row("SECRET", True)
+
+        # Add row button
+        btn_bar = ctk.CTkFrame(win, fg_color="transparent")
+        btn_bar.pack(fill="x", padx=16, pady=(6, 0))
+        make_btn(btn_bar, "+ Add Another Key", add_row).pack(side="left")
+
+        # Save button
+        def save_group():
+            group = group_var.get().strip()
+            if not group:
+                messagebox.showwarning("Missing", "Enter a group name.", parent=win)
+                return
+
+            prefix = re.sub(r'[^A-Z0-9]', '_', group.upper())
+            prefix = re.sub(r'_+', '_', prefix).strip('_')
+            source_label = f"{group}.manual"
+            now = datetime.now().isoformat()
+            added = []
+
+            for nv, vv, sv in key_rows:
+                raw_name = nv.get().strip().upper().replace(" ", "_")
+                value = vv.get().strip()
+                if not raw_name or not value:
+                    continue
+                # Prepend prefix if not already there
+                name = raw_name if raw_name.startswith(prefix + "_") or raw_name == prefix else f"{prefix}_{raw_name}"
+                provider = detect_provider(name, value)
+                if name in self.vault:
+                    old_val = self.vault[name]["value"]
+                    self.vault[name].setdefault("history", [])
+                    self.vault[name]["history"].insert(0, {"value": old_val, "retired": now})
+                    self.vault[name]["history"] = self.vault[name]["history"][:10]
+                    self.vault[name]["value"] = value
+                    self.vault[name]["rotated"] = now
+                    self.vault[name]["rotation_count"] = self.vault[name].get("rotation_count", 0) + 1
+                    self.vault[name]["secret"] = sv.get()
+                    self.vault[name]["source_file"] = source_label
+                    self.vault[name]["imported_at"] = now
+                else:
+                    self.vault[name] = {
+                        "value": value, "category": "General",
+                        "provider": provider, "created": now,
+                        "rotated": None, "rotation_count": 0, "previous": None,
+                        "secret": sv.get(), "source_file": source_label, "imported_at": now,
+                    }
+                added.append(name)
+
+            if not added:
+                messagebox.showwarning("Nothing added", "Fill in at least one key name and value.", parent=win)
+                return
+
+            self._refresh_all_projects()
+            self.save()
+            win.destroy()
+            self.render_all()
+            messagebox.showinfo("Saved", f"✓ Added {len(added)} key(s) to group '{group}':\n" + "\n".join(added))
+
+        make_btn(btn_bar, "✓ Save Group", save_group, fg_color=C["green_bg"], text_color=C["green"]).pack(side="right")
+
+    def open_import_folder(self):
+        ensure_vault_dir()
+        import subprocess
+        subprocess.Popen(f'explorer "{IMPORT_DIR}"')
+
+    def scan_import_folder(self):
+        ensure_vault_dir()
+        files = [f for f in IMPORT_DIR.iterdir()
+                 if f.is_file() and f.suffix.lower() in ('.txt', '.env', '.pushkey')
+                 and f.name != "README.txt"]
+        if not files:
+            messagebox.showinfo(
+                "Import Folder Empty",
+                f"No key files found in:\n{IMPORT_DIR}\n\n"
+                "Drop .txt or .env files into that folder,\nthen scan again."
+            )
+            return
+
+        parsed_entries = []
+        errors = []
+        for path in files:
+            basename = path.name
+            try:
+                file_entries, file_errors = _parse_env_file(str(path))
+                for err in file_errors:
+                    errors.append(f"{basename}: {err}")
+                for fe in file_entries:
+                    name, value = fe['name'], fe['value']
+                    provider = detect_provider(name, value)
+                    is_new = name not in self.vault
+                    parsed_entries.append({
+                        "name": name, "value": value, "provider": provider,
+                        "is_new": is_new, "file": basename,
+                        "line": fe['line'], "raw_line": fe.get('raw_line', ''),
+                        "secret": fe.get('secret', False),
+                    })
+            except Exception as e:
+                errors.append(f"{basename}: {str(e)}")
+
+        if not parsed_entries:
+            msg = f"No valid keys found in {len(files)} file(s)."
+            if errors:
+                msg += "\n\nErrors:\n" + "\n".join(errors[:5])
+            messagebox.showwarning("Nothing parsed", msg)
+            return
+
+        confirmed = self._show_bulk_preview_dialog(parsed_entries, errors)
+        if not confirmed:
+            return
+
+        added = []
+        now = datetime.now().isoformat()
+        for entry in confirmed:
+            name, value = entry["name"], entry["value"]
+            provider = entry["provider"]
+            source_file = entry.get("file")
+            source_line = entry.get("line")
+            source_raw = entry.get("raw_line", "")
+            if name in self.vault:
+                old_val = self.vault[name]["value"]
+                self.vault[name].setdefault("history", [])
+                self.vault[name]["history"].insert(0, {"value": old_val, "retired": now})
+                self.vault[name]["history"] = self.vault[name]["history"][:10]
+                self.vault[name]["value"] = value
+                self.vault[name]["rotated"] = now
+                self.vault[name]["rotation_count"] = self.vault[name].get("rotation_count", 0) + 1
+                self.vault[name]["source_file"] = source_file
+                self.vault[name]["imported_at"] = now
+                self.vault[name]["secret"] = entry.get("secret", False)
+                added.append(f"{name} (rotated)")
+            else:
+                self.vault[name] = {
+                    "value": value, "category": "General", "provider": provider,
+                    "created": now, "rotated": None, "rotation_count": 0, "previous": None,
+                    "source_file": source_file, "source_line": source_line,
+                    "source_raw": source_raw, "imported_at": now,
+                    "secret": entry.get("secret", False),
+                }
+                added.append(name)
+
+        self.save()
+        self._refresh_all_projects()
+        self.render_all()
+        messagebox.showinfo("Scan Complete",
+            f"✓ Imported {len(added)} key(s) from {len(files)} file(s)\n\n"
+            f"Folder: {IMPORT_DIR}")
 
     def bulk_upload_keys(self):
         paths = filedialog.askopenfilenames(
@@ -1931,17 +2216,54 @@ class AppFrame(ctk.CTkFrame):
             ctk.CTkLabel(win, text=f"+ {len(new_keys)} newly matched key(s) added since last sync",
                          font=FONT_XS, text_color=C["amber"]).pack(anchor="w", padx=16, pady=(0, 4))
 
+        # Read existing .env to detect rotations
+        env_path = os.path.join(path, ".env")
+        existing_env = {}
+        try:
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        result = _parse_env_line(line)
+                        if result:
+                            existing_env[result[0]] = result[1]
+        except Exception:
+            pass
+
+        def mask(val):
+            if not val: return "●●●●"
+            return "●" * min(8, max(4, len(val) - 4)) + val[-4:]
+
+        rotating = [k for k in keys_to_write if k in existing_env and existing_env[k] != self.vault[k]["value"]]
+        adding   = [k for k in keys_to_write if k not in existing_env]
+        unchanged= [k for k in keys_to_write if k in existing_env and existing_env[k] == self.vault[k]["value"]]
+
         ctk.CTkLabel(win, text=f"KEYS TO WRITE  ({len(keys_to_write)})", font=FONT_XS,
                      text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 4))
 
-        keys_scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=4, height=180)
+        keys_scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=4, height=200)
         keys_scroll.pack(fill="x", padx=16, pady=(0, 8))
 
         for k in keys_to_write:
-            is_new = k in new_keys
-            color = C["amber"] if is_new else C["text"]
-            tag = "  + new" if is_new else ""
-            ctk.CTkLabel(keys_scroll, text=f"  {k}{tag}", font=FONT_MONO_SM, text_color=color, anchor="w").pack(anchor="w")
+            new_val = self.vault[k]["value"]
+            row = ctk.CTkFrame(keys_scroll, fg_color=C["surface"], corner_radius=4)
+            row.pack(fill="x", pady=1)
+
+            if k in rotating:
+                # Before → After
+                old_val = existing_env[k]
+                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["amber"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
+                ctk.CTkLabel(row, text=mask(old_val), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text=" → ", font=FONT_XS, text_color=C["text3"]).pack(side="left")
+                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["amber"], anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text="rotate", font=FONT_XS, text_color=C["amber"]).pack(side="right", padx=8)
+            elif k in adding:
+                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["green"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
+                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["green"], anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text="new", font=FONT_XS, text_color=C["green"]).pack(side="right", padx=8)
+            else:
+                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["text2"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
+                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text="unchanged", font=FONT_XS, text_color=C["text3"]).pack(side="right", padx=8)
 
         btn_f = ctk.CTkFrame(win, fg_color="transparent")
         btn_f.pack(fill="x", padx=16, pady=12)
