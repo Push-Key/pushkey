@@ -12,6 +12,7 @@ authors = [{name = "Author", email = "author@example.com"}]
 requires-python = ">=3.9"
 dependencies = [
     "cryptography>=41.0.0",
+    "graphifyy @ git+https://github.com/safishamsi/graphify.git#egg=graphifyy",
 ]
 
 [project.optional-dependencies]
