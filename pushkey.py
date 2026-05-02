@@ -317,11 +317,19 @@ try:
 except ImportError:
     Fernet = InvalidToken = AESGCM = None  # type: ignore
 
-try:
-    from argon2.low_level import hash_secret_raw, Type as Argon2Type
-    _ARGON2_AVAILABLE = True
-except ImportError:
-    _ARGON2_AVAILABLE = False
+hash_secret_raw = None
+Argon2Type = None
+_ARGON2_AVAILABLE = False
+
+def _try_load_argon2():
+    global hash_secret_raw, Argon2Type, _ARGON2_AVAILABLE
+    try:
+        from argon2.low_level import hash_secret_raw as _h, Type as _T
+        hash_secret_raw = _h
+        Argon2Type = _T
+        _ARGON2_AVAILABLE = True
+    except ImportError:
+        pass
 
 # Magic prefix that marks AES-256-GCM encrypted data (v2 format)
 # Legacy Fernet tokens are base64url bytes and never start with this
@@ -2175,6 +2183,8 @@ def days_until_rotation(key_info):
 class LoginFrame(ctk.CTkFrame):
     def __init__(self, master, on_login):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
+        import threading
+        threading.Thread(target=_try_load_argon2, daemon=True).start()
         self.on_login = on_login
         self.is_new = not VAULT_FILE.exists()
 
@@ -4505,7 +4515,7 @@ class AppFrame(ctk.CTkFrame):
             fg_color="transparent", text_color=C["text"],
             border_width=0, font=FONT_SM,
         ).pack(fill="x", padx=4, ipady=4)
-        self._search_var.trace_add("write", lambda *_: self._render_key_rows())
+        self._search_var.trace_add("write", self._on_search_change)
 
         # ── Env filter pills ──
         pill_bar = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
@@ -4544,6 +4554,11 @@ class AppFrame(ctk.CTkFrame):
         self.keys_scroll.pack(fill="both", expand=True)
 
         self._render_key_rows()
+
+    def _on_search_change(self, *_):
+        if self._search_debounce_id:
+            self.after_cancel(self._search_debounce_id)
+        self._search_debounce_id = self.after(200, self._render_key_rows)
 
     def _render_key_rows(self):
         for w in self.keys_scroll.winfo_children():
