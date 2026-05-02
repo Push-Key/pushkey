@@ -2449,6 +2449,7 @@ class AppFrame(ctk.CTkFrame):
         self._clipboard_jobs = []
         self._search_var = tk.StringVar()
         self._timeline_subtab = tk.StringVar(value="lifecycle")
+        self._lifecycle_filter = tk.StringVar(value="all")
         self._timeline_page = 0
         self._timeline_filter = tk.StringVar(value="all")
         self._forecast_window = tk.StringVar(value="30")
@@ -3941,16 +3942,52 @@ class AppFrame(ctk.CTkFrame):
             self._render_forecast_tab()
 
     def _render_lifecycle(self):
-        """Card-based lifecycle view — one card per key, scannable at a glance.
-
-        Each card shows: name + provider badge + status pill,
-        three milestone columns (Created / Rotated / Due) with relative dates,
-        and a progress bar showing how far through the current rotation cycle.
-        """
+        """Card-based lifecycle view — one card per key, scannable at a glance."""
         real_keys = [(n, v) for n, v in self.vault.items() if not n.startswith("_")]
         if not real_keys:
             ctk.CTkLabel(self._timeline_content, text="No keys yet.",
                          font=FONT_H3, text_color=C["text3"]).pack(pady=40)
+            return
+
+        # Filter pills — let users narrow to just the keys that need attention
+        filter_bar = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
+        filter_bar.pack(fill="x", padx=14, pady=(10, 4))
+
+        counts = {
+            "all":      len(real_keys),
+            "critical": sum(1 for _, v in real_keys if health_status(v) == "critical"),
+            "warning":  sum(1 for _, v in real_keys if health_status(v) == "warning"),
+            "healthy":  sum(1 for _, v in real_keys if health_status(v) == "healthy"),
+        }
+        pill_defs = [
+            ("all",      "All",      C["text2"]),
+            ("critical", "Critical", C["red"]),
+            ("warning",  "Warning",  C["amber"]),
+            ("healthy",  "Healthy",  C["green"]),
+        ]
+        for fkey, flabel, fcol in pill_defs:
+            active = self._lifecycle_filter.get() == fkey
+            pill = make_btn(
+                filter_bar,
+                f"{flabel}  {counts[fkey]}",
+                lambda k=fkey: (self._lifecycle_filter.set(k),
+                                self._switch_timeline_subtab()),
+                fg_color=fcol if active else C["btn"],
+                text_color="#FFFFFF" if active else fcol,
+                width=100, height=28,
+            )
+            pill.pack(side="left", padx=(0, 6))
+
+        # Apply filter
+        active_filter = self._lifecycle_filter.get()
+        if active_filter != "all":
+            real_keys = [(n, v) for n, v in real_keys
+                         if health_status(v) == active_filter]
+
+        if not real_keys:
+            ctk.CTkLabel(self._timeline_content,
+                         text=f"No {active_filter} keys.",
+                         font=FONT_SM, text_color=C["text3"]).pack(pady=40)
             return
 
         container = ctk.CTkScrollableFrame(self._timeline_content,
@@ -4005,16 +4042,33 @@ class AppFrame(ctk.CTkFrame):
             card.pack(fill="both", expand=True, padx=(4, 0))
             card.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            # Header row: name + provider + status pill
+            # Header row: category dot + name + provider + status pill + Rotate
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=14, pady=(10, 4))
+
+            # Provider category color dot (from CAT_COLORS) — instant visual grouping
+            cat = PROVIDERS.get(provider, {}).get("category", "General")
+            cat_col = CAT_COLORS.get(cat, C["text3"])
+            ctk.CTkLabel(top, text="●", font=(_MONO_FONT, 14),
+                         text_color=cat_col, width=16).pack(side="left")
+
             name_lbl = ctk.CTkLabel(top, text=name, font=(_MONO_FONT, 13, "bold"),
                                     text_color=C["text"], anchor="w", cursor="hand2")
             name_lbl.pack(side="left")
             name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            ctk.CTkLabel(top, text=f"  •  {provider}", font=FONT_XS,
+            ctk.CTkLabel(top, text=f"  •  {provider}  •  {cat}", font=FONT_XS,
                          text_color=C["text3"]).pack(side="left")
+
+            # Inline Rotate action — no need to open the detail modal
+            make_btn(
+                top, "Rotate",
+                lambda n=name: (self.rotate_key(n),
+                                self._invalidate_tabs("dashboard", "keys", "timeline")),
+                fg_color=C["red_bg"] if status == "critical" else C["btn"],
+                text_color=status_color,
+                width=72, height=24,
+            ).pack(side="right", padx=(8, 0))
 
             pill = ctk.CTkFrame(top, fg_color=status_color, corner_radius=10)
             pill.pack(side="right")
@@ -4379,6 +4433,49 @@ class AppFrame(ctk.CTkFrame):
                 text="No scheduled rotations in this window. Open a key to set one.",
                 font=FONT_XS, text_color=C["text3"]
             ).pack(pady=(0, 10))
+            return
+
+        # "Next 5 rotations" list — answers WHICH keys are due, not just how many
+        upcoming = []
+        for n, info in all_scheduled:
+            d = days_until_rotation(info)
+            if d is None or d > window_days:
+                continue
+            upcoming.append((d, n, info))
+        upcoming.sort(key=lambda x: x[0])
+
+        if upcoming:
+            divider = ctk.CTkFrame(outer, fg_color=C["border"], height=1)
+            divider.pack(fill="x", padx=12, pady=(2, 0))
+            list_hdr = ctk.CTkFrame(outer, fg_color="transparent")
+            list_hdr.pack(fill="x", padx=12, pady=(8, 4))
+            ctk.CTkLabel(list_hdr, text="UPCOMING ROTATIONS",
+                         font=(_UI_FONT, 9, "bold"),
+                         text_color=C["text3"]).pack(side="left")
+            for d, n, info in upcoming[:5]:
+                if d < 0:
+                    when = f"OVERDUE {abs(int(d))}d"
+                    col = C["red"]
+                elif d == 0:
+                    when = "TODAY"
+                    col = C["amber"]
+                elif d <= 7:
+                    when = f"in {int(d)}d"
+                    col = C["amber"]
+                else:
+                    when = f"in {int(d)}d"
+                    col = C["text2"]
+                row = ctk.CTkFrame(outer, fg_color="transparent")
+                row.pack(fill="x", padx=12, pady=1)
+                # Colored dot
+                ctk.CTkLabel(row, text="●", font=(_MONO_FONT, 11),
+                             text_color=col, width=14).pack(side="left")
+                ctk.CTkLabel(row, text=n, font=FONT_MONO_SM,
+                             text_color=C["text"], anchor="w").pack(
+                    side="left", fill="x", expand=True, padx=(2, 8))
+                ctk.CTkLabel(row, text=when, font=(_UI_FONT, 10, "bold"),
+                             text_color=col).pack(side="right")
+            ctk.CTkFrame(outer, fg_color="transparent", height=8).pack()
 
     def render_dashboard(self):
         for w in self.dash_frame.winfo_children():
@@ -4435,15 +4532,22 @@ class AppFrame(ctk.CTkFrame):
             "SECURE"   if health_pct < 0.90 else
             "OPTIMAL"
         )
-        gauge_left = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
-                                   border_width=1, border_color=C["border"],
+        # Match gauge card surface to the gauge color so the score "lights up"
+        score_bg = (
+            C["red_bg"]    if health_pct < 0.50 else
+            C["amber_bg"]  if health_pct < 0.75 else
+            C["accent_dim"] if health_pct < 0.90 else
+            C["green_bg"]
+        )
+        gauge_left = ctk.CTkFrame(row1, fg_color=score_bg, corner_radius=8,
+                                   border_width=2, border_color=score_color,
                                    width=170, height=CARD_H)
         gauge_left.pack(side="left", padx=(0, 8))
         gauge_left.pack_propagate(False)
-        ctk.CTkLabel(gauge_left, text="Security Score", font=FONT_XS,
-                     text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(gauge_left, text="SECURITY SCORE", font=(_UI_FONT, 9, "bold"),
+                     text_color=score_color).pack(anchor="w", padx=12, pady=(10, 0))
         score_canvas = tk.Canvas(gauge_left, width=160, height=140,
-                                  bg=C["surface"], highlightthickness=0)
+                                  bg=score_bg, highlightthickness=0)
         score_canvas.pack(pady=(0, 8))
         _draw_arc_gauge(score_canvas, health_pct, score_color,
                         str(int(health_pct * 100)), score_label)
@@ -4457,22 +4561,32 @@ class AppFrame(ctk.CTkFrame):
         key_color   = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
         needs_rotation = warning + critical
 
+        # Each stat card gets a tinted bg + accent-colored border so the metric
+        # color radiates from the whole card, not just the digit. Healthy = green
+        # glow, Need Rotation = amber/red glow, Projects = cyan, Total = neutral.
+        rot_color = C["red"] if critical else (C["amber"] if needs_rotation else C["green"])
+        rot_bg    = C["red_bg"] if critical else (C["amber_bg"] if needs_rotation else C["green_bg"])
+
         stat_defs = [
-            ("Total Keys",    key_display,         key_color,   None,          None),
-            ("Healthy",       str(healthy),         C["green"],  healthy,       total),
-            ("Need Rotation", str(needs_rotation),
-             C["amber"] if needs_rotation else C["green"], needs_rotation, total),
-            ("Projects",      str(projects),        C["accent"], None,          None),
+            # (label, value, value_color, bar_val, bar_max, card_bg, card_border)
+            ("Total Keys",    key_display,         key_color,        None,           None,
+             C["surface"], C["border"]),
+            ("Healthy",       str(healthy),        C["green"],       healthy,        total,
+             C["green_bg"], C["green"]),
+            ("Need Rotation", str(needs_rotation), rot_color,        needs_rotation, total,
+             rot_bg,        rot_color),
+            ("Projects",      str(projects),       C["accent"],      None,           None,
+             C["accent_dim"], C["accent"]),
         ]
-        for label, val, color, bar_val, bar_max in stat_defs:
-            card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=8,
-                                border_width=1, border_color=C["border"],
+        for label, val, color, bar_val, bar_max, card_bg, card_border in stat_defs:
+            card = ctk.CTkFrame(stats_frame, fg_color=card_bg, corner_radius=8,
+                                border_width=2, border_color=card_border,
                                 width=STAT_W, height=CARD_H)
             card.pack(side="left", padx=(0, 8))
             card.pack_propagate(False)
-            ctk.CTkLabel(card, text=label, font=FONT_XS,
-                         text_color=C["text3"]).pack(anchor="w", padx=14, pady=(16, 4))
-            ctk.CTkLabel(card, text=val, font=(_UI_FONT, 30, "bold"),
+            ctk.CTkLabel(card, text=label.upper(), font=(_UI_FONT, 9, "bold"),
+                         text_color=color).pack(anchor="w", padx=14, pady=(16, 4))
+            ctk.CTkLabel(card, text=val, font=(_UI_FONT, 32, "bold"),
                          text_color=color).pack(anchor="w", padx=14, pady=(0, 8))
             if bar_val is not None and bar_max and bar_max > 0:
                 bar_bg = ctk.CTkFrame(card, fg_color=C["bg3"], height=6, corner_radius=3)
@@ -4492,15 +4606,15 @@ class AppFrame(ctk.CTkFrame):
         target_30d = max(1, len(real_keys) // 3)
         velocity_pct = min(1.0, rotations_30d / target_30d)
 
-        gauge_right = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
-                                    border_width=1, border_color=C["border"],
+        gauge_right = ctk.CTkFrame(row1, fg_color=C["accent_dim"], corner_radius=8,
+                                    border_width=2, border_color=C["accent"],
                                     width=170, height=CARD_H)
         gauge_right.pack(side="left", padx=(0, 0))
         gauge_right.pack_propagate(False)
-        ctk.CTkLabel(gauge_right, text="Rotation Rate", font=FONT_XS,
-                     text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(gauge_right, text="ROTATION RATE", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["accent"]).pack(anchor="w", padx=12, pady=(10, 0))
         vel_canvas = tk.Canvas(gauge_right, width=160, height=140,
-                                bg=C["surface"], highlightthickness=0)
+                                bg=C["accent_dim"], highlightthickness=0)
         vel_canvas.pack(pady=(0, 8))
         _draw_arc_gauge(vel_canvas, velocity_pct, C["accent"],
                         str(rotations_30d), "THIS MONTH")
