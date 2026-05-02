@@ -3744,8 +3744,8 @@ class AppFrame(ctk.CTkFrame):
         keys = list(self.vault.items())
         real_keys = [(n, v) for n, v in keys if not n.startswith("_")]
         total = len(real_keys)
-        healthy = sum(1 for _, v in real_keys if health_status(v) == "healthy")
-        warning = sum(1 for _, v in real_keys if health_status(v) == "warning")
+        healthy  = sum(1 for _, v in real_keys if health_status(v) == "healthy")
+        warning  = sum(1 for _, v in real_keys if health_status(v) == "warning")
         critical = sum(1 for _, v in real_keys if health_status(v) == "critical")
         projects = len(self.config.get("projects", {}))
         key_limit = tier_limits().get("max_keys")
@@ -3761,40 +3761,92 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkLabel(tier_pill, text=f"{t['label']} Plan",
                      font=FONT_XS, text_color=C["accent"]).pack(padx=8, pady=2)
 
-        # ── Stats cards with health bar ──
-        stats_frame = ctk.CTkFrame(pad, fg_color="transparent")
-        stats_frame.pack(fill="x", pady=(0, 20))
+        # ── Row 1: [Security Gauge] [Stat Cards] [Velocity Gauge] ──
+        row1 = ctk.CTkFrame(pad, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 16))
+
+        # Security score gauge (left)
+        health_pct = healthy / total if total else 1.0
+        score_color = (
+            C["red"]    if health_pct < 0.50 else
+            C["amber"]  if health_pct < 0.75 else
+            C["accent"] if health_pct < 0.90 else
+            C["green"]
+        )
+        score_label = (
+            "CRITICAL" if health_pct < 0.50 else
+            "AT RISK"  if health_pct < 0.75 else
+            "SECURE"   if health_pct < 0.90 else
+            "OPTIMAL"
+        )
+        gauge_left = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
+                                   border_width=1, border_color=C["border"],
+                                   width=170)
+        gauge_left.pack(side="left", padx=(0, 8), fill="y")
+        gauge_left.pack_propagate(False)
+        ctk.CTkLabel(gauge_left, text="Security Score", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
+        score_canvas = tk.Canvas(gauge_left, width=160, height=140,
+                                  bg=C["surface"], highlightthickness=0)
+        score_canvas.pack(pady=(0, 8))
+        _draw_arc_gauge(score_canvas, health_pct, score_color,
+                        str(int(health_pct * 100)), score_label)
+
+        # Stat cards (center, expanding)
+        stats_frame = ctk.CTkFrame(row1, fg_color="transparent")
+        stats_frame.pack(side="left", fill="both", expand=True)
 
         key_display = f"{total} / {key_limit}" if key_limit else str(total)
-        key_color = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
+        key_color   = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
         needs_rotation = warning + critical
-        health_pct = int((healthy / total * 100)) if total else 100
 
         stat_defs = [
-            ("Total Keys",      key_display,              key_color,    None,       None),
-            ("Healthy",         str(healthy),             C["green"],   healthy,    total),
-            ("Need Rotation",   str(needs_rotation),      C["amber"] if needs_rotation else C["green"],
-                                needs_rotation,  total),
-            ("Projects",        str(projects),            C["accent"],  None,       None),
+            ("Total Keys",    key_display,         key_color,   None,          None),
+            ("Healthy",       str(healthy),         C["green"],  healthy,       total),
+            ("Need Rotation", str(needs_rotation),
+             C["amber"] if needs_rotation else C["green"], needs_rotation, total),
+            ("Projects",      str(projects),        C["accent"], None,          None),
         ]
         for label, val, color, bar_val, bar_max in stat_defs:
             card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=8,
                                 border_width=1, border_color=C["border"])
-            card.pack(side="left", fill="x", expand=True, padx=(0, 10))
+            card.pack(side="left", fill="x", expand=True, padx=(0, 8))
             ctk.CTkLabel(card, text=label, font=FONT_XS,
                          text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 2))
             ctk.CTkLabel(card, text=val, font=(_UI_FONT, 26, "bold"),
                          text_color=color).pack(anchor="w", padx=14)
             if bar_val is not None and bar_max and bar_max > 0:
-                bar_bg = ctk.CTkFrame(card, fg_color=C["bg3"], height=3, corner_radius=2)
+                bar_bg = ctk.CTkFrame(card, fg_color=C["bg3"], height=6, corner_radius=3)
                 bar_bg.pack(fill="x", padx=14, pady=(4, 12))
                 bar_bg.pack_propagate(False)
-                pct = max(0.02, bar_val / bar_max)
-                bar_fill = ctk.CTkFrame(bar_bg, fg_color=color, height=3, corner_radius=2,
-                                        width=int(pct * 160))
+                pct_bar = max(0.02, bar_val / bar_max)
+                bar_fill = ctk.CTkFrame(bar_bg, fg_color=color, height=6, corner_radius=3,
+                                        width=int(pct_bar * 160))
                 bar_fill.place(x=0, y=0, relheight=1)
             else:
-                ctk.CTkFrame(card, fg_color="transparent", height=19).pack()
+                ctk.CTkFrame(card, fg_color="transparent", height=22).pack()
+
+        # Rotation velocity gauge (right)
+        log_lines = _log_decrypt_all()
+        rotations_30d = sum(
+            1 for ln in log_lines
+            if "rotated" in ln.lower() and _log_line_age_days(ln) <= 30
+        )
+        target_30d = max(1, len(real_keys) // 3)
+        velocity_pct = min(1.0, rotations_30d / target_30d)
+
+        gauge_right = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
+                                    border_width=1, border_color=C["border"],
+                                    width=170)
+        gauge_right.pack(side="left", padx=(0, 0), fill="y")
+        gauge_right.pack_propagate(False)
+        ctk.CTkLabel(gauge_right, text="Rotation Rate", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
+        vel_canvas = tk.Canvas(gauge_right, width=160, height=140,
+                                bg=C["surface"], highlightthickness=0)
+        vel_canvas.pack(pady=(0, 8))
+        _draw_arc_gauge(vel_canvas, velocity_pct, C["accent"],
+                        str(rotations_30d), "THIS MONTH")
 
         # Scheduled rotations due
         due_keys = [(n, i) for n, i in keys
