@@ -2120,7 +2120,7 @@ def _draw_arc_gauge(canvas: tk.Canvas, pct: float, color: str,
         dx = cx + r * math.cos(end_rad)
         dy = cy - r * math.sin(end_rad)
         canvas.create_oval(dx - 5, dy - 5, dx + 5, dy + 5,
-                           fill=color, outline=C["bg"])
+                           fill=color, outline=bg)
 
     # Center value text
     canvas.create_text(cx, cy - 6, text=center_text,
@@ -2577,7 +2577,7 @@ class AppFrame(ctk.CTkFrame):
             self._tab_rendered.add(key)
         elif key in self._tab_dirty:
             getattr(self, self._NAV_RENDER[key])()
-            self._tab_dirty.discard(key)
+        self._tab_dirty.discard(key)
 
     def _invalidate_tabs(self, *tabs: str):
         active = self._active_nav.get()
@@ -3864,6 +3864,8 @@ class AppFrame(ctk.CTkFrame):
             cv.pack(side="left", fill="x", expand=True, padx=4)
 
             def _draw_lane(canvas=cv, inf=info, rb=row_bg):
+                if not canvas.winfo_exists():
+                    return
                 canvas.update_idletasks()
                 W = canvas.winfo_width()
                 if W < 20:
@@ -4234,8 +4236,12 @@ class AppFrame(ctk.CTkFrame):
             ctk.CTkLabel(forecast_hdr, text="ROTATION FORECAST", font=FONT_XS,
                          text_color=C["text3"]).pack(side="left")
 
-            self._forecast_window = getattr(self, "_forecast_window", tk.StringVar(value="30"))
             window_days = int(self._forecast_window.get())
+            # Filter to only keys due within the selected window
+            keys_with_schedule = [
+                (n, i) for n, i in keys_with_schedule
+                if days_until_rotation(i) is None or days_until_rotation(i) <= window_days
+            ]
 
             win_menu = ctk.CTkOptionMenu(
                 forecast_hdr,
@@ -4277,6 +4283,8 @@ class AppFrame(ctk.CTkFrame):
                 bar_wrap.pack_propagate(False)
 
                 def _draw_bar(bw=bar_wrap, pct=fill_pct, col=bar_color):
+                    if not bw.winfo_exists():
+                        return
                     bw.update_idletasks()
                     w = bw.winfo_width()
                     if w > 10:
