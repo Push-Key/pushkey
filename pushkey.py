@@ -4234,89 +4234,224 @@ class AppFrame(ctk.CTkFrame):
                      ).pack(side="left")
 
     def _render_forecast_tab(self):
-        keys_with_schedule = [
-            (n, i) for n, i in self.vault.items()
-            if not n.startswith("_")
-            and i.get("rotation_schedule")
-            and isinstance(i["rotation_schedule"], (int, float))
-        ]
+        """Forecast: stat strip + 90-day heatmap + grouped upcoming list.
 
-        if not keys_with_schedule:
-            ctk.CTkLabel(self._timeline_content,
-                         text="No keys have rotation schedules set.\nSet one in the key detail view.",
-                         font=FONT_XS, text_color=C["text3"],
-                         justify="center").pack(pady=60)
-            return
+        Even when no keys have rotation schedules, still render the layout
+        with a clear empty-state CTA and a faded calendar so the page never
+        looks broken or empty.
+        """
+        real_keys = [(n, i) for n, i in self.vault.items() if not n.startswith("_")]
+        scheduled = [(n, i) for n, i in real_keys
+                     if i.get("rotation_schedule")
+                     and isinstance(i["rotation_schedule"], (int, float))]
+
+        scroll = ctk.CTkScrollableFrame(self._timeline_content,
+                                        fg_color=C["bg"], corner_radius=0)
+        scroll.pack(fill="both", expand=True)
+
+        # Header
+        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+        hdr.pack(fill="x", padx=18, pady=(14, 6))
+        ctk.CTkLabel(hdr, text="Rotation Forecast", font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
+        ctk.CTkLabel(hdr, text="Next 90 days · click a key to manage its schedule",
+                     font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(12, 0))
+
+        # ─────────── Stat strip ───────────
+        from collections import Counter
+        buckets: Counter = Counter()
+        for n, i in scheduled:
+            d = days_until_rotation(i)
+            if d is None:
+                continue
+            d = int(d)
+            if d < 0:
+                buckets["overdue"] += 1
+            elif d <= 7:
+                buckets["week"] += 1
+            elif d <= 30:
+                buckets["month"] += 1
+            else:
+                buckets["later"] += 1
+
+        strip = ctk.CTkFrame(scroll, fg_color="transparent")
+        strip.pack(fill="x", padx=18, pady=(4, 12))
+
+        def _strip_card(parent, val, label, col, bg):
+            box = ctk.CTkFrame(parent, fg_color=bg, corner_radius=8,
+                               border_width=2, border_color=col,
+                               width=160, height=78)
+            box.pack(side="left", padx=(0, 8))
+            box.pack_propagate(False)
+            ctk.CTkLabel(box, text=label, font=(_UI_FONT, 9, "bold"),
+                         text_color=col).pack(anchor="w", padx=12, pady=(10, 0))
+            ctk.CTkLabel(box, text=str(val), font=(_UI_FONT, 26, "bold"),
+                         text_color=col).pack(anchor="w", padx=12)
+
+        _strip_card(strip, buckets.get("overdue", 0), "OVERDUE",     C["red"],    C["red_bg"])
+        _strip_card(strip, buckets.get("week", 0),    "DUE THIS WEEK", C["amber"], C["amber_bg"])
+        _strip_card(strip, buckets.get("month", 0),   "DUE THIS MONTH", C["accent"], C["accent_dim"])
+        _strip_card(strip, buckets.get("later", 0),   "LATER",        C["green"],  C["green_bg"])
+
+        # ─────────── 90-day heatmap (full width) ───────────
+        cal_box = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=8,
+                               border_width=1, border_color=C["border"])
+        cal_box.pack(fill="x", padx=18, pady=(0, 12))
+
+        ch = ctk.CTkFrame(cal_box, fg_color="transparent")
+        ch.pack(fill="x", padx=14, pady=(10, 4))
+        ctk.CTkLabel(ch, text="NEXT 90 DAYS",
+                     font=(_UI_FONT, 9, "bold"), text_color=C["text3"]).pack(side="left")
+        ctk.CTkLabel(ch, text="●  Critical  ●  Soon  ●  Scheduled",
+                     font=FONT_XS, text_color=C["text3"]).pack(side="right")
+
+        # Per-day rotation count
+        day_count: Counter = Counter()
+        for n, i in scheduled:
+            d = days_until_rotation(i)
+            if d is None:
+                continue
+            d = int(d)
+            if d < 0:
+                day_count[0] += 1
+            elif d < 90:
+                day_count[d] += 1
+
+        max_count = max(day_count.values()) if day_count else 0
 
         DAYS = 90
-        COL_W = 18
-        ROW_H = 28
-        NAME_W = 160
-        PAD = 16
+        CELL = 18
+        GAP = 3
+        LABEL_W = 28
+        cv_w = LABEL_W + ((DAYS + 6) // 7) * (CELL + GAP) + 4
+        cv_h = 7 * (CELL + GAP) + 22
+
+        cv = tk.Canvas(cal_box, width=cv_w, height=cv_h,
+                       bg=C["surface"], highlightthickness=0)
+        cv.pack(padx=14, pady=(2, 12), anchor="w")
+
+        for i, ch_w in enumerate(["M", "T", "W", "T", "F", "S", "S"]):
+            cv.create_text(LABEL_W - 6, 22 + i * (CELL + GAP) + CELL // 2,
+                           text=ch_w, font=(_UI_FONT, 9), fill=C["text3"], anchor="e")
 
         now = datetime.now().date()
-        day_range = [now + timedelta(days=d) for d in range(DAYS)]
+        today_wd = now.weekday()
+        labeled_months: set = set()
 
-        outer = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
-        outer.pack(fill="both", expand=True, padx=PAD, pady=(12, 0))
+        for d in range(DAYS):
+            day = now + timedelta(days=d)
+            week = (d + today_wd) // 7
+            row = (d + today_wd) % 7
+            x0 = LABEL_W + week * (CELL + GAP)
+            y0 = 22 + row * (CELL + GAP)
+            x1 = x0 + CELL
+            y1 = y0 + CELL
 
-        # Month headers
-        month_bar = tk.Canvas(outer, bg=C["bg"], height=20, highlightthickness=0)
-        month_bar.pack(fill="x")
+            count = day_count.get(d, 0)
+            if count == 0:
+                fill = C["bg3"]
+                outline = C["border"]
+            else:
+                ratio = count / max_count if max_count else 0
+                if ratio >= 0.66:
+                    fill = C["red"]
+                elif ratio >= 0.33:
+                    fill = C["amber"]
+                else:
+                    fill = C["accent"]
+                outline = fill
 
-        x = NAME_W + 4
-        prev_month = None
-        for i, day in enumerate(day_range):
-            if day.month != prev_month:
-                month_bar.create_text(x + 2, 10,
-                                      text=day.strftime("%b"),
-                                      font=(_UI_FONT, 9), fill=C["text3"],
-                                      anchor="w")
-                prev_month = day.month
-            x += COL_W
+            if d == 0:
+                cv.create_rectangle(x0 - 2, y0 - 2, x1 + 2, y1 + 2,
+                                    outline=C["accent"], width=2)
+            cv.create_rectangle(x0, y0, x1, y1, fill=fill, outline=outline)
 
-        # Day columns + key rows
-        canvas_h = ROW_H * len(keys_with_schedule) + 4
-        canvas_w = NAME_W + COL_W * DAYS + 4
+            if day.day <= 7 and day.month not in labeled_months:
+                cv.create_text(x0, 8, text=day.strftime("%b").upper(),
+                               font=(_UI_FONT, 9, "bold"),
+                               fill=C["text3"], anchor="w")
+                labeled_months.add(day.month)
 
-        scroll_x = tk.Scrollbar(outer, orient="horizontal")
-        scroll_x.pack(side="bottom", fill="x")
+        # ─────────── Empty-state CTA when nothing scheduled ───────────
+        if not scheduled:
+            empty = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=8,
+                                 border_width=1, border_color=C["border"])
+            empty.pack(fill="x", padx=18, pady=8)
+            ctk.CTkLabel(empty, text="", image=icon("clock", 28, C["accent"])
+                         ).pack(pady=(18, 6))
+            ctk.CTkLabel(empty, text="No rotation schedules yet",
+                         font=FONT_H3, text_color=C["text"]).pack()
+            ctk.CTkLabel(
+                empty,
+                text="Forecast lights up when your keys have rotation schedules.\n"
+                     "Open any key → set 'Rotate every N days' to see it tracked here.",
+                font=FONT_XS, text_color=C["text3"], justify="center"
+            ).pack(pady=(2, 6))
+            make_btn(empty, "Open All Keys",
+                     lambda: self._nav_switch("keys"),
+                     fg_color=C["accent"], text_color="#FFFFFF",
+                     width=160, height=34).pack(pady=(0, 18))
+            return
 
-        cv = tk.Canvas(outer, bg=C["bg"], height=canvas_h,
-                       xscrollcommand=scroll_x.set, highlightthickness=0)
-        cv.pack(fill="both", expand=True)
-        cv.configure(scrollregion=(0, 0, canvas_w, canvas_h))
-        scroll_x.config(command=cv.xview)
+        # ─────────── Grouped upcoming list ───────────
+        groups = [
+            ("OVERDUE",        C["red"],    lambda d: d is not None and d < 0),
+            ("DUE THIS WEEK",  C["amber"],  lambda d: d is not None and 0 <= d <= 7),
+            ("DUE THIS MONTH", C["accent"], lambda d: d is not None and 7 < d <= 30),
+            ("LATER (≤90D)",   C["green"],  lambda d: d is not None and 30 < d <= 90),
+        ]
 
-        for row_idx, (name, info) in enumerate(sorted(keys_with_schedule,
-                                                       key=lambda x: x[0])):
-            y0 = row_idx * ROW_H
-            y1 = y0 + ROW_H
-            row_bg = C["bg"] if row_idx % 2 == 0 else C["bg2"]
-            cv.create_rectangle(0, y0, canvas_w, y1, fill=row_bg, outline="")
+        for label, col, predicate in groups:
+            matches = []
+            for n, i in scheduled:
+                d = days_until_rotation(i)
+                if predicate(d):
+                    matches.append((d, n, i))
+            if not matches:
+                continue
+            matches.sort(key=lambda x: x[0])
 
-            cv.create_text(4, (y0 + y1) // 2, text=name,
-                           font=(_MONO_FONT, 10), fill=C["text"], anchor="w")
+            sec_hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+            sec_hdr.pack(fill="x", padx=18, pady=(8, 2))
+            ctk.CTkLabel(sec_hdr, text=label, font=(_UI_FONT, 10, "bold"),
+                         text_color=col).pack(side="left")
+            ctk.CTkLabel(sec_hdr, text=f"  {len(matches)}",
+                         font=FONT_XS, text_color=C["text3"]).pack(side="left")
 
-            due_days = days_until_rotation(info)
+            for d, n, info in matches:
+                # Pill-style row card
+                outer = ctk.CTkFrame(scroll, fg_color=col, corner_radius=8)
+                outer.pack(fill="x", padx=18, pady=2)
+                row = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7)
+                row.pack(fill="both", expand=True, padx=(4, 0))
 
-            for col_idx, day in enumerate(day_range):
-                x0 = NAME_W + col_idx * COL_W
-                x1 = x0 + COL_W - 1
+                inside = ctk.CTkFrame(row, fg_color="transparent")
+                inside.pack(fill="x", padx=14, pady=10)
 
-                if day == now:
-                    cv.create_rectangle(x0, y0, x1, y1,
-                                        fill=C["accent_dim"], outline="")
+                provider = info.get("provider") or "—"
+                cat = PROVIDERS.get(provider, {}).get("category", "General")
+                cat_col = CAT_COLORS.get(cat, C["text3"])
+                ctk.CTkLabel(inside, text="●", font=(_MONO_FONT, 12),
+                             text_color=cat_col, width=14).pack(side="left")
+                ctk.CTkLabel(inside, text=n, font=FONT_MONO,
+                             text_color=C["text"], cursor="hand2"
+                             ).pack(side="left", padx=(2, 8))
+                ctk.CTkLabel(inside, text=provider, font=FONT_XS,
+                             text_color=C["text3"]).pack(side="left")
 
-                if due_days is not None:
-                    days_from_now = (day - now).days
-                    if due_days <= 0 and days_from_now == 0:
-                        cv.create_rectangle(x0 + 1, y0 + 4, x1 - 1, y1 - 4,
-                                            fill=C["red"], outline="")
-                    elif days_from_now >= 0 and days_from_now == int(due_days):
-                        cell_color = C["amber"] if due_days <= 7 else C["green_bg"]
-                        cv.create_rectangle(x0 + 1, y0 + 4, x1 - 1, y1 - 4,
-                                            fill=cell_color, outline="")
+                if d < 0:
+                    when = f"OVERDUE BY {abs(int(d))}D"
+                elif d == 0:
+                    when = "DUE TODAY"
+                else:
+                    when = f"IN {int(d)}D"
+                ctk.CTkLabel(inside, text=when, font=(_UI_FONT, 10, "bold"),
+                             text_color=col).pack(side="right", padx=(8, 0))
+                make_btn(inside, "Rotate",
+                         lambda nm=n: (self.rotate_key(nm),
+                                       self._invalidate_tabs("dashboard", "keys", "timeline")),
+                         fg_color=C["btn"], text_color=col,
+                         width=64, height=24).pack(side="right")
 
     def render_all(self):
         self.render_dashboard()
@@ -4648,78 +4783,11 @@ class AppFrame(ctk.CTkFrame):
         )
         win_menu.pack(side="right")
 
-        # Mini contribution-style calendar — always shown, gives instant
-        # sense of "what's the next 30/60/90 days look like"
+        # The heatmap calendar + "upcoming rotations" list inside it now
+        # carries everything the old gantt did, in a way that's actually
+        # readable. Removed the redundant horizontal-bar gantt that users
+        # found hard to parse.
         self._draw_forecast_calendar(pad, all_scheduled, window_days)
-
-        gantt_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
-                                   border_width=1, border_color=C["border"])
-        gantt_frame.pack(fill="x", pady=(0, 16))
-
-        if not keys_with_schedule:
-            # Empty state — explains what this section is for
-            empty = ctk.CTkFrame(gantt_frame, fg_color="transparent")
-            empty.pack(pady=18, padx=16)
-            if not all_scheduled:
-                msg = "No keys have a rotation schedule set."
-                hint = "Open a key → set 'Rotate every N days' to see it here."
-            else:
-                msg = f"No rotations due in next {window_days} days."
-                hint = "Try a longer window, or all your keys are healthy."
-            ctk.CTkLabel(empty, text=msg, font=FONT_SM,
-                         text_color=C["text2"]).pack()
-            ctk.CTkLabel(empty, text=hint, font=FONT_XS,
-                         text_color=C["text3"]).pack(pady=(2, 0))
-        if keys_with_schedule:
-
-            for name, info in sorted(keys_with_schedule,
-                                     key=lambda x: days_until_rotation(x[1]) or 0):
-                schedule = int(info["rotation_schedule"])
-                days_left = days_until_rotation(info) or 0
-                days_used = schedule - days_left
-                fill_pct = max(0.02, min(1.0, days_used / schedule))
-                status = health_status(info)
-                bar_color = health_color(status)
-                overdue = days_left <= 0
-
-                row = ctk.CTkFrame(gantt_frame, fg_color="transparent")
-                row.pack(fill="x", padx=10, pady=3)
-
-                # Key name
-                ctk.CTkLabel(row, text=name, font=FONT_MONO_SM,
-                             text_color=C["text"], width=160,
-                             anchor="w").pack(side="left")
-
-                # Bar area
-                bar_wrap = ctk.CTkFrame(row, fg_color=C["bg3"], height=8,
-                                        corner_radius=4)
-                bar_wrap.pack(side="left", fill="x", expand=True, padx=(8, 8))
-                bar_wrap.pack_propagate(False)
-
-                def _draw_bar(bw=bar_wrap, pct=fill_pct, col=bar_color, _tries=[0]):
-                    if not bw.winfo_exists():
-                        return
-                    bw.update_idletasks()
-                    w = bw.winfo_width()
-                    if w > 10:
-                        bar = ctk.CTkFrame(bw, fg_color=col, height=8,
-                                           corner_radius=4, width=int(pct * w))
-                        bar.place(x=0, y=0, relheight=1)
-                    elif _tries[0] < 10:
-                        _tries[0] += 1
-                        bw.after(50, _draw_bar)
-
-                bar_wrap.after(50, _draw_bar)
-
-                # Days label + Rotate button
-                days_lbl = "OVERDUE" if overdue else f"{abs(int(days_left))}d left"
-                ctk.CTkLabel(row, text=days_lbl, font=FONT_XS,
-                             text_color=bar_color, width=70).pack(side="left")
-                make_btn(row, "Rotate",
-                         lambda n=name: (self.rotate_key(n), self._invalidate_tabs("dashboard", "keys", "timeline")),
-                         fg_color=C["red_bg"] if overdue else C["btn"],
-                         text_color=C["red"] if overdue else C["text2"],
-                         width=60, height=24).pack(side="right")
 
         # Scheduled rotations due
         due_keys = [(n, i) for n, i in keys
@@ -4938,17 +5006,19 @@ class AppFrame(ctk.CTkFrame):
         make_btn(right_btns, "+ New Key", self._show_add_key_modal,
                  fg_color=C["accent"], text_color=C["bg"], height=30).pack(side="left", padx=(6, 0))
 
-        # ── Search bar ──
+        # ── Search bar ── (icon + label inside so the affordance is unambiguous)
         search_wrap = ctk.CTkFrame(self.keys_frame, fg_color=C["bg3"],
                                     corner_radius=8, border_width=1,
                                     border_color=C["border"])
         search_wrap.pack(fill="x", padx=20, pady=(12, 0))
+        ctk.CTkLabel(search_wrap, text="", image=icon("search", 16, C["text3"]),
+                     fg_color="transparent", width=22).pack(side="left", padx=(8, 0))
         ctk.CTkEntry(
             search_wrap, textvariable=self._search_var,
-            placeholder_text="Search keys by name, provider, or category...",
+            placeholder_text="Search keys by name, provider, or category…",
             fg_color="transparent", text_color=C["text"],
             border_width=0, font=FONT_SM,
-        ).pack(fill="x", padx=4, ipady=4)
+        ).pack(side="left", fill="x", expand=True, padx=4, ipady=4)
         self._search_var.trace_add("write", self._on_search_change)
 
         # ── Env filter pills ──
@@ -5097,9 +5167,9 @@ class AppFrame(ctk.CTkFrame):
                           C["bg3"])
 
         row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
-                           corner_radius=5, border_width=1, border_color=C["border"],
-                           height=36)
-        row.pack(fill="x", padx=2, pady=1)
+                           corner_radius=6, border_width=1, border_color=C["border"],
+                           height=44)
+        row.pack(fill="x", padx=4, pady=2)
         row.pack_propagate(False)
 
         # Checkbox
@@ -5135,24 +5205,28 @@ class AppFrame(ctk.CTkFrame):
             ctk.CTkLabel(prov_frame, text=provider, font=FONT_XS,
                          text_color=cat_col, anchor="w").pack(anchor="w")
 
-        # Env pill column
-        env_frame = ctk.CTkFrame(row, fg_color="transparent", width=58)
+        # Env pill column — pills now vertically centered + tighter padding so they
+        # don't bleed past the row border
+        env_frame = ctk.CTkFrame(row, fg_color="transparent", width=58, height=44)
         env_frame.pack(side="left")
         env_frame.pack_propagate(False)
         if env != "all":
-            pill = ctk.CTkFrame(env_frame, fg_color=env_bg, corner_radius=8)
-            pill.pack(anchor="w")
-            ctk.CTkLabel(pill, text=env.upper(), font=FONT_XS,
-                         text_color=env_color).pack(padx=5, pady=0)
+            pill = ctk.CTkFrame(env_frame, fg_color=env_bg, corner_radius=8,
+                                border_width=1, border_color=env_color)
+            pill.place(relx=0, rely=0.5, anchor="w", x=2)
+            ctk.CTkLabel(pill, text=env.upper(), font=(_UI_FONT, 9, "bold"),
+                         text_color=env_color).pack(padx=6, pady=2)
 
         # Health pill column
-        health_frame = ctk.CTkFrame(row, fg_color="transparent", width=88)
+        health_frame = ctk.CTkFrame(row, fg_color="transparent", width=110, height=44)
         health_frame.pack(side="left")
         health_frame.pack_propagate(False)
-        h_pill = ctk.CTkFrame(health_frame, fg_color=h_bg, corner_radius=10)
-        h_pill.pack(anchor="w")
-        ctk.CTkLabel(h_pill, text=f"● {h_label}", font=FONT_XS,
-                     text_color=h_fg).pack(padx=6, pady=1)
+        h_pill = ctk.CTkFrame(health_frame, fg_color=h_bg, corner_radius=10,
+                              border_width=1, border_color=h_fg)
+        h_pill.place(relx=0, rely=0.5, anchor="w", x=2)
+        ctk.CTkLabel(h_pill, text=f"●  {h_label.upper()}",
+                     font=(_UI_FONT, 9, "bold"),
+                     text_color=h_fg).pack(padx=8, pady=3)
 
         # Value display
         if revealed:
@@ -6710,46 +6784,96 @@ class AppFrame(ctk.CTkFrame):
         for proj_name, proj_info in sorted(projects.items()):
             proj_keys = proj_info.get("keys", [])
             matched = self._auto_match_keys(proj_name)
-            has_keys = len(proj_keys) > 0 or len(matched) > 0
-            dot_color = C["green"] if has_keys else C["red"]
+            has_keys = len(proj_keys) > 0
+            partial = not has_keys and len(matched) > 0
 
-            card = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6)
-            card.pack(fill="x", pady=3)
+            if has_keys:
+                status_col, status_bg, status_lbl = C["green"], C["green_bg"], "ACTIVE"
+            elif partial:
+                status_col, status_bg, status_lbl = C["amber"], C["amber_bg"], "NEEDS ASSIGN"
+            else:
+                status_col, status_bg, status_lbl = C["red"], C["red_bg"], "EMPTY"
 
-            left = ctk.CTkFrame(card, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+            # Card with colored left accent matching status
+            outer = ctk.CTkFrame(pad, fg_color=status_col, corner_radius=8)
+            outer.pack(fill="x", pady=5)
+            card = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7)
+            card.pack(fill="both", expand=True, padx=(4, 0))
 
-            name_row2 = ctk.CTkFrame(left, fg_color="transparent")
-            name_row2.pack(anchor="w")
-            ctk.CTkLabel(name_row2, text="●", font=("Consolas", 10), text_color=dot_color).pack(side="left", padx=(0, 6))
-            ctk.CTkLabel(name_row2, text=proj_name, font=FONT_H3, text_color=C["text"]).pack(side="left")
+            # Header row
+            head = ctk.CTkFrame(card, fg_color="transparent")
+            head.pack(fill="x", padx=14, pady=(12, 4))
+
+            ctk.CTkLabel(head, text="", image=icon("folder", 16, status_col),
+                         width=20).pack(side="left")
+            ctk.CTkLabel(head, text=proj_name, font=(_UI_FONT, 14, "bold"),
+                         text_color=C["text"]).pack(side="left", padx=(2, 8))
             tenv = proj_info.get("target_env", "all")
             if tenv != "all":
-                ctk.CTkLabel(name_row2, text=f"  {tenv.upper()}",
-                             font=FONT_XS, text_color=ENV_COLORS.get(tenv, C["text3"])).pack(side="left")
+                env_pill = ctk.CTkFrame(head, fg_color=C.get(f"{tenv}_bg", C["bg3"]),
+                                        corner_radius=8, border_width=1,
+                                        border_color=ENV_COLORS.get(tenv, C["text3"]))
+                env_pill.pack(side="left")
+                ctk.CTkLabel(env_pill, text=tenv.upper(),
+                             font=(_UI_FONT, 9, "bold"),
+                             text_color=ENV_COLORS.get(tenv, C["text3"])).pack(padx=6, pady=2)
 
-            ctk.CTkLabel(left, text=proj_info.get("path", ""), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(anchor="w")
+            # Status pill (right)
+            sp = ctk.CTkFrame(head, fg_color=status_bg, corner_radius=10,
+                              border_width=1, border_color=status_col)
+            sp.pack(side="right")
+            ctk.CTkLabel(sp, text=status_lbl, font=(_UI_FONT, 9, "bold"),
+                         text_color=status_col).pack(padx=8, pady=2)
 
-            if proj_keys:
-                key_text = f"{len(proj_keys)} keys assigned"
-                key_color = C["green"]
-            elif matched:
-                key_text = f"No keys assigned — {len(matched)} auto-matched available (click Assign Keys)"
-                key_color = C["amber"]
-            else:
-                key_text = "No keys assigned — no matching keys found in vault"
-                key_color = C["red"]
-            ctk.CTkLabel(left, text=key_text, font=FONT_XS, text_color=key_color, anchor="w").pack(anchor="w")
+            # Path row with mono font
+            ctk.CTkLabel(card, text=proj_info.get("path", ""),
+                         font=FONT_MONO_SM, text_color=C["text3"],
+                         anchor="w").pack(anchor="w", padx=14)
 
+            # Stats row — counts in big numbers, like dashboard cards
+            stats = ctk.CTkFrame(card, fg_color="transparent")
+            stats.pack(fill="x", padx=14, pady=(8, 4))
+
+            def _stat(parent, count, label, col):
+                box = ctk.CTkFrame(parent, fg_color="transparent")
+                box.pack(side="left", padx=(0, 18))
+                ctk.CTkLabel(box, text=str(count), font=(_UI_FONT, 18, "bold"),
+                             text_color=col).pack(anchor="w")
+                ctk.CTkLabel(box, text=label, font=(_UI_FONT, 8, "bold"),
+                             text_color=C["text3"]).pack(anchor="w")
+
+            _stat(stats, len(proj_keys), "ASSIGNED",
+                  status_col if has_keys else C["text3"])
+            if not has_keys and matched:
+                _stat(stats, len(matched), "AUTO-MATCH AVAILABLE", C["amber"])
+
+            # Action button row — with lucide icons
             btn_f = ctk.CTkFrame(card, fg_color="transparent")
-            btn_f.pack(side="right", padx=8, pady=8)
-            make_btn(btn_f, "🔄 Sync .env", lambda p=proj_name: self.sync_project(p),
-                     fg_color=C["accent"], text_color="white", width=90).pack(pady=2)
-            make_btn(btn_f, "☁️ CI Sync", lambda p=proj_name: self.ci_sync_project(p),
-                     fg_color=C["bg4"], text_color=C["accent"], width=90).pack(pady=2)
-            make_btn(btn_f, "🔑 Assign Keys", lambda p=proj_name: self.assign_keys_to_project(p), width=90).pack(pady=2)
-            make_btn(btn_f, "🗑️ Remove", lambda p=proj_name: self.remove_project(p),
-                     fg_color=C["red_bg"], text_color="#FCA5A5", width=90).pack(pady=2)
+            btn_f.pack(fill="x", padx=12, pady=(4, 12))
+
+            def _act(parent, ico, label, cmd, fg, tc):
+                b = ctk.CTkButton(
+                    parent, text=label, image=icon(ico, 14, tc),
+                    compound="left", command=cmd,
+                    fg_color=fg, text_color=tc, hover_color=C["btn_hover"],
+                    font=FONT_BTN, corner_radius=6, height=30,
+                    border_width=1, border_color=C["border"],
+                )
+                b.pack(side="left", padx=(0, 4))
+                return b
+
+            _act(btn_f, "refresh", "Sync .env",
+                 lambda p=proj_name: self.sync_project(p),
+                 C["accent"], "#FFFFFF")
+            _act(btn_f, "folder", "CI Sync",
+                 lambda p=proj_name: self.ci_sync_project(p),
+                 C["btn"], C["accent"])
+            _act(btn_f, "key", "Assign Keys",
+                 lambda p=proj_name: self.assign_keys_to_project(p),
+                 C["btn"], C["text2"])
+            _act(btn_f, "trash", "Remove",
+                 lambda p=proj_name: self.remove_project(p),
+                 C["red_bg"], C["red"])
 
     def browse_folder(self):
         onedrive_desktop = Path.home() / "OneDrive" / "Desktop"
