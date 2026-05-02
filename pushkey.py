@@ -2073,6 +2073,56 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
     return ctk.CTkButton(parent, **kw)
 
 
+def _draw_arc_gauge(canvas: tk.Canvas, pct: float, color: str,
+                    center_text: str, sub_label: str) -> None:
+    """Draw a 220° speedometer-style arc gauge. Canvas must be 160×140."""
+    import math
+    canvas.delete("all")
+    bg = canvas["bg"] if canvas["bg"] != "" else C["bg"]
+    cx, cy = 80, 76
+    r = 52
+    stroke = 12
+
+    # Arc spans from 200° to -20° (clockwise), tkinter measures CCW from east
+    start = 200
+    full_extent = -220
+
+    x0, y0 = cx - r, cy - r
+    x1, y1 = cx + r, cy + r
+
+    # Background track
+    canvas.create_arc(x0, y0, x1, y1, start=start, extent=full_extent,
+                      style="arc", outline=C["bg3"], width=stroke)
+
+    pct = max(0.0, min(1.0, pct))
+    if pct > 0.01:
+        extent = full_extent * max(0.02, pct)
+
+        # Glow layer — wider dashed arc same color
+        canvas.create_arc(x0 - 4, y0 - 4, x1 + 4, y1 + 4,
+                          start=start, extent=extent,
+                          style="arc", outline=color, width=4, dash=(2, 4))
+
+        # Main colored arc
+        canvas.create_arc(x0, y0, x1, y1, start=start, extent=extent,
+                          style="arc", outline=color, width=stroke)
+
+        # Needle dot at arc end
+        end_rad = math.radians(start + extent)
+        dx = cx + r * math.cos(end_rad)
+        dy = cy - r * math.sin(end_rad)
+        canvas.create_oval(dx - 5, dy - 5, dx + 5, dy + 5,
+                           fill=color, outline=C["bg"])
+
+    # Center value text
+    canvas.create_text(cx, cy - 6, text=center_text,
+                       font=(_MONO_FONT, 26, "bold"), fill=color, anchor="center")
+
+    # Sub-label
+    canvas.create_text(cx, cy + 20, text=sub_label,
+                       font=(_UI_FONT, 9), fill=C["text3"], anchor="center")
+
+
 def days_since(date_str):
     if not date_str:
         return float("inf")
