@@ -2458,7 +2458,7 @@ class AppFrame(ctk.CTkFrame):
         self._search_debounce_id = None
 
         # ── Top bar ──
-        top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=52)
+        top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=64)
         top.pack(fill="x")
         top.pack_propagate(False)
 
@@ -2472,15 +2472,16 @@ class AppFrame(ctk.CTkFrame):
                 from PIL import Image as _PILImage
                 self._top_pil = _PILImage.open(_logo_path).convert("RGBA")
                 self._top_logo_img = ctk.CTkImage(
-                    light_image=self._top_pil, dark_image=self._top_pil, size=(28, 28))
-                ctk.CTkLabel(brand, image=self._top_logo_img, text="").pack(side="left", padx=(0, 8))
+                    light_image=self._top_pil, dark_image=self._top_pil, size=(40, 40))
+                ctk.CTkLabel(brand, image=self._top_logo_img, text="").pack(side="left", padx=(0, 10))
                 _logo_loaded = True
             except Exception:
                 _logo_loaded = False
         if not _logo_loaded:
             brand_icon = ctk.CTkFrame(brand, fg_color=C["accent_dim"],
-                                       width=28, height=28, corner_radius=6)
-            brand_icon.pack(side="left", padx=(0, 8))
+                                       width=40, height=40, corner_radius=8,
+                                       border_width=2, border_color=C["accent"])
+            brand_icon.pack(side="left", padx=(0, 10))
             brand_icon.pack_propagate(False)
             ctk.CTkLabel(brand_icon, text="⬡", font=(_MONO_FONT, 13, "bold"),
                          text_color=C["accent"]).place(relx=0.5, rely=0.5, anchor="center")
@@ -5166,9 +5167,11 @@ class AppFrame(ctk.CTkFrame):
         env_bg    = C.get(f"{'blue' if env=='dev' else 'amber' if env=='staging' else 'red' if env=='prod' else 'violet'}_bg",
                           C["bg3"])
 
-        # Card surface — no fixed height, no pack_propagate. Row sizes to its
-        # content via uniform pady on the inner box, so the border stays a
-        # clean rectangle around everything.
+        # Card surface — single inner hbox with consistent pady, no fixed
+        # height. Every right-side column uses a fixed-width container so the
+        # health pill and action buttons sit at the SAME x-coordinate across
+        # every row, regardless of which optional fields (env, provider, value)
+        # exist on a given key.
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
         row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
@@ -5176,14 +5179,11 @@ class AppFrame(ctk.CTkFrame):
                            border_color=C["border"])
         row.pack(fill="x", padx=4, pady=3)
 
-        # Single inner hbox — every child uses pady=0 because the inner box's
-        # outer pady provides the row padding. This keeps everything on one
-        # baseline and prevents the misaligned-children effect that was
-        # breaking the row's outline.
         inner = ctk.CTkFrame(row, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=8)
 
-        # Checkbox
+        # ── LEFT cluster ──
+        # Checkbox + category dot + key name
         sel_var = ctk.BooleanVar(value=False)
         self._bulk_select_vars[name] = sel_var
         ctk.CTkCheckBox(
@@ -5193,14 +5193,15 @@ class AppFrame(ctk.CTkFrame):
             width=16, height=16,
         ).pack(side="left", padx=(0, 6))
 
-        # Category color dot
         ctk.CTkLabel(inner, text="●", font=(_MONO_FONT, 11),
                      text_color=cat_col, width=14).pack(side="left", padx=(0, 6))
 
-        # Action buttons (right side first so they reserve space — name fills
-        # what's left). Reverse the visual order with pack(side="right") below.
-        btns = ctk.CTkFrame(inner, fg_color="transparent")
+        # ── RIGHT cluster (packed first so widths are honored) ──
+        # Action buttons — fixed slot
+        BTN_W = 220 if prov_data.get("url") else 176
+        btns = ctk.CTkFrame(inner, fg_color="transparent", width=BTN_W)
         btns.pack(side="right")
+        btns.pack_propagate(False)
 
         make_btn(btns, "Del", lambda n=name: self.delete_key(n),
                  fg_color=C["red_bg"], text_color=C["red"],
@@ -5220,42 +5221,60 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["btn"], text_color=C["text2"],
                  width=44, height=24, border=False).pack(side="right", padx=(2, 0))
 
-        # Health pill (right of buttons-area, before value column)
-        h_pill = ctk.CTkFrame(inner, fg_color=h_bg, corner_radius=10,
+        # Health pill — fixed slot (always reserves 120px so column lines up)
+        h_slot = ctk.CTkFrame(inner, fg_color="transparent", width=120)
+        h_slot.pack(side="right", padx=(6, 6))
+        h_slot.pack_propagate(False)
+        h_pill = ctk.CTkFrame(h_slot, fg_color=h_bg, corner_radius=10,
                               border_width=1, border_color=h_fg)
-        h_pill.pack(side="right", padx=(6, 8))
+        h_pill.pack(side="left")
         ctk.CTkLabel(h_pill, text=f"●  {h_label.upper()}",
                      font=(_UI_FONT, 9, "bold"),
                      text_color=h_fg).pack(padx=8, pady=3)
 
-        # Env pill (only if not 'all')
+        # Env pill — fixed slot (always reserves 56px even when env is 'all',
+        # so the health pill x-position is identical across rows)
+        e_slot = ctk.CTkFrame(inner, fg_color="transparent", width=56)
+        e_slot.pack(side="right", padx=(0, 2))
+        e_slot.pack_propagate(False)
         if env != "all":
-            env_pill = ctk.CTkFrame(inner, fg_color=env_bg, corner_radius=8,
+            env_pill = ctk.CTkFrame(e_slot, fg_color=env_bg, corner_radius=8,
                                     border_width=1, border_color=env_color)
-            env_pill.pack(side="right", padx=(0, 4))
+            env_pill.pack(side="left")
             ctk.CTkLabel(env_pill, text=env.upper(),
                          font=(_UI_FONT, 9, "bold"),
                          text_color=env_color).pack(padx=6, pady=3)
 
-        # Value display (right-aligned column, fixed width)
+        # Value display — fixed slot (170px). Drops contents on very narrow
+        # window automatically because the slot still claims its width but
+        # the content right-aligns inside it.
         if revealed:
             display = val
         elif len(val) > 8:
             display = val[:4] + "●" * min(12, len(val) - 8) + val[-4:]
         else:
             display = "●" * len(val)
-        ctk.CTkLabel(inner, text=display, font=FONT_MONO_SM,
+        v_slot = ctk.CTkFrame(inner, fg_color="transparent", width=170)
+        v_slot.pack(side="right", padx=(0, 8))
+        v_slot.pack_propagate(False)
+        ctk.CTkLabel(v_slot, text=display, font=FONT_MONO_SM,
                      text_color=C["accent"] if revealed else C["text3"],
-                     width=170, anchor="e").pack(side="right", padx=(0, 8))
+                     anchor="e").pack(fill="both", expand=True)
 
-        # Provider label (right of value, smaller)
+        # Provider label — fixed slot (90px)
+        p_slot = ctk.CTkFrame(inner, fg_color="transparent", width=90)
+        p_slot.pack(side="right", padx=(0, 6))
+        p_slot.pack_propagate(False)
         if provider:
-            ctk.CTkLabel(inner, text=provider, font=FONT_XS,
-                         text_color=cat_col, width=90, anchor="e"
-                         ).pack(side="right", padx=(0, 6))
+            ctk.CTkLabel(p_slot, text=provider, font=FONT_XS,
+                         text_color=cat_col, anchor="e").pack(fill="both", expand=True)
 
-        # Key name fills remaining space, vertically centered with the rest
-        name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 12, "bold"),
+        # Key name — fills remaining space. Has a 120px MIN visible width so
+        # at narrow windows you still see the start of the name (CTkFrame
+        # honors width as a minimum when fill+expand fight other widgets).
+        name_box = ctk.CTkFrame(inner, fg_color="transparent", width=120)
+        name_box.pack(side="left", fill="x", expand=True)
+        name_lbl = ctk.CTkLabel(name_box, text=name, font=(_MONO_FONT, 12, "bold"),
                                 text_color=C["text"], cursor="hand2", anchor="w")
         name_lbl.pack(side="left", fill="x", expand=True)
         name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
@@ -6191,180 +6210,406 @@ class AppFrame(ctk.CTkFrame):
         if not info:
             return
 
+        status = health_status(info)
+        status_col = health_color(status)
+        provider = info.get("provider")
+        cat = info.get("category", "General")
+        cat_col = CAT_COLORS.get(cat, C["text3"])
+        env = info.get("env", "all")
+        val = info["value"]
+        revealed = name in self.revealed
+
         win = ctk.CTkToplevel(self)
-        win.title(f"Key Details — {name}")
-        win.geometry("620x600")
-        win.minsize(480, 400)
-        win.configure(fg_color=C["bg2"])
+        win.title(f"Key — {name}")
+        win.geometry("720x720")
+        win.minsize(560, 520)
+        win.configure(fg_color=C["bg"])
         win.transient(self)
         win.grab_set()
 
-        # Header
-        header = ctk.CTkFrame(win, fg_color=C["bg3"], corner_radius=0, height=56)
-        header.pack(fill="x")
-        header.pack_propagate(False)
+        # ───────── HERO HEADER (status-tinted) ─────────
+        hero_bg = (C["red_bg"] if status == "critical"
+                   else C["amber_bg"] if status == "warning"
+                   else C["green_bg"])
+        hero = ctk.CTkFrame(win, fg_color=hero_bg, corner_radius=0,
+                            border_width=0, height=120)
+        hero.pack(fill="x")
+        hero.pack_propagate(False)
 
-        status = health_status(info)
-        ctk.CTkLabel(header, text="●", font=("Consolas", 12), text_color=health_color(status)).pack(side="left", padx=(16, 4), pady=16)
-        ctk.CTkLabel(header, text=name, font=FONT_H2, text_color=C["text"]).pack(side="left", pady=16)
+        # Big colored status bar across the top
+        bar = ctk.CTkFrame(hero, fg_color=status_col, height=4, corner_radius=0)
+        bar.pack(fill="x")
 
-        provider = info.get("provider")
+        hero_inner = ctk.CTkFrame(hero, fg_color="transparent")
+        hero_inner.pack(fill="both", expand=True, padx=24, pady=14)
+
+        # Title row
+        tr = ctk.CTkFrame(hero_inner, fg_color="transparent")
+        tr.pack(fill="x")
+        # Provider category dot
+        ctk.CTkLabel(tr, text="●", font=(_MONO_FONT, 18),
+                     text_color=cat_col, width=22).pack(side="left")
+        ctk.CTkLabel(tr, text=name, font=(_MONO_FONT, 18, "bold"),
+                     text_color=C["text"]).pack(side="left", padx=(0, 12))
+
+        # Status pill (right)
+        sp = ctk.CTkFrame(tr, fg_color=status_col, corner_radius=12)
+        sp.pack(side="right")
+        ctk.CTkLabel(sp, text=status.upper(), font=(_UI_FONT, 10, "bold"),
+                     text_color="#FFFFFF").pack(padx=10, pady=3)
+
+        # Sub-line: provider + category + env
+        meta_parts = []
         if provider:
-            cat = info.get("category", "General")
-            ctk.CTkLabel(header, text=f"  {provider}", font=FONT_SM,
-                         text_color=CAT_COLORS.get(cat, C["text3"])).pack(side="left")
+            meta_parts.append(provider)
+        meta_parts.append(cat)
+        if env != "all":
+            meta_parts.append(env.upper())
+        ctk.CTkLabel(hero_inner, text="  •  ".join(meta_parts), font=FONT_SM,
+                     text_color=C["text2"]).pack(anchor="w", pady=(6, 0))
 
-        # Scrollable body
-        scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg2"], corner_radius=0)
+        # ───────── STICKY ACTION BAR PLACEHOLDER ─────────
+        # Pack the action bar BEFORE the scroll body so pack manager reserves
+        # its space. The bar's content is added at the bottom of this method.
+        bar = ctk.CTkFrame(win, fg_color=C["bg2"], corner_radius=0, height=64,
+                           border_width=0)
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        ctk.CTkFrame(bar, fg_color=C["border"], height=1).pack(fill="x", side="top")
+
+        # ───────── BODY ─────────
+        scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0)
         scroll.pack(fill="both", expand=True)
 
         pad = ctk.CTkFrame(scroll, fg_color="transparent")
-        pad.pack(fill="x", padx=16, pady=12)
+        pad.pack(fill="x", padx=18, pady=14)
 
-        def info_field(label, value, mono=False, fg=None):
-            f = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-            f.pack(fill="x", pady=2)
-            ctk.CTkLabel(f, text=label, font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
-            ctk.CTkLabel(f, text=value or "—", font=FONT_MONO_SM if mono else FONT_SM,
-                         text_color=fg or C["text"], wraplength=520, justify="left",
-                         anchor="w").pack(anchor="w", padx=10, pady=(0, 6))
+        # ───────── VALUE CARD (prominent, with reveal control) ─────────
+        masked = (val[:4] + "●" * min(28, max(0, len(val) - 8)) + val[-4:]
+                  if len(val) > 8 else "●" * len(val))
+        vcard = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                             border_width=2, border_color=C["accent"])
+        vcard.pack(fill="x", pady=(0, 14))
 
-        # Value row
-        val = info["value"]
-        revealed = name in self.revealed
-        masked = val[:4] + "●" * min(20, max(0, len(val) - 8)) + val[-4:] if len(val) > 8 else "●" * len(val)
-        vf = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-        vf.pack(fill="x", pady=2)
-        ctk.CTkLabel(vf, text="VALUE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
-        vrow = ctk.CTkFrame(vf, fg_color="transparent")
-        vrow.pack(fill="x", padx=10, pady=(0, 8))
-        ctk.CTkLabel(vrow, text=val if revealed else masked, font=FONT_MONO_SM,
-                     text_color=C["green"] if revealed else C["text3"], anchor="w").pack(side="left", fill="x", expand=True)
-        make_btn(vrow, "Copy", lambda v=val: self.copy_key(v), width=50).pack(side="right", padx=(4, 0))
-        make_btn(vrow, "Hide" if revealed else "Reveal",
-                 lambda n=name: (self.toggle_reveal(n), win.destroy(), self.show_key_detail(n)),
-                 width=60).pack(side="right", padx=4)
+        vhdr = ctk.CTkFrame(vcard, fg_color="transparent")
+        vhdr.pack(fill="x", padx=14, pady=(12, 0))
+        ctk.CTkLabel(vhdr, text="", image=icon("key", 14, C["accent"]),
+                     width=18).pack(side="left")
+        ctk.CTkLabel(vhdr, text="API KEY VALUE", font=(_UI_FONT, 10, "bold"),
+                     text_color=C["accent"]).pack(side="left")
+        ctk.CTkLabel(vhdr, text=f"{len(val)} chars", font=FONT_XS,
+                     text_color=C["text3"]).pack(side="right")
 
-        info_field("CATEGORY", info.get("category", "General"))
-        env = info.get("env", "all")
-        info_field("ENVIRONMENT", env.upper(), fg=ENV_COLORS.get(env, C["text3"]))
-        info_field("PROVIDER", provider or "Unknown")
-        info_field("CREATED", (info.get("created") or "")[:16].replace("T", " ") or "—", mono=True)
-        info_field("LAST ROTATED", (info.get("rotated") or "")[:16].replace("T", " ") or "Never", mono=True)
-        info_field("ROTATION COUNT", str(info.get("rotation_count", 0)))
+        vbox = ctk.CTkFrame(vcard, fg_color=C["bg3"], corner_radius=6)
+        vbox.pack(fill="x", padx=14, pady=(8, 10))
+        ctk.CTkLabel(vbox, text=val if revealed else masked,
+                     font=(_MONO_FONT, 13, "bold"),
+                     text_color=C["green"] if revealed else C["text"],
+                     wraplength=600, justify="left", anchor="w"
+                     ).pack(fill="x", padx=12, pady=10)
 
-        # Rotation schedule — editable inline
-        sched_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-        sched_frame.pack(fill="x", pady=2)
-        sf_top = ctk.CTkFrame(sched_frame, fg_color="transparent")
-        sf_top.pack(fill="x", padx=10, pady=(6, 4))
-        ctk.CTkLabel(sf_top, text="ROTATION SCHEDULE", font=FONT_XS, text_color=C["text3"]).pack(side="left")
+        vbtns = ctk.CTkFrame(vcard, fg_color="transparent")
+        vbtns.pack(fill="x", padx=14, pady=(0, 12))
+        # Big reveal button with icon
+        ctk.CTkButton(
+            vbtns, text="  Hide" if revealed else "  Reveal",
+            image=icon("eye", 14, "#FFFFFF"), compound="left",
+            command=lambda n=name: (self.toggle_reveal(n), win.destroy(),
+                                    self.show_key_detail(n)),
+            fg_color=C["accent"], hover_color=C["accent2"],
+            text_color="#FFFFFF", font=FONT_BTN,
+            corner_radius=6, height=34, width=110,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            vbtns, text="  Copy",
+            image=icon("copy", 14, C["text2"]), compound="left",
+            command=lambda v=val: self.copy_key(v),
+            fg_color=C["btn"], hover_color=C["btn_hover"],
+            text_color=C["text2"], font=FONT_BTN,
+            corner_radius=6, height=34, width=90,
+            border_width=1, border_color=C["border"],
+        ).pack(side="left")
+
+        # ───────── LIFECYCLE TIMELINE (mini) ─────────
+        from datetime import datetime as _dt
+        def _parse(s):
+            if not s:
+                return None
+            try:
+                return _dt.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        def _ago(dt):
+            if dt is None:
+                return None
+            d = (_dt.now() - dt).days
+            if d == 0: return "today"
+            if d == 1: return "yesterday"
+            if d < 30: return f"{d}d ago"
+            if d < 365: return f"{d // 30}mo ago"
+            return f"{d // 365}y ago"
+
+        created_dt = _parse(info.get("created"))
+        rotated_dt = _parse(info.get("rotated"))
         days_left = days_until_rotation(info)
+
+        lc_card = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                               border_width=1, border_color=C["border"])
+        lc_card.pack(fill="x", pady=(0, 14))
+        ctk.CTkLabel(lc_card, text="LIFECYCLE", font=(_UI_FONT, 10, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 4))
+
+        lc_row = ctk.CTkFrame(lc_card, fg_color="transparent")
+        lc_row.pack(fill="x", padx=14, pady=(0, 12))
+
+        def _milestone(ico_name, label, value, vc):
+            box = ctk.CTkFrame(lc_row, fg_color="transparent")
+            box.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            hdr = ctk.CTkFrame(box, fg_color="transparent")
+            hdr.pack(anchor="w")
+            ctk.CTkLabel(hdr, text="", image=icon(ico_name, 12, C["text3"]),
+                         width=16).pack(side="left")
+            ctk.CTkLabel(hdr, text=label, font=(_UI_FONT, 9, "bold"),
+                         text_color=C["text3"]).pack(side="left", padx=(2, 0))
+            ctk.CTkLabel(box, text=value, font=FONT_SM,
+                         text_color=vc, anchor="w").pack(anchor="w")
+
+        _milestone("plus", "CREATED", _ago(created_dt) or "unknown", C["text2"])
+        _milestone("refresh", "LAST ROTATED",
+                   _ago(rotated_dt) or "never",
+                   C["text2"] if rotated_dt else C["text3"])
+        if days_left is not None:
+            if days_left < 0:
+                due_t, due_c = f"OVERDUE {abs(int(days_left))}D", C["red"]
+            elif days_left == 0:
+                due_t, due_c = "DUE TODAY", C["amber"]
+            elif days_left <= 7:
+                due_t, due_c = f"in {int(days_left)}d", C["amber"]
+            else:
+                due_t, due_c = f"in {int(days_left)}d", C["text2"]
+        else:
+            due_t, due_c = "not scheduled", C["text3"]
+        _milestone("clock", "NEXT ROTATION", due_t, due_c)
+        _milestone("activity", "ROTATIONS",
+                   str(info.get("rotation_count", 0)), C["accent"])
+
+        # ───────── DETAIL GRID (2-column metadata) ─────────
+        def _kv_row(parent, label, value, fg=None):
+            r = ctk.CTkFrame(parent, fg_color="transparent")
+            r.pack(fill="x", padx=14, pady=2)
+            ctk.CTkLabel(r, text=label, font=(_UI_FONT, 9, "bold"),
+                         text_color=C["text3"], width=120,
+                         anchor="w").pack(side="left")
+            ctk.CTkLabel(r, text=value or "—", font=FONT_MONO_SM,
+                         text_color=fg or C["text"], anchor="w"
+                         ).pack(side="left", fill="x", expand=True)
+
+        meta_card = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                                 border_width=1, border_color=C["border"])
+        meta_card.pack(fill="x", pady=(0, 14))
+        ctk.CTkLabel(meta_card, text="METADATA", font=(_UI_FONT, 10, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 4))
+        _kv_row(meta_card, "PROVIDER", provider or "Unknown")
+        _kv_row(meta_card, "CATEGORY", cat, fg=cat_col)
+        _kv_row(meta_card, "ENVIRONMENT", env.upper(),
+                fg=ENV_COLORS.get(env, C["text3"]))
+        _kv_row(meta_card, "CREATED",
+                (info.get("created") or "")[:16].replace("T", " ") or "—")
+        _kv_row(meta_card, "LAST ROTATED",
+                (info.get("rotated") or "")[:16].replace("T", " ") or "Never")
+        ctk.CTkFrame(meta_card, fg_color="transparent", height=8).pack()
+
+        # ───────── ROTATION SCHEDULE (editable card) ─────────
+        sched_card = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                                  border_width=1, border_color=C["border"])
+        sched_card.pack(fill="x", pady=(0, 14))
+        sf_top = ctk.CTkFrame(sched_card, fg_color="transparent")
+        sf_top.pack(fill="x", padx=14, pady=(12, 4))
+        ctk.CTkLabel(sf_top, text="", image=icon("clock", 14, C["text3"]),
+                     width=18).pack(side="left")
+        ctk.CTkLabel(sf_top, text="ROTATION SCHEDULE",
+                     font=(_UI_FONT, 10, "bold"),
+                     text_color=C["text3"]).pack(side="left")
         if days_left is not None:
             if days_left <= 0:
-                sched_status = f"overdue {abs(days_left)}d"
-                sc = C["amber"]
+                sched_status, sc = f"OVERDUE {abs(days_left)}D", C["red"]
+            elif days_left <= 7:
+                sched_status, sc = f"DUE IN {days_left}D", C["amber"]
             else:
-                sched_status = f"due in {days_left}d"
-                sc = C["green"]
-            ctk.CTkLabel(sf_top, text=sched_status, font=FONT_XS, text_color=sc).pack(side="right")
-        sched_row = ctk.CTkFrame(sched_frame, fg_color="transparent")
-        sched_row.pack(fill="x", padx=10, pady=(0, 6))
+                sched_status, sc = f"DUE IN {days_left}D", C["green"]
+            ctk.CTkLabel(sf_top, text=sched_status,
+                         font=(_UI_FONT, 9, "bold"),
+                         text_color=sc).pack(side="right")
+        sched_row = ctk.CTkFrame(sched_card, fg_color="transparent")
+        sched_row.pack(fill="x", padx=14, pady=(0, 12))
         sched_var = tk.StringVar(value=str(info.get("rotation_schedule", "")))
-        sched_entry = ctk.CTkEntry(sched_row, textvariable=sched_var, font=FONT_MONO_SM,
+        sched_entry = ctk.CTkEntry(sched_row, textvariable=sched_var,
+                                   font=FONT_MONO_SM,
                                    fg_color=C["bg3"], text_color=C["text"],
-                                   placeholder_text="days, e.g. 30  (blank = no schedule)", width=200)
-        sched_entry.pack(side="left")
+                                   border_color=C["border2"],
+                                   placeholder_text="Days between rotations (e.g. 30)",
+                                   width=220, height=32)
+        sched_entry.pack(side="left", ipady=2)
 
         def save_schedule():
-            val = sched_var.get().strip()
-            if val:
+            sval = sched_var.get().strip()
+            if sval:
                 try:
-                    int(val)
+                    int(sval)
                 except ValueError:
                     return
-                info["rotation_schedule"] = int(val)
+                info["rotation_schedule"] = int(sval)
             else:
                 info.pop("rotation_schedule", None)
             self.save()
             self.render_dashboard()
 
-        make_btn(sched_row, "Set", save_schedule, fg_color=C["accent"], text_color="white",
-                 width=50).pack(side="left", padx=(6, 0))
+        make_btn(sched_row, "Save", save_schedule,
+                 fg_color=C["accent"], text_color="#FFFFFF",
+                 width=70, height=32).pack(side="left", padx=(8, 0))
+
+        # Optional usage info as kv rows in the metadata card style
+        usage_card = None
+        def _ensure_usage_card():
+            nonlocal usage_card
+            if usage_card is None:
+                usage_card = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                                          border_width=1, border_color=C["border"])
+                usage_card.pack(fill="x", pady=(0, 14))
+                ctk.CTkLabel(usage_card, text="DEPLOYMENT",
+                             font=(_UI_FONT, 10, "bold"),
+                             text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 4))
+            return usage_card
+
         if info.get("first_used"):
-            use_days = days_since(info["first_used"])
-            info_field("FIRST DEPLOYED", (info["first_used"])[:16].replace("T", " "), mono=True)
-            info_field("IN USE FOR", f"{use_days} days", fg=health_color(health_status(info)))
+            uc = _ensure_usage_card()
+            _kv_row(uc, "FIRST DEPLOYED",
+                    info["first_used"][:16].replace("T", " "))
+            _kv_row(uc, "IN USE FOR",
+                    f"{days_since(info['first_used'])} days",
+                    fg=health_color(status))
         if info.get("last_used"):
-            info_field("LAST DEPLOYED", (info["last_used"])[:16].replace("T", " "), mono=True)
+            uc = _ensure_usage_card()
+            _kv_row(uc, "LAST DEPLOYED",
+                    info["last_used"][:16].replace("T", " "))
+        if usage_card is not None:
+            ctk.CTkFrame(usage_card, fg_color="transparent", height=8).pack()
 
-        age = days_since(info.get("rotated") or info.get("created"))
-        age_str = f"{age} days" if age != float("inf") else "Unknown"
-        info_field("AGE / HEALTH", f"{age_str} — {health_status(info).upper()}", fg=health_color(status))
-
-        # Import source
+        # ───────── IMPORT SOURCE (card) ─────────
         if info.get("source_file"):
-            ctk.CTkLabel(pad, text="IMPORT SOURCE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(14, 4))
-            sf = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-            sf.pack(fill="x", pady=2)
-            ctk.CTkLabel(sf, text="FILE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
-            ctk.CTkLabel(sf, text=f"{info['source_file']} : line {info.get('source_line', '?')}",
-                         font=FONT_MONO_SM, text_color=C["text"]).pack(anchor="w", padx=10, pady=(0, 4))
+            sc = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                              border_width=1, border_color=C["border"])
+            sc.pack(fill="x", pady=(0, 14))
+            sh = ctk.CTkFrame(sc, fg_color="transparent")
+            sh.pack(fill="x", padx=14, pady=(12, 4))
+            ctk.CTkLabel(sh, text="", image=icon("folder", 14, C["text3"]),
+                         width=18).pack(side="left")
+            ctk.CTkLabel(sh, text="IMPORT SOURCE",
+                         font=(_UI_FONT, 10, "bold"),
+                         text_color=C["text3"]).pack(side="left")
+            _kv_row(sc, "FILE",
+                    f"{info['source_file']} : line {info.get('source_line', '?')}")
             imp = (info.get("imported_at") or "")[:16].replace("T", " ")
             if imp:
-                ctk.CTkLabel(sf, text="IMPORTED", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 0))
-                ctk.CTkLabel(sf, text=imp, font=FONT_MONO_SM, text_color=C["text"]).pack(anchor="w", padx=10, pady=(0, 4))
+                _kv_row(sc, "IMPORTED", imp)
             raw = info.get("source_raw", "")
             if raw:
-                ctk.CTkLabel(sf, text="ORIGINAL LINE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 0))
-                rt = ctk.CTkTextbox(sf, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
-                                    height=70, corner_radius=4)
-                rt.pack(fill="x", padx=10, pady=(0, 8))
+                ctk.CTkLabel(sc, text="ORIGINAL LINE",
+                             font=(_UI_FONT, 9, "bold"),
+                             text_color=C["text3"]
+                             ).pack(anchor="w", padx=14, pady=(8, 4))
+                rt = ctk.CTkTextbox(sc, font=FONT_MONO_SM,
+                                    fg_color=C["bg3"], text_color=C["text"],
+                                    height=64, corner_radius=6,
+                                    border_width=1, border_color=C["border"])
+                rt.pack(fill="x", padx=14, pady=(0, 12))
                 rt.insert("1.0", raw)
                 rt.configure(state="disabled")
+            ctk.CTkFrame(sc, fg_color="transparent", height=4).pack()
 
-        # History summary
+        # ───────── HISTORY (card) ─────────
         history = info.get("history", [])
         if history:
-            ctk.CTkLabel(pad, text=f"HISTORY ({len(history)} previous values)",
-                         font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(14, 4))
+            hc = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8,
+                              border_width=1, border_color=C["border"])
+            hc.pack(fill="x", pady=(0, 14))
+            hh = ctk.CTkFrame(hc, fg_color="transparent")
+            hh.pack(fill="x", padx=14, pady=(12, 8))
+            ctk.CTkLabel(hh, text="", image=icon("activity", 14, C["text3"]),
+                         width=18).pack(side="left")
+            ctk.CTkLabel(hh, text=f"HISTORY  ·  {len(history)} PREVIOUS VALUES",
+                         font=(_UI_FONT, 10, "bold"),
+                         text_color=C["text3"]).pack(side="left")
             for i, entry in enumerate(history[:3]):
-                hf = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-                hf.pack(fill="x", pady=1)
                 retired = (entry.get("retired") or "")[:16].replace("T", " ")
-                ctk.CTkLabel(hf, text=f"#{i+1}  retired {retired}", font=FONT_XS,
-                             text_color=C["text3"]).pack(anchor="w", padx=10, pady=(4, 0))
                 v = entry["value"]
-                mv = v[:4] + "●" * min(12, len(v) - 8) + v[-4:] if len(v) > 8 else "●" * len(v)
-                ctk.CTkLabel(hf, text=mv, font=FONT_MONO_SM, text_color=C["text2"]).pack(anchor="w", padx=10, pady=(0, 4))
+                mv = (v[:4] + "●" * min(12, len(v) - 8) + v[-4:]
+                      if len(v) > 8 else "●" * len(v))
+                hr = ctk.CTkFrame(hc, fg_color=C["bg3"], corner_radius=6)
+                hr.pack(fill="x", padx=14, pady=2)
+                ctk.CTkLabel(hr, text=f"#{i+1}", font=(_UI_FONT, 10, "bold"),
+                             text_color=C["text3"], width=30
+                             ).pack(side="left", padx=(8, 0), pady=6)
+                ctk.CTkLabel(hr, text=mv, font=FONT_MONO_SM,
+                             text_color=C["text2"], anchor="w"
+                             ).pack(side="left", padx=8, fill="x", expand=True)
+                ctk.CTkLabel(hr, text=retired, font=FONT_XS,
+                             text_color=C["text3"]
+                             ).pack(side="right", padx=10)
             if len(history) > 3:
-                ctk.CTkLabel(pad, text=f"  ... and {len(history) - 3} more",
-                             font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
+                ctk.CTkLabel(hc, text=f"+ {len(history) - 3} older",
+                             font=FONT_XS, text_color=C["text3"]
+                             ).pack(anchor="w", padx=14, pady=(4, 12))
+            else:
+                ctk.CTkFrame(hc, fg_color="transparent", height=8).pack()
 
-        # Action bar
-        bar = ctk.CTkFrame(win, fg_color=C["bg3"], corner_radius=0, height=56)
-        bar.pack(fill="x", pady=0)
-        bar.pack_propagate(False)
-
+        # ───────── ACTION BAR CONTENT (bar widget already packed at top) ─────────
         inner_bar = ctk.CTkFrame(bar, fg_color="transparent")
-        inner_bar.pack(side="left", padx=12, pady=10)
+        inner_bar.pack(side="left", padx=18, pady=14)
 
-        make_btn(inner_bar, "Rotate Key", lambda: (win.destroy(), self.rotate_key(name)),
-                 fg_color=C["amber_bg"], text_color=C["amber"]).pack(side="left", padx=4)
-        if history:
-            make_btn(inner_bar, "Full History", lambda: self.show_history(name), width=100).pack(side="left", padx=4)
-        if info.get("source_file"):
-            make_btn(inner_bar, "Source Detail", lambda: self.show_source(name), width=100).pack(side="left", padx=4)
+        ctk.CTkButton(
+            inner_bar, text="  Rotate", image=icon("refresh", 14, C["amber"]),
+            compound="left",
+            command=lambda: (win.destroy(), self.rotate_key(name)),
+            fg_color=C["amber_bg"], hover_color=C["btn_hover"],
+            text_color=C["amber"], font=FONT_BTN,
+            corner_radius=6, height=34, width=100,
+            border_width=1, border_color=C["amber"],
+        ).pack(side="left", padx=(0, 6))
+
         if provider and PROVIDERS.get(provider, {}).get("url"):
-            make_btn(inner_bar, f"Open {provider}",
-                     lambda u=PROVIDERS[provider]["url"]: webbrowser.open(u),
-                     fg_color=C["accent"], text_color="white").pack(side="left", padx=4)
+            ctk.CTkButton(
+                inner_bar, text=f"  Open {provider}",
+                image=icon("folder", 14, "#FFFFFF"), compound="left",
+                command=lambda u=PROVIDERS[provider]["url"]: webbrowser.open(u),
+                fg_color=C["accent"], hover_color=C["accent2"],
+                text_color="#FFFFFF", font=FONT_BTN,
+                corner_radius=6, height=34, width=140,
+            ).pack(side="left", padx=6)
+
+        if history:
+            make_btn(inner_bar, "Full History",
+                     lambda: self.show_history(name), width=110, height=34
+                     ).pack(side="left", padx=6)
+        if info.get("source_file"):
+            make_btn(inner_bar, "Source Detail",
+                     lambda: self.show_source(name), width=110, height=34
+                     ).pack(side="left", padx=6)
 
         right_bar = ctk.CTkFrame(bar, fg_color="transparent")
-        right_bar.pack(side="right", padx=12, pady=10)
-        make_btn(right_bar, "Delete", lambda: (win.destroy(), self.delete_key(name)),
-                 fg_color=C["red_bg"], text_color="#FCA5A5", width=70).pack(side="right", padx=4)
-        make_btn(right_bar, "Close", win.destroy, width=70).pack(side="right", padx=4)
+        right_bar.pack(side="right", padx=18, pady=14)
+        ctk.CTkButton(
+            right_bar, text="  Delete", image=icon("trash", 14, C["red"]),
+            compound="left",
+            command=lambda: (win.destroy(), self.delete_key(name)),
+            fg_color=C["red_bg"], hover_color=C["btn_hover"],
+            text_color=C["red"], font=FONT_BTN,
+            corner_radius=6, height=34, width=90,
+            border_width=1, border_color=C["red"],
+        ).pack(side="right", padx=(6, 0))
+        make_btn(right_bar, "Close", win.destroy, width=80, height=34
+                 ).pack(side="right", padx=6)
 
     # ═══════════════════════════════════════════
     # TEMPLATE VIEWER

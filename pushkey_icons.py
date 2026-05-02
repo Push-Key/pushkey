@@ -277,18 +277,27 @@ _CACHE: dict[tuple[str, int, str], Image.Image] = {}
 
 
 def load_icon(name: str, size: int = 20, color: str = "#FFFFFF") -> Image.Image:
-    """Render and cache a Lucide-style icon as a PIL Image (transparent bg)."""
+    """Render and cache a Lucide-style icon as a PIL Image (transparent bg).
+
+    Drawn at 4× the requested size and downsampled with LANCZOS so strokes are
+    smooth at small sizes (PIL's line/arc primitives are aliased at 1× and look
+    pixelated below 24px otherwise).
+    """
     key = (name, size, color.upper())
     if key in _CACHE:
         return _CACHE[key]
     drawer = _DRAWERS.get(name)
     if drawer is None:
-        # fallback: empty transparent square
         img, _ = _canvas(size)
         _CACHE[key] = img
         return img
-    img, d = _canvas(size)
-    drawer(d, size, _hex(color), _stroke(size))
+    SCALE = 4
+    big = size * SCALE
+    img_big, d = _canvas(big)
+    # Stroke width scales with the supersampled size; cap at a reasonable
+    # max so very small icons still look like strokes, not blobs.
+    drawer(d, big, _hex(color), max(SCALE, round(big / 12)))
+    img = img_big.resize((size, size), Image.LANCZOS)
     _CACHE[key] = img
     return img
 
