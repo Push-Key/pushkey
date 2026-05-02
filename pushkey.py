@@ -25,11 +25,17 @@ import sys
 import base64
 import hashlib
 import secrets
+from pathlib import Path
+
+# Resolve asset base dir — works both in dev and PyInstaller --onefile
+def _asset_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
 import tempfile
 import time
 import webbrowser
 import re
-from pathlib import Path
 from datetime import datetime, timedelta
 import atexit
 
@@ -39,6 +45,7 @@ import atexit
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
+# Theme loaded from config after VAULT_DIR is known — see PushkeyApp.__init__
 
 # ═══════════════════════════════════════════════
 # CRYPTO
@@ -275,22 +282,29 @@ def get_or_create_salt():
     return salt
 
 
+def _check_crypto_deps():
+    try:
+        from cryptography.fernet import Fernet, InvalidToken  # noqa: F401
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+    except ImportError:
+        _root = tk.Tk()
+        _root.withdraw()
+        messagebox.showerror(
+            "Missing dependency",
+            "Pushkey requires the 'cryptography' package.\n\n"
+            "Install it with:\n"
+            "  pip install -r requirements.txt\n\n"
+            "Then re-run:\n"
+            "  python pushkey.py",
+        )
+        _root.destroy()
+        raise SystemExit(1)
+
 try:
     from cryptography.fernet import Fernet, InvalidToken
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except ImportError:
-    _root = tk.Tk()
-    _root.withdraw()
-    messagebox.showerror(
-        "Missing dependency",
-        "Pushkey requires the 'cryptography' package.\n\n"
-        "Install it with:\n"
-        "  pip install -r requirements.txt\n\n"
-        "Then re-run:\n"
-        "  python pushkey.py",
-    )
-    _root.destroy()
-    raise SystemExit(1)
+    Fernet = InvalidToken = AESGCM = None  # type: ignore
 
 try:
     from argon2.low_level import hash_secret_raw, Type as Argon2Type
@@ -1893,38 +1907,108 @@ def inject_env_file(project_path, vault, key_names=None, target_env="all"):
 # COLORS & FONTS
 # ═══════════════════════════════════════════════
 
-C = {
-    "bg":       "#04070D",
-    "bg2":      "#080D17",
-    "bg3":      "#0C1420",
-    "bg4":      "#11202F",
-    "surface":  "#09111D",
-    "accent":   "#059669",
-    "accent2":  "#047857",
-    "green":    "#10B981",
-    "green_bg": "#022C22",
-    "amber":    "#F59E0B",
-    "amber_bg": "#451A03",
-    "red":      "#F87171",
-    "red_bg":   "#3B0D0D",
-    "btn":      "#0F1E30",
-    "btn_hover":"#162840",
-    "text":     "#DDE4EE",
-    "text2":    "#7C8FA6",
-    "text3":    "#3D5166",
-    "border":   "#152238",
-    "border2":  "#1E3350",
+C_DARK = {
+    # Backgrounds — OLED-punchy, clearly tiered
+    "bg":           "#050A0F",
+    "bg2":          "#0A1628",
+    "bg3":          "#0F2035",
+    "bg4":          "#152840",
+    "surface":      "#0A1628",
+    # Brand accent — CYAN (green demoted to health status only)
+    "accent":       "#22D3EE",
+    "accent2":      "#06B6D4",
+    "accent_dim":   "#051318",
+    # Violet — security, MFA, enterprise tier
+    "violet":       "#7C3AED",
+    "violet_dim":   "#110D1E",
+    # Text — cyan-tinted hierarchy
+    "text":         "#F0F9FF",
+    "text2":        "#7FB3CC",
+    "text3":        "#3D6E8A",
+    # Borders — visible
+    "border":       "#112233",
+    "border2":      "#1A3550",
+    # Buttons
+    "btn":          "#0F2035",
+    "btn_hover":    "#152840",
+    # Semantic — green LOCKED to healthy status only
+    "green":        "#00DC82",
+    "green_bg":     "#041A0F",
+    "amber":        "#F59E0B",
+    "amber_bg":     "#1F1200",
+    "red":          "#EF4444",
+    "red_bg":       "#1F0808",
+    "blue":         "#22D3EE",
+    "blue_bg":      "#051318",
+    # Environment pills
+    "env_dev":      "#22D3EE",
+    "env_staging":  "#F59E0B",
+    "env_prod":     "#EF4444",
+    "env_all":      "#7C3AED",
 }
 
-FONT       = ("Segoe UI", 11)
-FONT_SM    = ("Segoe UI", 10)
-FONT_XS    = ("Segoe UI", 9)
-FONT_MONO  = ("Consolas", 11)
-FONT_MONO_SM = ("Consolas", 10)
-FONT_TITLE = ("Segoe UI", 18, "bold")
-FONT_H2    = ("Segoe UI", 14, "bold")
-FONT_H3    = ("Segoe UI", 11, "bold")
-FONT_BTN   = ("Segoe UI", 9, "bold")
+C_LIGHT = {
+    "bg":           "#FFFFFF",
+    "bg2":          "#F8FAFD",
+    "bg3":          "#FFFFFF",
+    "bg4":          "#FFFFFF",
+    "surface":      "#FFFFFF",
+    "accent":       "#0891B2",
+    "accent2":      "#0E7490",
+    "accent_dim":   "#ECFEFF",
+    "violet":       "#8B5CF6",
+    "violet_dim":   "#F5F3FF",
+    "text":         "#0F172A",
+    "text2":        "#64748B",
+    "text3":        "#B0BAC8",
+    "border":       "#CBD5E1",
+    "border2":      "#B6C5D4",
+    "btn":          "#F1F5F9",
+    "btn_hover":    "#E8EEF5",
+    "green":        "#10B981",
+    "green_bg":     "#F0FDF9",
+    "amber":        "#F59E0B",
+    "amber_bg":     "#FFFBEB",
+    "red":          "#EF4444",
+    "red_bg":       "#FFF5F5",
+    "blue":         "#0891B2",
+    "blue_bg":      "#ECFEFF",
+    "env_dev":      "#0891B2",
+    "env_staging":  "#F59E0B",
+    "env_prod":     "#EF4444",
+    "env_all":      "#8B5CF6",
+}
+
+_CURRENT_THEME = "dark"
+C = C_DARK
+
+HEALTH_COLORS = {
+    "healthy":  "#00DC82",
+    "warning":  "#F59E0B",
+    "critical": "#EF4444",
+}
+
+
+def set_theme(mode: str):
+    global C, _CURRENT_THEME
+    _CURRENT_THEME = mode
+    C = C_DARK if mode == "dark" else C_LIGHT
+    ctk.set_appearance_mode("dark" if mode == "dark" else "light")
+
+
+# IBM Plex Sans + JetBrains Mono — matches landing page typography
+_UI_FONT    = "IBM Plex Sans"
+_MONO_FONT  = "JetBrains Mono"
+
+FONT         = (_UI_FONT, 12)
+FONT_SM      = (_UI_FONT, 11)
+FONT_XS      = (_UI_FONT, 11)
+FONT_MONO    = (_MONO_FONT, 12)
+FONT_MONO_SM = (_MONO_FONT, 11)
+FONT_TITLE   = (_UI_FONT, 20, "bold")
+FONT_H2      = (_UI_FONT, 15, "bold")
+FONT_H3      = (_UI_FONT, 13, "bold")
+FONT_BTN     = (_UI_FONT, 11, "bold")
 
 CAT_COLORS = {
     "AI":       "#A78BFA",
@@ -1957,7 +2041,8 @@ CAT_EMOJI = {
 # HELPER WIDGETS (CTK-native)
 # ═══════════════════════════════════════════════
 
-def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, height=28):
+def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, height=28,
+             corner_radius=4, anchor=None):
     fg = fg_color or C["btn"]
     tc = text_color or C["text2"]
     kw = dict(
@@ -1967,11 +2052,13 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
         text_color=tc,
         hover_color=C["btn_hover"],
         font=FONT_BTN,
-        corner_radius=4,
+        corner_radius=corner_radius,
         height=height,
     )
     if width:
         kw["width"] = width
+    if anchor:
+        kw["anchor"] = anchor
     return ctk.CTkButton(parent, **kw)
 
 
@@ -2030,50 +2117,81 @@ class LoginFrame(ctk.CTkFrame):
         self.on_login = on_login
         self.is_new = not VAULT_FILE.exists()
 
-        ctk.CTkFrame(self, fg_color="transparent", height=60).pack()
+        # Centered card layout
+        ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
-        # Brand
-        ctk.CTkLabel(self, text="🔐", font=("Segoe UI Emoji", 40)).pack(pady=(0, 4))
-        ctk.CTkLabel(self, text="PUSHKEY", font=("Consolas", 26, "bold"), text_color=C["accent"]).pack()
-        ctk.CTkLabel(self, text="🛡️  encrypted key vault  🛡️", font=FONT_XS, text_color=C["text3"]).pack(pady=(2, 0))
+        card = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=12,
+                            border_width=1, border_color=C["border"])
+        card.pack(pady=40, padx=160, fill="x")
 
-        ctk.CTkFrame(self, fg_color=C["border"], height=1).pack(fill="x", padx=100, pady=24)
+        # Brand logo — placeholder shown immediately, real logo loaded after window appears
+        ctk.CTkFrame(card, fg_color="transparent", height=24).pack()
+        self._logo_slot = ctk.CTkLabel(card, text="⬡", font=(_MONO_FONT, 28, "bold"),
+                                        text_color=C["accent"])
+        self._logo_slot.pack(pady=(0, 8))
+        self._logo_card = card
+        self.after(0, self._load_login_logo)
 
-        sub = "create a master password to get started" if self.is_new else "enter master password to unlock"
-        ctk.CTkLabel(self, text=sub, font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 12))
+        ctk.CTkLabel(card, text="PushKey", font=(_UI_FONT, 22, "bold"),
+                     text_color=C["text"]).pack()
+        sub = "Create a master password to get started" if self.is_new \
+            else "Enter your master password to unlock"
+        ctk.CTkLabel(card, text=sub, font=FONT_XS,
+                     text_color=C["text3"]).pack(pady=(4, 20))
 
-        form = ctk.CTkFrame(self, fg_color="transparent")
-        form.pack()
+        # Form
+        form = ctk.CTkFrame(card, fg_color="transparent")
+        form.pack(padx=32, fill="x")
 
+        ctk.CTkLabel(form, text="MASTER PASSWORD", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
         self.pw = ctk.CTkEntry(
-            form, show="●", font=("Consolas", 14), fg_color=C["bg3"],
-            text_color=C["text"], border_color=C["border2"], width=300, justify="center",
+            form, show="●", font=FONT_MONO_SM, fg_color=C["bg3"],
+            text_color=C["text"], border_color=C["border2"], placeholder_text="Enter password",
         )
-        self.pw.pack(pady=(0, 8), ipady=4)
+        self.pw.pack(fill="x", ipady=5)
         self.pw.focus_set()
         self.pw.bind("<Return>", lambda e: self.unlock())
 
         if self.is_new:
+            ctk.CTkLabel(form, text="CONFIRM PASSWORD", font=FONT_XS,
+                         text_color=C["text3"]).pack(anchor="w", pady=(12, 4))
             self.pw2 = ctk.CTkEntry(
-                form, show="●", font=("Consolas", 14), fg_color=C["bg3"],
-                text_color=C["text"], border_color=C["border2"], width=300, justify="center",
+                form, show="●", font=FONT_MONO_SM, fg_color=C["bg3"],
+                text_color=C["text"], border_color=C["border2"],
+                placeholder_text="Re-enter password",
             )
-            self.pw2.pack(pady=(0, 4), ipady=4)
+            self.pw2.pack(fill="x", ipady=5)
             self.pw2.bind("<Return>", lambda e: self.unlock())
-            ctk.CTkLabel(form, text="Re-enter to confirm", font=FONT_XS, text_color=C["text3"]).pack(pady=(0, 8))
 
         make_btn(
             form,
-            "Unlock" if not self.is_new else "Create Vault",
+            "Unlock Vault" if not self.is_new else "Create Vault",
             self.unlock,
             fg_color=C["accent"],
-            text_color="white",
-            width=200,
-            height=36,
-        ).pack(pady=(4, 0))
+            text_color=C["bg"],
+            height=38,
+        ).pack(fill="x", pady=(16, 0))
 
-        self.err = ctk.CTkLabel(self, text="", font=FONT_SM, text_color=C["red"])
-        self.err.pack(pady=(10, 0))
+        self.err = ctk.CTkLabel(form, text="", font=FONT_XS, text_color=C["red"])
+        self.err.pack(pady=(8, 0))
+
+        ctk.CTkFrame(card, fg_color="transparent", height=28).pack()
+
+        ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
+
+    def _load_login_logo(self):
+        _logo_path = _asset_dir() / "pushkey_logo.png"
+        if not _logo_path.exists():
+            return
+        try:
+            from PIL import Image as _PILImage
+            pil = _PILImage.open(_logo_path).convert("RGBA")
+            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(80, 80))
+            self._logo_slot.configure(image=img, text="")
+            self._login_logo_img = img  # keep ref
+        except Exception:
+            pass
 
     def _check_password_strength(self, pw):
         if len(pw) < 12:
@@ -2177,11 +2295,12 @@ class LoginFrame(ctk.CTkFrame):
 # ═══════════════════════════════════════════════
 
 class AppFrame(ctk.CTkFrame):
-    def __init__(self, master, password, vault, on_lock):
+    def __init__(self, master, password, vault, on_lock, app=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
         self.password = password
         self.vault = vault
         self.on_lock = on_lock
+        self.app = app
         self.config = load_config()
         self.revealed = set()
         self._group_by = "file"
@@ -2191,41 +2310,59 @@ class AppFrame(ctk.CTkFrame):
         self._search_var = tk.StringVar()
 
         # ── Top bar ──
-        top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=48)
+        top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=52)
         top.pack(fill="x")
         top.pack_propagate(False)
 
+        # Brand (left)
         brand = ctk.CTkFrame(top, fg_color="transparent")
-        brand.pack(side="left", padx=(12, 0))
-        ctk.CTkLabel(brand, text="●", font=("Segoe UI", 10), text_color=C["accent"]).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(brand, text="PUSHKEY", font=("Consolas", 13, "bold"), text_color=C["text"]).pack(side="left")
-        ctk.CTkLabel(brand, text=" vault", font=FONT_XS, text_color=C["text3"]).pack(side="left")
+        brand.pack(side="left", padx=(16, 0))
+        _logo_path = _asset_dir() / "pushkey_logo.png"
+        _logo_loaded = False
+        if _logo_path.exists():
+            try:
+                from PIL import Image as _PILImage
+                self._top_pil = _PILImage.open(_logo_path).convert("RGBA")
+                self._top_logo_img = ctk.CTkImage(
+                    light_image=self._top_pil, dark_image=self._top_pil, size=(28, 28))
+                ctk.CTkLabel(brand, image=self._top_logo_img, text="").pack(side="left", padx=(0, 8))
+                _logo_loaded = True
+            except Exception:
+                _logo_loaded = False
+        if not _logo_loaded:
+            brand_icon = ctk.CTkFrame(brand, fg_color=C["accent_dim"],
+                                       width=28, height=28, corner_radius=6)
+            brand_icon.pack(side="left", padx=(0, 8))
+            brand_icon.pack_propagate(False)
+            ctk.CTkLabel(brand_icon, text="⬡", font=(_MONO_FONT, 13, "bold"),
+                         text_color=C["accent"]).place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkLabel(brand, text="PushKey", font=(_UI_FONT, 14, "bold"),
+                     text_color=C["text"]).pack(side="left")
         # Tier badge
         t = TIERS[current_tier()]
-        tier_lbl = ctk.CTkLabel(brand, text=f"  {t['emoji']} {t['label']}",
+        tier_lbl = ctk.CTkLabel(brand, text=f"  {t['label']}",
                                  font=FONT_XS, text_color=t["color"], cursor="hand2")
-        tier_lbl.pack(side="left", padx=(8, 0))
+        tier_lbl.pack(side="left", padx=(6, 0))
         tier_lbl.bind("<Button-1>", lambda e: self._enter_license())
 
-        make_btn(top, "🔒 Lock", self.lock, fg_color=C["red_bg"], text_color=C["red"]).pack(side="right", padx=(4, 12), pady=10)
-        make_btn(top, "🔑 Password", self.change_master_password).pack(side="right", padx=2, pady=10)
-        mfa_label = "🔐 MFA ✓" if mfa_is_enabled() else "🔐 MFA"
-        mfa_color = C["green"] if mfa_is_enabled() else C["text2"]
-        make_btn(top, mfa_label, self.manage_mfa,
-                 fg_color=C["bg4"], text_color=mfa_color).pack(side="right", padx=2, pady=10)
-        make_btn(top, "📤 Export", self.export_vault).pack(side="right", padx=2, pady=10)
-        make_btn(top, "📥 Import", self.import_vault).pack(side="right", padx=2, pady=10)
-        make_btn(top, "📋 Template", self.show_template).pack(side="right", padx=2, pady=10)
-        make_btn(top, "🔄 Providers", self.do_update_providers,
-                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "📜 Audit Log", self.show_log,
-                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "🏛️ Policies", self.manage_policies,
-                 fg_color=C["bg4"], text_color=C["text2"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "👥 Share", self.team_share,
-                 fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
-        make_btn(top, "📩 Team Import", self.team_import,
-                 fg_color=C["bg4"], text_color=C["accent"]).pack(side="right", padx=2, pady=10)
+        # Right controls — theme toggle + settings + lock only
+        right = ctk.CTkFrame(top, fg_color="transparent")
+        right.pack(side="right", padx=(0, 14))
+
+        self._theme_btn = make_btn(
+            right, "☀" if _CURRENT_THEME == "dark" else "☾",
+            self._toggle_theme,
+            fg_color=C["btn"], text_color=C["text2"], width=32, height=32,
+        )
+        self._theme_btn.pack(side="left", padx=3)
+
+        make_btn(right, "⚙", self._show_settings,
+                 fg_color=C["btn"], text_color=C["text2"], width=32, height=32,
+                 ).pack(side="left", padx=3)
+
+        make_btn(right, "Lock", self.lock,
+                 fg_color=C["red_bg"], text_color=C["red"], width=64, height=32,
+                 ).pack(side="left", padx=(6, 0))
 
         # Auto-lock
         self._lock_timeout = 5 * 60 * 1000
@@ -2234,35 +2371,80 @@ class AppFrame(ctk.CTkFrame):
         self.master.bind("<Key>", lambda e: self._reset_lock_timer(), add="+")
         self.master.bind("<Button>", lambda e: self._reset_lock_timer(), add="+")
 
-        # ── Tab view ──
-        self.tabview = ctk.CTkTabview(
-            self,
-            fg_color=C["bg"],
-            segmented_button_fg_color=C["bg2"],
-            segmented_button_selected_color=C["accent"],
-            segmented_button_selected_hover_color=C["accent2"],
-            segmented_button_unselected_color=C["bg2"],
-            segmented_button_unselected_hover_color=C["bg4"],
-            text_color=C["text"],
-            corner_radius=0,
+        # ── Body: sidebar + content ──
+        body = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        # Sidebar (180px)
+        self._sidebar = ctk.CTkFrame(body, fg_color=C["bg2"], corner_radius=0, width=180)
+        self._sidebar.pack(side="left", fill="y")
+        self._sidebar.pack_propagate(False)
+
+        # Thin accent border on right edge of sidebar
+        ctk.CTkFrame(body, fg_color=C["border"], width=1, corner_radius=0).pack(side="left", fill="y")
+
+        # Content area
+        content = ctk.CTkFrame(body, fg_color=C["bg"], corner_radius=0)
+        content.pack(side="left", fill="both", expand=True)
+
+        # ── Sidebar nav ──
+        self._nav_btns = {}
+        self._active_nav = tk.StringVar(value="dashboard")
+
+        # Logo spacer
+        ctk.CTkFrame(self._sidebar, fg_color="transparent", height=16).pack()
+
+        nav_items = [
+            ("dashboard", "Dashboard"),
+            ("keys",      "All Keys"),
+            ("projects",  "Projects"),
+            ("security",  "Security"),
+            ("cloud",     "Cloud"),
+        ]
+
+        for key, label in nav_items:
+            btn = ctk.CTkButton(
+                self._sidebar,
+                text=label,
+                font=FONT_SM,
+                anchor="w",
+                fg_color="transparent",
+                text_color=C["text2"],
+                hover_color=C["bg4"],
+                corner_radius=6,
+                height=36,
+                command=lambda k=key: self._nav_switch(k),
+            )
+            btn.pack(fill="x", padx=10, pady=1)
+            self._nav_btns[key] = btn
+
+        # Bottom sidebar items
+        ctk.CTkFrame(self._sidebar, fg_color=C["border"], height=1).pack(
+            fill="x", padx=12, pady=(8, 0))
+        key_count = len([k for k in self.vault if not k.startswith("_")])
+        self._sidebar_count_lbl = ctk.CTkLabel(
+            self._sidebar,
+            text=f"{key_count} key{'s' if key_count != 1 else ''}",
+            font=FONT_XS, text_color=C["text3"],
         )
-        self.tabview.pack(fill="both", expand=True)
+        self._sidebar_count_lbl.pack(padx=14, pady=(6, 0), anchor="w")
 
-        self.tabview.add("📊 Dashboard")
-        self.tabview.add("🔑 All Keys")
-        self.tabview.add("📁 Projects")
-        self.tabview.add("🛡️ Security")
-        self.tabview.add("☁️ Cloud")
+        # ── Content frames (grid-stacked, tkraise to switch) ──
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
 
-        self.dash_frame  = self.tabview.tab("📊 Dashboard")
-        self.keys_frame  = self.tabview.tab("🔑 All Keys")
-        self.proj_frame  = self.tabview.tab("📁 Projects")
-        self.scan_frame  = self.tabview.tab("🛡️ Security")
-        self.cloud_frame = self.tabview.tab("☁️ Cloud")
+        self.dash_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
+        self.keys_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
+        self.proj_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
+        self.scan_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
+        self.cloud_frame = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
 
         for f in (self.dash_frame, self.keys_frame, self.proj_frame,
                   self.scan_frame, self.cloud_frame):
-            f.configure(fg_color=C["bg"])
+            f.grid(row=0, column=0, sticky="nsew")
+
+        # Show dashboard by default
+        self._nav_switch("dashboard")
 
         self._scan_results = []
         self._git_scan_results = []
@@ -2279,6 +2461,92 @@ class AppFrame(ctk.CTkFrame):
         save_vault(self.vault, self.password)
         save_config(self.config)
         write_health_sidecar(self.vault)
+
+    # ── Nav + theme ───────────────────────────────────────────
+
+    _NAV_FRAMES = {
+        "dashboard": "dash_frame",
+        "keys":      "keys_frame",
+        "projects":  "proj_frame",
+        "security":  "scan_frame",
+        "cloud":     "cloud_frame",
+    }
+
+    def _nav_switch(self, key: str):
+        self._active_nav.set(key)
+        # Update sidebar button styles
+        for k, btn in self._nav_btns.items():
+            if k == key:
+                btn.configure(
+                    fg_color=C["accent_dim"],
+                    text_color=C["accent"],
+                )
+            else:
+                btn.configure(fg_color="transparent", text_color=C["text2"])
+        # Raise the matching content frame
+        frame = getattr(self, self._NAV_FRAMES[key])
+        frame.tkraise()
+
+    def _toggle_theme(self):
+        new_mode = "light" if _CURRENT_THEME == "dark" else "dark"
+        set_theme(new_mode)
+        self.config["theme"] = new_mode
+        save_config(self.config)
+        if self.app is not None:
+            pw, vault = self.password, self.vault
+            self.master.after(0, lambda: self.app.reload_app(pw, vault))
+        else:
+            self._theme_btn.configure(text="☀" if new_mode == "dark" else "☾")
+
+    def _show_settings(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Settings")
+        win.geometry("400x480")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+
+        ctk.CTkLabel(win, text="Settings", font=FONT_H2,
+                     text_color=C["text"]).pack(anchor="w", padx=20, pady=(18, 12))
+
+        def section(label):
+            ctk.CTkLabel(win, text=label, font=FONT_XS,
+                         text_color=C["text3"]).pack(anchor="w", padx=20, pady=(10, 4))
+
+        def row_btn(label, cmd, color=None, text_col=None):
+            make_btn(win, label, cmd,
+                     fg_color=color or C["btn"],
+                     text_color=text_col or C["text2"],
+                     width=360, height=34,
+                     anchor="w",
+                     ).pack(padx=20, pady=2)
+
+        section("VAULT")
+        row_btn("Change Master Password", self.change_master_password)
+        row_btn("Export Vault", self.export_vault)
+        row_btn("Import Vault", self.import_vault)
+        row_btn("Import Template", self.show_template)
+
+        section("SECURITY")
+        mfa_label = "MFA  ✓  Enabled" if mfa_is_enabled() else "Set Up MFA"
+        mfa_col = C["green"] if mfa_is_enabled() else C["text2"]
+        row_btn(mfa_label, self.manage_mfa, text_col=mfa_col)
+        row_btn("Audit Log", self.show_log)
+        row_btn("Policies", self.manage_policies)
+
+        section("TEAM")
+        row_btn("Share Vault Export", self.team_share, text_col=C["accent"])
+        row_btn("Import Team Export", self.team_import, text_col=C["accent"])
+
+        section("DATA")
+        row_btn("Update Providers Registry", self.do_update_providers)
+
+        ctk.CTkFrame(win, fg_color=C["border"], height=1).pack(
+            fill="x", padx=20, pady=(16, 10))
+        make_btn(win, "Close", win.destroy,
+                 fg_color=C["red_bg"], text_color=C["red"],
+                 width=100, height=32).pack(pady=4)
 
     # ── License gate ─────────────────────────────────────────
     def _gate(self, feature: str, current_count: int = 0) -> bool:
@@ -3421,25 +3689,51 @@ class AppFrame(ctk.CTkFrame):
         projects = len(self.config.get("projects", {}))
         key_limit = tier_limits().get("max_keys")
 
-        # Stats row
+        # ── Page header ──
+        hdr_row = ctk.CTkFrame(pad, fg_color="transparent")
+        hdr_row.pack(fill="x", pady=(0, 16))
+        ctk.CTkLabel(hdr_row, text="Dashboard", font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
+        t = TIERS[current_tier()]
+        tier_pill = ctk.CTkFrame(hdr_row, fg_color=C["accent_dim"], corner_radius=10)
+        tier_pill.pack(side="right")
+        ctk.CTkLabel(tier_pill, text=f"{t['label']} Plan",
+                     font=FONT_XS, text_color=C["accent"]).pack(padx=8, pady=2)
+
+        # ── Stats cards with health bar ──
         stats_frame = ctk.CTkFrame(pad, fg_color="transparent")
-        stats_frame.pack(fill="x", pady=(0, 16))
+        stats_frame.pack(fill="x", pady=(0, 20))
 
         key_display = f"{total} / {key_limit}" if key_limit else str(total)
         key_color = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
-        for emoji, label, val, color in [
-            ("🔑", "Total keys",      key_display,            key_color),
-            ("🟢", "Healthy",         str(healthy),           C["green"]),
-            ("⚠️",  "Needs rotation", str(warning + critical), C["amber"] if warning + critical > 0 else C["green"]),
-            ("📁", "Projects linked", str(projects),          C["accent"]),
-        ]:
-            card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=6)
-            card.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            hrow = ctk.CTkFrame(card, fg_color="transparent")
-            hrow.pack(anchor="w", padx=10, pady=(8, 0))
-            ctk.CTkLabel(hrow, text=emoji, font=("Segoe UI Emoji", 10)).pack(side="left")
-            ctk.CTkLabel(hrow, text=f"  {label}", font=FONT_XS, text_color=C["text3"]).pack(side="left")
-            ctk.CTkLabel(card, text=val, font=("Segoe UI", 22, "bold"), text_color=color).pack(anchor="w", padx=10, pady=(0, 8))
+        needs_rotation = warning + critical
+        health_pct = int((healthy / total * 100)) if total else 100
+
+        stat_defs = [
+            ("Total Keys",      key_display,              key_color,    None,       None),
+            ("Healthy",         str(healthy),             C["green"],   healthy,    total),
+            ("Need Rotation",   str(needs_rotation),      C["amber"] if needs_rotation else C["green"],
+                                needs_rotation,  total),
+            ("Projects",        str(projects),            C["accent"],  None,       None),
+        ]
+        for label, val, color, bar_val, bar_max in stat_defs:
+            card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=8,
+                                border_width=1, border_color=C["border"])
+            card.pack(side="left", fill="x", expand=True, padx=(0, 10))
+            ctk.CTkLabel(card, text=label, font=FONT_XS,
+                         text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 2))
+            ctk.CTkLabel(card, text=val, font=(_UI_FONT, 26, "bold"),
+                         text_color=color).pack(anchor="w", padx=14)
+            if bar_val is not None and bar_max and bar_max > 0:
+                bar_bg = ctk.CTkFrame(card, fg_color=C["bg3"], height=3, corner_radius=2)
+                bar_bg.pack(fill="x", padx=14, pady=(4, 12))
+                bar_bg.pack_propagate(False)
+                pct = max(0.02, bar_val / bar_max)
+                bar_fill = ctk.CTkFrame(bar_bg, fg_color=color, height=3, corner_radius=2,
+                                        width=int(pct * 160))
+                bar_fill.place(x=0, y=0, relheight=1)
+            else:
+                ctk.CTkFrame(card, fg_color="transparent", height=19).pack()
 
         # Scheduled rotations due
         due_keys = [(n, i) for n, i in keys
@@ -3477,65 +3771,95 @@ class AppFrame(ctk.CTkFrame):
                              lambda u=prov_url: webbrowser.open(u),
                              fg_color="transparent", text_color=C["accent"], width=120).pack(pady=(4, 0))
 
-        # Action needed
+        # ── Action needed callout cards ──
         if critical + warning > 0:
-            ctk.CTkLabel(pad, text="🚨  ACTION NEEDED", font=FONT_XS, text_color=C["red"]).pack(anchor="w", pady=(8, 4))
-            for name, info in sorted(keys, key=lambda x: days_since(x[1].get("rotated") or x[1].get("created")), reverse=True):
+            ctk.CTkLabel(pad, text="ACTION NEEDED", font=FONT_XS,
+                         text_color=C["red"]).pack(anchor="w", pady=(0, 6))
+            for name, info in sorted(
+                    keys, key=lambda x: days_since(x[1].get("rotated") or x[1].get("created")),
+                    reverse=True):
                 status = health_status(info)
-                if status in ("critical", "warning"):
-                    age = days_since(info.get("rotated") or info.get("created"))
-                    provider = info.get("provider")
-                    prov_data = PROVIDERS.get(provider, {})
+                if status not in ("critical", "warning"):
+                    continue
+                age = days_since(info.get("rotated") or info.get("created"))
+                provider = info.get("provider")
+                prov_data = PROVIDERS.get(provider, {})
+                border_col = C["red"] if status == "critical" else C["amber"]
 
-                    row = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4)
-                    row.pack(fill="x", pady=2)
+                # Callout card with colored left border accent
+                outer = ctk.CTkFrame(pad, fg_color=border_col, corner_radius=6)
+                outer.pack(fill="x", pady=2)
+                inner = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=5)
+                inner.pack(fill="both", expand=True, padx=(3, 0))
 
-                    left = ctk.CTkFrame(row, fg_color="transparent")
-                    left.pack(side="left", fill="x", expand=True, padx=10, pady=8)
-                    ctk.CTkLabel(left, text=name, font=FONT_MONO, text_color=C["text"]).pack(anchor="w")
-                    msg = f"{age} days old"
-                    msg += " — rotate immediately" if status == "critical" else " — rotate soon"
-                    ctk.CTkLabel(left, text=msg, font=FONT_XS, text_color=health_color(status)).pack(anchor="w")
+                left = ctk.CTkFrame(inner, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+                ctk.CTkLabel(left, text=name, font=FONT_MONO,
+                             text_color=C["text"]).pack(anchor="w")
+                action_msg = f"{age}d old — rotate immediately" if status == "critical" \
+                    else f"{age}d old — rotate soon"
+                ctk.CTkLabel(left, text=action_msg, font=FONT_XS,
+                             text_color=border_col).pack(anchor="w")
 
-                    if prov_data.get("url"):
-                        make_btn(row, f"Open {provider or 'provider'}",
-                                 lambda u=prov_data["url"]: webbrowser.open(u),
-                                 fg_color=C["bg3"]).pack(side="right", padx=8, pady=8)
+                if prov_data.get("url"):
+                    make_btn(inner, f"Open {provider}", lambda u=prov_data["url"]: webbrowser.open(u),
+                             fg_color=C["btn"], text_color=C["accent"],
+                             width=100, height=28).pack(side="right", padx=10)
 
-        # All keys health list
-        ctk.CTkLabel(pad, text="🔑  ALL KEYS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(16, 4))
+            ctk.CTkFrame(pad, fg_color=C["border"], height=1).pack(fill="x", pady=(12, 0))
 
-        if not keys:
-            ctk.CTkLabel(pad, text="No keys yet. Go to 'All Keys' tab to add your first one.",
-                         font=FONT, text_color=C["text3"]).pack(anchor="w", pady=20)
+        # ── All keys health list ──
+        ctk.CTkLabel(pad, text="ALL KEYS", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(12, 6))
+
+        if not real_keys:
+            # Empty state
+            empty = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=8)
+            empty.pack(fill="x", pady=20)
+            ctk.CTkLabel(empty, text="No keys yet", font=FONT_H3,
+                         text_color=C["text"]).pack(pady=(20, 4))
+            ctk.CTkLabel(empty, text="Add your first key to start tracking rotation health",
+                         font=FONT_XS, text_color=C["text3"]).pack()
+            make_btn(empty, "+ New Key", self._show_add_key_modal,
+                     fg_color=C["accent"], text_color=C["bg"],
+                     height=34).pack(pady=(12, 20))
             return
 
-        for name, info in sorted(keys, key=lambda x: x[0]):
+        for name, info in sorted(real_keys, key=lambda x: x[0]):
             status = health_status(info)
             age = days_since(info.get("rotated") or info.get("created"))
-            provider = info.get("provider", "")
-
-            row = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=4, cursor="hand2")
-            row.pack(fill="x", pady=1)
-            row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
-
             cat = info.get("category", "General")
             cat_color = CAT_COLORS.get(cat, C["text3"])
             age_text = f"{age}d" if age != float("inf") else "?"
+            _hp = {"healthy": (C["green_bg"], C["green"], "Healthy"),
+                   "warning":  (C["amber_bg"], C["amber"], "Rotate Soon"),
+                   "critical": (C["red_bg"],   C["red"],   "Critical")}
+            h_bg, h_fg, h_lbl = _hp.get(status, (C["bg3"], C["text3"], "Unknown"))
+
+            row = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
+                               border_width=1, border_color=C["border"], cursor="hand2")
+            row.pack(fill="x", pady=2)
+            row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+
+            # Category dot
+            ctk.CTkLabel(row, text="●", font=(_MONO_FONT, 10),
+                         text_color=cat_color, width=20).pack(side="left", padx=(10, 0))
 
             left = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
-            left.pack(side="left", fill="x", expand=True, pady=4, padx=8)
+            left.pack(side="left", fill="x", expand=True, pady=8, padx=6)
             left.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+            lbl = ctk.CTkLabel(left, text=name, font=FONT_MONO_SM,
+                               text_color=C["text"], anchor="w", cursor="hand2")
+            lbl.pack(anchor="w")
+            lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+            ctk.CTkLabel(left, text=cat, font=FONT_XS,
+                         text_color=cat_color).pack(anchor="w")
 
-            lbl_name = ctk.CTkLabel(left, text=name, font=FONT_MONO_SM, text_color=C["text"], anchor="w", cursor="hand2")
-            lbl_name.pack(anchor="w")
-            lbl_name.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
-
-            meta_row = ctk.CTkFrame(left, fg_color="transparent")
-            meta_row.pack(anchor="w")
-            ctk.CTkLabel(meta_row, text=cat, font=FONT_XS, text_color=cat_color).pack(side="left")
-
-            ctk.CTkLabel(row, text=age_text, font=FONT_XS, text_color=health_color(status), width=50).pack(side="right", padx=10)
+            # Health pill on right
+            pill = ctk.CTkFrame(row, fg_color=h_bg, corner_radius=10)
+            pill.pack(side="right", padx=12)
+            ctk.CTkLabel(pill, text=f"● {h_lbl}", font=FONT_XS,
+                         text_color=h_fg).pack(padx=8, pady=3)
 
     # ═══════════════════════════════════════════
     # ALL KEYS TAB
@@ -3545,84 +3869,70 @@ class AppFrame(ctk.CTkFrame):
         for w in self.keys_frame.winfo_children():
             w.destroy()
 
-        # Add key form
-        form = ctk.CTkFrame(self.keys_frame, fg_color=C["surface"], corner_radius=6)
-        form.pack(fill="x", padx=16, pady=(12, 0))
+        # ── Header bar: title + action buttons ──
+        header = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 0))
 
-        ctk.CTkLabel(form, text="➕  Add or Rotate a Key", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 6))
+        ctk.CTkLabel(header, text="All Keys", font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
 
-        # Row 1: Name + Value + Category
-        input_row = ctk.CTkFrame(form, fg_color="transparent")
-        input_row.pack(fill="x", padx=12, pady=(0, 6))
+        right_btns = ctk.CTkFrame(header, fg_color="transparent")
+        right_btns.pack(side="right")
+        make_btn(right_btns, "Scan Import", self.scan_import_folder,
+                 fg_color=C["btn"], text_color=C["text2"], height=30).pack(side="left", padx=3)
+        make_btn(right_btns, "Upload File", self.bulk_upload_keys,
+                 fg_color=C["btn"], text_color=C["text2"], height=30).pack(side="left", padx=3)
+        make_btn(right_btns, "+ New Key", self._show_add_key_modal,
+                 fg_color=C["accent"], text_color=C["bg"], height=30).pack(side="left", padx=(6, 0))
 
-        nf = ctk.CTkFrame(input_row, fg_color="transparent")
-        nf.pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(nf, text="NAME", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
-        self.add_name = ctk.CTkEntry(nf, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
-                                     border_color=C["border2"], width=180)
-        self.add_name.pack(ipady=2)
-
-        vf = ctk.CTkFrame(input_row, fg_color="transparent")
-        vf.pack(side="left", padx=(0, 6), fill="x", expand=True)
-        ctk.CTkLabel(vf, text="VALUE", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
-        self.add_value = ctk.CTkEntry(vf, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
-                                      show="●", border_color=C["border2"])
-        self.add_value.pack(fill="x", ipady=2)
-
-        cf = ctk.CTkFrame(input_row, fg_color="transparent")
-        cf.pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(cf, text="CATEGORY", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
-        self.add_cat = ctk.CTkOptionMenu(
-            cf, values=["General", "Trading", "AI", "Database", "Cloud", "Payment", "Comms", "Security", "Crypto"],
-            fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
-            text_color=C["text"], font=FONT_XS, width=110,
-        )
-        self.add_cat.set("General")
-        self.add_cat.pack(ipady=2)
-
-        ef = ctk.CTkFrame(input_row, fg_color="transparent")
-        ef.pack(side="left", padx=(0, 0))
-        ctk.CTkLabel(ef, text="ENV", font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
-        self.add_env = ctk.CTkOptionMenu(
-            ef, values=ENV_LEVELS,
-            fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
-            text_color=C["text"], font=FONT_XS, width=90,
-        )
-        self.add_env.set("all")
-        self.add_env.pack(ipady=2)
-
-        # Row 2: Action buttons on their own line
-        btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.pack(fill="x", padx=12, pady=(0, 10))
-        make_btn(btn_row, "✅ Add Key", self.add_key, fg_color=C["green_bg"], text_color=C["green"]).pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "🗂️ Add Group", self.add_group_manual, fg_color=C["accent2"], text_color="white").pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "📤 Upload File", self.bulk_upload_keys, fg_color=C["accent"], text_color="white").pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "📁 Scan Import", self.scan_import_folder, fg_color=C["btn"], text_color=C["text2"]).pack(side="left", padx=(0, 6))
-        make_btn(btn_row, "📂 Open Folder", self.open_import_folder, fg_color=C["btn"], text_color=C["text3"]).pack(side="left")
-
-        # Search bar
-        search_bar = ctk.CTkFrame(self.keys_frame, fg_color=C["bg2"], corner_radius=0)
-        search_bar.pack(fill="x", padx=16, pady=(8, 0))
-        ctk.CTkEntry(search_bar, textvariable=self._search_var,
-                     placeholder_text="Search keys by name or provider...",
-                     fg_color=C["bg3"], text_color=C["text"], corner_radius=6,
-                     font=FONT_SM).pack(fill="x", ipady=2)
+        # ── Search bar ──
+        search_wrap = ctk.CTkFrame(self.keys_frame, fg_color=C["bg3"],
+                                    corner_radius=8, border_width=1,
+                                    border_color=C["border"])
+        search_wrap.pack(fill="x", padx=20, pady=(12, 0))
+        ctk.CTkEntry(
+            search_wrap, textvariable=self._search_var,
+            placeholder_text="Search keys by name, provider, or category...",
+            fg_color="transparent", text_color=C["text"],
+            border_width=0, font=FONT_SM,
+        ).pack(fill="x", padx=4, ipady=4)
         self._search_var.trace_add("write", lambda *_: self._render_key_rows())
 
-        # Env filter pills
+        # ── Env filter pills ──
         pill_bar = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
-        pill_bar.pack(fill="x", padx=16, pady=(6, 0))
-        ctk.CTkLabel(pill_bar, text="ENV:", font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(0, 6))
+        pill_bar.pack(fill="x", padx=20, pady=(8, 4))
         self._env_filter_var = tk.StringVar(value="all")
         for level in ["all"] + ENV_LEVELS[1:]:
-            color = ENV_COLORS.get(level, C["text3"])
-            make_btn(pill_bar, level.upper(),
-                     lambda l=level: (self._env_filter_var.set(l), self._render_key_rows()),
-                     fg_color=C["surface"], text_color=color, width=60, height=22).pack(side="left", padx=2)
+            color = C.get(f"env_{level}", C["text3"])
+            is_active = level == "all"
+            make_btn(
+                pill_bar, level.upper(),
+                lambda l=level: (self._env_filter_var.set(l), self._render_key_rows()),
+                fg_color=C["accent_dim"] if is_active else C["bg3"],
+                text_color=C["accent"] if is_active else C["text3"],
+                width=58, height=24, corner_radius=12,
+            ).pack(side="left", padx=2)
 
-        # Scrollable key list
-        self.keys_scroll = ctk.CTkScrollableFrame(self.keys_frame, fg_color=C["bg"], corner_radius=0)
-        self.keys_scroll.pack(fill="both", expand=True, pady=(4, 0))
+        # ── Column header ──
+        col_hdr = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
+        col_hdr.pack(fill="x", padx=20, pady=(4, 2))
+        ctk.CTkLabel(col_hdr, text="KEY NAME", font=FONT_XS,
+                     text_color=C["text3"], width=200, anchor="w").pack(side="left")
+        ctk.CTkLabel(col_hdr, text="PROVIDER", font=FONT_XS,
+                     text_color=C["text3"], width=120, anchor="w").pack(side="left")
+        ctk.CTkLabel(col_hdr, text="ENV", font=FONT_XS,
+                     text_color=C["text3"], width=70, anchor="w").pack(side="left")
+        ctk.CTkLabel(col_hdr, text="STATUS", font=FONT_XS,
+                     text_color=C["text3"], width=100, anchor="w").pack(side="left")
+
+        # Thin divider under header
+        ctk.CTkFrame(self.keys_frame, fg_color=C["border"], height=1).pack(
+            fill="x", padx=20)
+
+        # ── Scrollable key list ──
+        self.keys_scroll = ctk.CTkScrollableFrame(
+            self.keys_frame, fg_color=C["bg"], corner_radius=0)
+        self.keys_scroll.pack(fill="both", expand=True)
 
         self._render_key_rows()
 
@@ -3711,9 +4021,28 @@ class AppFrame(ctk.CTkFrame):
         revealed = name in self.revealed
         provider = info.get("provider")
         prov_data = PROVIDERS.get(provider, {})
+        cat = info.get("category", "General")
+        env = info.get("env", "all")
+        val = info["value"]
 
-        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"], corner_radius=4)
-        row.pack(fill="x", padx=16, pady=1)
+        # Health pill config
+        _hp = {
+            "healthy":  (C["green_bg"],  C["green"],  "Healthy"),
+            "warning":  (C["amber_bg"],  C["amber"],  "Rotate Soon"),
+            "critical": (C["red_bg"],    C["red"],    "Critical"),
+        }
+        h_bg, h_fg, h_label = _hp.get(status, (C["bg3"], C["text3"], "Unknown"))
+
+        # Env pill config
+        env_color = C.get(f"env_{env}", C["text3"])
+        env_bg    = C.get(f"{'blue' if env=='dev' else 'amber' if env=='staging' else 'red' if env=='prod' else 'violet'}_bg",
+                          C["bg3"])
+
+        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
+                           corner_radius=5, border_width=1, border_color=C["border"],
+                           height=36)
+        row.pack(fill="x", padx=2, pady=1)
+        row.pack_propagate(False)
 
         # Checkbox
         sel_var = ctk.BooleanVar(value=False)
@@ -3721,103 +4050,84 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkCheckBox(
             row, variable=sel_var, text="",
             fg_color=C["accent"], hover_color=C["accent2"],
-            border_color=C["border2"], checkmark_color="white",
-            width=20, height=20,
-        ).pack(side="left", padx=(8, 2), pady=10)
+            border_color=C["border2"], checkmark_color=C["bg"],
+            width=14, height=14,
+        ).pack(side="left", padx=(8, 3), pady=0)
 
-        # Health dot via label
-        dot_char = "●"
-        ctk.CTkLabel(row, text=dot_char, font=("Consolas", 8), text_color=health_color(status), width=14).pack(side="left", padx=(2, 2))
+        # Category color dot
+        cat_col = CAT_COLORS.get(cat, C["text3"])
+        ctk.CTkLabel(row, text="●", font=(_MONO_FONT, 9),
+                     text_color=cat_col, width=12).pack(side="left", padx=(0, 6))
 
-        # Env badge (only for non-all)
-        env = info.get("env", "all")
-        if env != "all":
-            ctk.CTkLabel(row, text=env.upper(), font=("Consolas", 7, "bold"),
-                         text_color=ENV_COLORS.get(env, C["text3"]),
-                         width=46).pack(side="left", padx=(0, 2))
-
-        # Info area (clickable)
+        # Key name (single line, clickable)
         info_frame = ctk.CTkFrame(row, fg_color="transparent", cursor="hand2")
-        info_frame.pack(side="left", fill="x", expand=True, pady=6)
+        info_frame.pack(side="left", fill="x", expand=True)
         info_frame.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-        name_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-        name_row.pack(anchor="w")
-
-        lbl_n = ctk.CTkLabel(name_row, text=name, font=("Consolas", 10, "bold"), text_color=C["text"], cursor="hand2", anchor="w")
-        lbl_n.pack(side="left")
+        lbl_n = ctk.CTkLabel(info_frame, text=name, font=FONT_MONO,
+                              text_color=C["text"], cursor="hand2", anchor="w")
+        lbl_n.pack(anchor="w")
         lbl_n.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
+        # Provider column
+        prov_frame = ctk.CTkFrame(row, fg_color="transparent", width=100)
+        prov_frame.pack(side="left")
+        prov_frame.pack_propagate(False)
         if provider:
-            cat = info.get("category", "General")
-            emoji = CAT_EMOJI.get(cat, "🔑")
-            lbl_p = ctk.CTkLabel(name_row, text=f"  {emoji} {provider}", font=FONT_XS,
-                                  text_color=CAT_COLORS.get(cat, C["text3"]), cursor="hand2")
-            lbl_p.pack(side="left")
-            lbl_p.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+            ctk.CTkLabel(prov_frame, text=provider, font=FONT_XS,
+                         text_color=cat_col, anchor="w").pack(anchor="w")
 
-        meta_parts = []
-        if info.get("source_file"):
-            meta_parts.append(info["source_file"])
-        if info.get("created"):
-            meta_parts.append(f"Added {info['created'][:10]}")
-        if info.get("rotated"):
-            meta_parts.append(f"Rotated {info['rotated'][:10]}")
-        if info.get("rotation_count", 0) > 0:
-            meta_parts.append(f"{info['rotation_count']}x rotated")
-        if info.get("first_used"):
-            use_days = days_since(info["first_used"])
-            meta_parts.append(f"In use {use_days}d")
-        env = info.get("env", "all")
+        # Env pill column
+        env_frame = ctk.CTkFrame(row, fg_color="transparent", width=58)
+        env_frame.pack(side="left")
+        env_frame.pack_propagate(False)
         if env != "all":
-            meta_parts.append(env.upper())
-        rbac = info.get("_rbac")
-        if rbac:
-            role = rbac.get("role", "editor")
-            role_icons = {"owner": "👑", "editor": "✏️", "viewer": "👁️"}
-            meta_parts.append(f"{role_icons.get(role, '')} {role}")
-        if info.get("rotation_schedule"):
-            d = days_until_rotation(info)
-            if d is not None:
-                meta_parts.append(f"due in {d}d" if d > 0 else f"overdue {abs(d)}d")
+            pill = ctk.CTkFrame(env_frame, fg_color=env_bg, corner_radius=8)
+            pill.pack(anchor="w")
+            ctk.CTkLabel(pill, text=env.upper(), font=FONT_XS,
+                         text_color=env_color).pack(padx=5, pady=0)
 
-        lbl_meta = ctk.CTkLabel(info_frame, text="  ·  ".join(meta_parts) if meta_parts else "",
-                                 font=FONT_XS, text_color=C["text3"], cursor="hand2", anchor="w")
-        lbl_meta.pack(anchor="w")
-        lbl_meta.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        # Health pill column
+        health_frame = ctk.CTkFrame(row, fg_color="transparent", width=88)
+        health_frame.pack(side="left")
+        health_frame.pack_propagate(False)
+        h_pill = ctk.CTkFrame(health_frame, fg_color=h_bg, corner_radius=10)
+        h_pill.pack(anchor="w")
+        ctk.CTkLabel(h_pill, text=f"● {h_label}", font=FONT_XS,
+                     text_color=h_fg).pack(padx=6, pady=1)
 
         # Value display
-        val = info["value"]
         if revealed:
             display = val
         elif len(val) > 8:
-            display = val[:4] + "●" * min(16, len(val) - 8) + val[-4:]
+            display = val[:4] + "●" * min(12, len(val) - 8) + val[-4:]
         else:
             display = "●" * len(val)
         ctk.CTkLabel(row, text=display, font=FONT_MONO_SM,
-                     text_color=C["green"] if revealed else C["text3"], width=200, anchor="w").pack(side="left", padx=4)
+                     text_color=C["accent"] if revealed else C["text3"],
+                     width=160, anchor="w").pack(side="left", padx=4)
 
-        # Buttons
+        # Action buttons
         btns = ctk.CTkFrame(row, fg_color="transparent")
-        btns.pack(side="right", padx=6, pady=4)
+        btns.pack(side="right", padx=4, pady=0)
 
-        if prov_data.get("url"):
-            make_btn(btns, "->", lambda u=prov_data["url"]: webbrowser.open(u), width=32).pack(side="left", padx=1)
-
+        make_btn(btns, "Copy", lambda v=val: self.copy_key(v),
+                 fg_color=C["btn"], text_color=C["text2"],
+                 width=40, height=22).pack(side="left", padx=1)
         make_btn(btns, "Show" if not revealed else "Hide",
-                 lambda n=name: self.toggle_reveal(n), width=48).pack(side="left", padx=1)
-        make_btn(btns, "Copy", lambda v=val: self.copy_key(v), width=48).pack(side="left", padx=1)
+                 lambda n=name: self.toggle_reveal(n),
+                 fg_color=C["btn"], text_color=C["text2"],
+                 width=40, height=22).pack(side="left", padx=1)
         make_btn(btns, "Rotate", lambda n=name: self.rotate_key(n),
-                 fg_color=C["amber_bg"], text_color=C["amber"], width=56).pack(side="left", padx=1)
-
-        if info.get("history"):
-            make_btn(btns, "History", lambda n=name: self.show_history(n), width=60).pack(side="left", padx=1)
-
-        if info.get("source_file"):
-            make_btn(btns, "Source", lambda n=name: self.show_source(n), width=56).pack(side="left", padx=1)
-
+                 fg_color=C["amber_bg"], text_color=C["amber"],
+                 width=48, height=22).pack(side="left", padx=1)
+        if prov_data.get("url"):
+            make_btn(btns, "Open", lambda u=prov_data["url"]: webbrowser.open(u),
+                     fg_color=C["btn"], text_color=C["accent"],
+                     width=40, height=22).pack(side="left", padx=1)
         make_btn(btns, "Del", lambda n=name: self.delete_key(n),
-                 fg_color=C["red_bg"], text_color="#FCA5A5", width=40).pack(side="left", padx=1)
+                 fg_color=C["red_bg"], text_color=C["red"],
+                 width=32, height=22).pack(side="left", padx=1)
 
     def _select_all_keys(self):
         for var in self._bulk_select_vars.values():
@@ -3843,6 +4153,78 @@ class AppFrame(ctk.CTkFrame):
             log_event(f"bulk delete: removed {name}")
         self.save()
         self.render_all()
+
+    def _show_add_key_modal(self):
+        win = ctk.CTkToplevel(self)
+        win.title("New Key")
+        win.geometry("520x360")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+
+        ctk.CTkLabel(win, text="Add New Key", font=FONT_H2,
+                     text_color=C["text"]).pack(anchor="w", padx=24, pady=(20, 16))
+
+        def field(parent, label, widget_fn):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            f.pack(fill="x", padx=24, pady=(0, 10))
+            ctk.CTkLabel(f, text=label, font=FONT_XS,
+                         text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+            return widget_fn(f)
+
+        self.add_name = field(win, "KEY NAME", lambda p: ctk.CTkEntry(
+            p, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
+            border_color=C["border2"], placeholder_text="OPENAI_API_KEY",
+        ))
+        self.add_name.pack(fill="x", ipady=4)
+
+        self.add_value = field(win, "VALUE", lambda p: ctk.CTkEntry(
+            p, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
+            border_color=C["border2"], show="●", placeholder_text="sk-...",
+        ))
+        self.add_value.pack(fill="x", ipady=4)
+
+        row2 = ctk.CTkFrame(win, fg_color="transparent")
+        row2.pack(fill="x", padx=24, pady=(0, 10))
+
+        cf = ctk.CTkFrame(row2, fg_color="transparent")
+        cf.pack(side="left", padx=(0, 12), fill="x", expand=True)
+        ctk.CTkLabel(cf, text="CATEGORY", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+        self.add_cat = ctk.CTkOptionMenu(
+            cf, values=["General", "Trading", "AI", "Database", "Cloud",
+                        "Payment", "Comms", "Security", "Crypto"],
+            fg_color=C["bg3"], button_color=C["bg4"],
+            button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_XS,
+        )
+        self.add_cat.set("General")
+        self.add_cat.pack(fill="x")
+
+        ef = ctk.CTkFrame(row2, fg_color="transparent")
+        ef.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(ef, text="ENVIRONMENT", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+        self.add_env = ctk.CTkOptionMenu(
+            ef, values=ENV_LEVELS,
+            fg_color=C["bg3"], button_color=C["bg4"],
+            button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_XS,
+        )
+        self.add_env.set("all")
+        self.add_env.pack(fill="x")
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(4, 0))
+        make_btn(btn_row, "Add Key", lambda: (self.add_key(), win.destroy()),
+                 fg_color=C["accent"], text_color=C["bg"],
+                 height=36).pack(side="left", padx=(0, 8))
+        make_btn(btn_row, "Cancel", win.destroy,
+                 fg_color=C["btn"], text_color=C["text2"],
+                 height=36).pack(side="left")
+
+        self.add_name.focus_set()
+        self.add_name.bind("<Return>", lambda e: self.add_value.focus_set())
+        self.add_value.bind("<Return>", lambda e: (self.add_key(), win.destroy()))
 
     def add_key(self):
         name = self.add_name.get().strip().upper().replace(" ", "_")
@@ -3890,8 +4272,11 @@ class AppFrame(ctk.CTkFrame):
         if errors:
             msg += f"\n\nSync failed for {len(errors)} project(s):\n" + "\n".join(errors)
 
-        self.add_name.delete(0, "end")
-        self.add_value.delete(0, "end")
+        try:
+            self.add_name.delete(0, "end")
+            self.add_value.delete(0, "end")
+        except Exception:
+            pass
         self.render_all()
         messagebox.showinfo("Done", msg)
 
@@ -4855,7 +5240,7 @@ class AppFrame(ctk.CTkFrame):
     # ═══════════════════════════════════════════
 
     def show_template(self):
-        template_path = Path(__file__).parent / "KEY_IMPORT_TEMPLATE.md"
+        template_path = _asset_dir() / "KEY_IMPORT_TEMPLATE.md"
 
         win = ctk.CTkToplevel(self)
         win.title("Key Import Template")
@@ -5665,12 +6050,32 @@ class AppFrame(ctk.CTkFrame):
 
 class PushkeyApp:
     def __init__(self):
+        _check_crypto_deps()
+        # Load persisted theme before any widgets are created
+        _boot_cfg = {}
+        if CONFIG_FILE.exists():
+            try:
+                raw = CONFIG_FILE.read_bytes()
+                if raw.lstrip()[:1] == b"{":
+                    _boot_cfg = json.loads(raw)
+            except Exception:
+                pass
+        _saved_theme = _boot_cfg.get("theme", "light")
+        set_theme(_saved_theme)
+
         self.root = ctk.CTk()
         self.root.title("Pushkey")
-        self.root.geometry("780x640")
+        self.root.geometry("960x680")
         self.root.configure(fg_color=C["bg"])
+        try:
+            _ico = Path(__file__).with_name("pushkey.ico")
+            if _ico.exists():
+                self.root.iconbitmap(str(_ico))
+        except Exception:
+            pass
         self.root.resizable(True, True)
-        self.root.minsize(700, 500)
+        self.root.minsize(800, 560)
+        self.root.update()  # show window immediately before heavy init
 
         self.frame = None
         atexit.register(self._on_exit)
@@ -5697,7 +6102,11 @@ class PushkeyApp:
 
     def on_login(self, pw, vault):
         write_health_sidecar(vault)
-        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login)
+        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
+
+    def reload_app(self, pw, vault):
+        self.root.configure(fg_color=C["bg"])
+        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
 
 
 def _cli_main(args):
