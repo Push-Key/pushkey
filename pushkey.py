@@ -442,7 +442,7 @@ def load_vault(password):
             log_event("vault upgraded to AES-256-GCM + Argon2id")
         return vault
     except ValueError:
-        raise
+        return None
     except Exception as e:
         raise ValueError(f"corrupted:{e}")
 
@@ -1913,7 +1913,7 @@ def inject_env_file(project_path, vault, key_names=None, target_env="all"):
     if new_keys:
         if new_lines and new_lines[-1].strip() != "":
             new_lines.append("")
-        new_lines.append(f"# Added by Pushkey {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        new_lines.append("# Managed by Pushkey")
         for k in sorted(new_keys.keys()):
             new_lines.append(f"{k}={_format_env_value(new_keys[k])}")
 
@@ -1927,11 +1927,11 @@ def inject_env_file(project_path, vault, key_names=None, target_env="all"):
 # ═══════════════════════════════════════════════
 
 C_DARK = {
-    # Backgrounds — OLED-punchy, clearly tiered
+    # Backgrounds — OLED-punchy, clearly tiered (lifted bg3/bg4 for visible separation)
     "bg":           "#050A0F",
     "bg2":          "#0A1628",
-    "bg3":          "#0F2035",
-    "bg4":          "#152840",
+    "bg3":          "#1A2E47",
+    "bg4":          "#22385A",
     "surface":      "#0A1628",
     # Brand accent — CYAN (green demoted to health status only)
     "accent":       "#22D3EE",
@@ -1940,16 +1940,16 @@ C_DARK = {
     # Violet — security, MFA, enterprise tier
     "violet":       "#7C3AED",
     "violet_dim":   "#110D1E",
-    # Text — cyan-tinted hierarchy
+    # Text — cyan-tinted hierarchy (text3 lifted for WCAG AA on bg)
     "text":         "#F0F9FF",
-    "text2":        "#7FB3CC",
-    "text3":        "#3D6E8A",
-    # Borders — visible
-    "border":       "#112233",
-    "border2":      "#1A3550",
+    "text2":        "#9BC5DC",
+    "text3":        "#5A8AAA",
+    # Borders — visible (bumped from #112233/#1A3550 — barely-visible)
+    "border":       "#2A4560",
+    "border2":      "#3A5570",
     # Buttons
-    "btn":          "#0F2035",
-    "btn_hover":    "#152840",
+    "btn":          "#1A2E47",
+    "btn_hover":    "#22385A",
     # Semantic — green LOCKED to healthy status only
     "green":        "#00DC82",
     "green_bg":     "#041A0F",
@@ -1978,10 +1978,10 @@ C_LIGHT = {
     "violet":       "#8B5CF6",
     "violet_dim":   "#F5F3FF",
     "text":         "#0F172A",
-    "text2":        "#64748B",
-    "text3":        "#B0BAC8",
-    "border":       "#CBD5E1",
-    "border2":      "#B6C5D4",
+    "text2":        "#475569",
+    "text3":        "#94A3B8",
+    "border":       "#94A3B8",
+    "border2":      "#64748B",
     "btn":          "#F1F5F9",
     "btn_hover":    "#E8EEF5",
     "green":        "#10B981",
@@ -2027,7 +2027,32 @@ FONT_MONO_SM = (_MONO_FONT, 11)
 FONT_TITLE   = (_UI_FONT, 20, "bold")
 FONT_H2      = (_UI_FONT, 15, "bold")
 FONT_H3      = (_UI_FONT, 13, "bold")
-FONT_BTN     = (_UI_FONT, 11, "bold")
+FONT_BTN     = (_UI_FONT, 12, "bold")
+
+# Lucide-style icon helper (PIL-drawn, themed to active palette)
+try:
+    from pushkey_icons import load_icon as _load_icon_pil
+except Exception:
+    _load_icon_pil = None
+
+_CTK_ICON_CACHE: dict[tuple[str, int, str], object] = {}
+
+def icon(name: str, size: int = 18, color: str | None = None):
+    """Return CTkImage for given Lucide icon. Color defaults to text2 (themed).
+
+    Returns None if icon system unavailable — callers should pass to
+    CTkButton's image= kwarg which gracefully no-ops on None.
+    """
+    if _load_icon_pil is None:
+        return None
+    col = color or C["text2"]
+    cache_key = (name, size, col.upper())
+    if cache_key in _CTK_ICON_CACHE:
+        return _CTK_ICON_CACHE[cache_key]
+    pil = _load_icon_pil(name, size=size, color=col)
+    img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(size, size))
+    _CTK_ICON_CACHE[cache_key] = img
+    return img
 
 CAT_COLORS = {
     "AI":       "#A78BFA",
@@ -2060,8 +2085,8 @@ CAT_EMOJI = {
 # HELPER WIDGETS (CTK-native)
 # ═══════════════════════════════════════════════
 
-def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, height=28,
-             corner_radius=4, anchor=None):
+def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, height=32,
+             corner_radius=6, anchor=None):
     fg = fg_color or C["btn"]
     tc = text_color or C["text2"]
     kw = dict(
@@ -2079,6 +2104,43 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
     if anchor:
         kw["anchor"] = anchor
     return ctk.CTkButton(parent, **kw)
+
+
+# Resize debouncer — coalesces <Configure> floods during window drag/resize
+class _ResizeDebouncer:
+    """Throttles redraws of registered Canvas widgets to fire once per 100ms.
+
+    Why: tkinter fires <Configure> on every pixel of resize. Canvas-heavy
+    frames (gauges, timeline) lag visibly without throttling.
+    """
+    def __init__(self, root: tk.Misc, delay_ms: int = 100):
+        self.root = root
+        self.delay = delay_ms
+        self._after_id = None
+        self._callbacks = []
+        root.bind("<Configure>", self._on_configure, add="+")
+
+    def register(self, fn):
+        if fn not in self._callbacks:
+            self._callbacks.append(fn)
+
+    def unregister(self, fn):
+        if fn in self._callbacks:
+            self._callbacks.remove(fn)
+
+    def _on_configure(self, _event=None):
+        if self._after_id is not None:
+            try: self.root.after_cancel(self._after_id)
+            except Exception: pass
+        self._after_id = self.root.after(self.delay, self._fire)
+
+    def _fire(self):
+        self._after_id = None
+        for fn in list(self._callbacks):
+            try:
+                fn()
+            except Exception:
+                pass
 
 
 def _draw_arc_gauge(canvas: tk.Canvas, pct: float, color: str,
@@ -2473,18 +2535,22 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkFrame(self._sidebar, fg_color="transparent", height=16).pack()
 
         nav_items = [
-            ("dashboard", "Dashboard"),
-            ("keys",      "All Keys"),
-            ("projects",  "Projects"),
-            ("security",  "Security"),
-            ("cloud",     "Cloud"),
-            ("timeline",  "Timeline"),
+            ("dashboard", "Dashboard", "bar-chart"),
+            ("keys",      "All Keys",  "key"),
+            ("projects",  "Projects",  "folder"),
+            ("security",  "Security",  "shield"),
+            ("cloud",     "Cloud",     "refresh"),
+            ("timeline",  "Timeline",  "activity"),
         ]
 
-        for key, label in nav_items:
+        self._nav_icons = {}  # key -> icon name (for active-state recolor)
+        for key, label, ico_name in nav_items:
+            self._nav_icons[key] = ico_name
             btn = ctk.CTkButton(
                 self._sidebar,
-                text=label,
+                text="  " + label,  # padding between icon and label
+                image=icon(ico_name, size=18, color=C["text2"]),
+                compound="left",
                 font=FONT_SM,
                 anchor="w",
                 fg_color="transparent",
@@ -2565,10 +2631,13 @@ class AppFrame(ctk.CTkFrame):
     def _nav_switch(self, key: str):
         self._active_nav.set(key)
         for k, btn in self._nav_btns.items():
+            ico_name = self._nav_icons.get(k)
             if k == key:
-                btn.configure(fg_color=C["accent_dim"], text_color=C["accent"])
+                btn.configure(fg_color=C["accent_dim"], text_color=C["accent"],
+                              image=icon(ico_name, size=18, color=C["accent"]) if ico_name else None)
             else:
-                btn.configure(fg_color="transparent", text_color=C["text2"])
+                btn.configure(fg_color="transparent", text_color=C["text2"],
+                              image=icon(ico_name, size=18, color=C["text2"]) if ico_name else None)
         frame = getattr(self, self._NAV_FRAMES[key])
         frame.tkraise()
 
@@ -6708,6 +6777,10 @@ class PushkeyApp:
         self.root.resizable(True, True)
         self.root.minsize(800, 560)
         self.root.update()  # show window immediately before heavy init
+
+        # Debounce <Configure> floods during window resize (Canvas widgets register here)
+        self.resize_debouncer = _ResizeDebouncer(self.root, delay_ms=100)
+        self.root._resize_debouncer = self.resize_debouncer  # accessible from frames
 
         self.frame = None
         atexit.register(self._on_exit)
