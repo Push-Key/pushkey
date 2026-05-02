@@ -1967,10 +1967,11 @@ C_DARK = {
 }
 
 C_LIGHT = {
-    "bg":           "#FFFFFF",
-    "bg2":          "#F8FAFD",
-    "bg3":          "#FFFFFF",
-    "bg4":          "#FFFFFF",
+    # Backgrounds — clearly tiered (was all #FFFFFF — no separation)
+    "bg":           "#F8FAFC",
+    "bg2":          "#FFFFFF",
+    "bg3":          "#F1F5F9",
+    "bg4":          "#E2E8F0",
     "surface":      "#FFFFFF",
     "accent":       "#0891B2",
     "accent2":      "#0E7490",
@@ -1979,11 +1980,13 @@ C_LIGHT = {
     "violet_dim":   "#F5F3FF",
     "text":         "#0F172A",
     "text2":        "#475569",
-    "text3":        "#94A3B8",
+    "text3":        "#64748B",
+    # Borders — strong enough to outline buttons on white surfaces
     "border":       "#94A3B8",
-    "border2":      "#64748B",
-    "btn":          "#F1F5F9",
-    "btn_hover":    "#E8EEF5",
+    "border2":      "#475569",
+    # Buttons — darker than surface so edges read clearly
+    "btn":          "#E2E8F0",
+    "btn_hover":    "#CBD5E1",
     "green":        "#10B981",
     "green_bg":     "#F0FDF9",
     "amber":        "#F59E0B",
@@ -4299,37 +4302,53 @@ class AppFrame(ctk.CTkFrame):
                         str(rotations_30d), "THIS MONTH")
 
         # ── Row 2: Rotation Forecast Gantt ──
-        keys_with_schedule = [
+        all_scheduled = [
             (n, i) for n, i in real_keys
             if i.get("rotation_schedule") and isinstance(i["rotation_schedule"], (int, float))
         ]
+
+        # Always render the header so the section is discoverable
+        forecast_hdr = ctk.CTkFrame(pad, fg_color="transparent")
+        forecast_hdr.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(forecast_hdr, text="ROTATION FORECAST", font=FONT_XS,
+                     text_color=C["text3"]).pack(side="left")
+
+        window_days = int(self._forecast_window.get())
+        keys_with_schedule = [
+            (n, i) for n, i in all_scheduled
+            if days_until_rotation(i) is None or days_until_rotation(i) <= window_days
+        ]
+
+        win_menu = ctk.CTkOptionMenu(
+            forecast_hdr,
+            values=["30", "60", "90"],
+            variable=self._forecast_window,
+            command=lambda _: self.render_dashboard(),
+            width=72, height=24, font=FONT_XS,
+            fg_color=C["btn"], button_color=C["btn"],
+            button_hover_color=C["btn_hover"], text_color=C["text2"],
+        )
+        win_menu.pack(side="right")
+
+        gantt_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
+                                   border_width=1, border_color=C["border"])
+        gantt_frame.pack(fill="x", pady=(0, 16))
+
+        if not keys_with_schedule:
+            # Empty state — explains what this section is for
+            empty = ctk.CTkFrame(gantt_frame, fg_color="transparent")
+            empty.pack(pady=18, padx=16)
+            if not all_scheduled:
+                msg = "No keys have a rotation schedule set."
+                hint = "Open a key → set 'Rotate every N days' to see it here."
+            else:
+                msg = f"No rotations due in next {window_days} days."
+                hint = "Try a longer window, or all your keys are healthy."
+            ctk.CTkLabel(empty, text=msg, font=FONT_SM,
+                         text_color=C["text2"]).pack()
+            ctk.CTkLabel(empty, text=hint, font=FONT_XS,
+                         text_color=C["text3"]).pack(pady=(2, 0))
         if keys_with_schedule:
-            forecast_hdr = ctk.CTkFrame(pad, fg_color="transparent")
-            forecast_hdr.pack(fill="x", pady=(0, 4))
-            ctk.CTkLabel(forecast_hdr, text="ROTATION FORECAST", font=FONT_XS,
-                         text_color=C["text3"]).pack(side="left")
-
-            window_days = int(self._forecast_window.get())
-            # Filter to only keys due within the selected window
-            keys_with_schedule = [
-                (n, i) for n, i in keys_with_schedule
-                if days_until_rotation(i) is None or days_until_rotation(i) <= window_days
-            ]
-
-            win_menu = ctk.CTkOptionMenu(
-                forecast_hdr,
-                values=["30", "60", "90"],
-                variable=self._forecast_window,
-                command=lambda _: self.render_dashboard(),
-                width=72, height=24, font=FONT_XS,
-                fg_color=C["btn"], button_color=C["btn"],
-                button_hover_color=C["btn_hover"], text_color=C["text2"],
-            )
-            win_menu.pack(side="right")
-
-            gantt_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
-                                       border_width=1, border_color=C["border"])
-            gantt_frame.pack(fill="x", pady=(0, 16))
 
             for name, info in sorted(keys_with_schedule,
                                      key=lambda x: days_until_rotation(x[1]) or 0):
@@ -4355,7 +4374,7 @@ class AppFrame(ctk.CTkFrame):
                 bar_wrap.pack(side="left", fill="x", expand=True, padx=(8, 8))
                 bar_wrap.pack_propagate(False)
 
-                def _draw_bar(bw=bar_wrap, pct=fill_pct, col=bar_color):
+                def _draw_bar(bw=bar_wrap, pct=fill_pct, col=bar_color, _tries=[0]):
                     if not bw.winfo_exists():
                         return
                     bw.update_idletasks()
@@ -4364,6 +4383,9 @@ class AppFrame(ctk.CTkFrame):
                         bar = ctk.CTkFrame(bw, fg_color=col, height=8,
                                            corner_radius=4, width=int(pct * w))
                         bar.place(x=0, y=0, relheight=1)
+                    elif _tries[0] < 10:
+                        _tries[0] += 1
+                        bw.after(50, _draw_bar)
 
                 bar_wrap.after(50, _draw_bar)
 
