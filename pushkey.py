@@ -3980,6 +3980,91 @@ class AppFrame(ctk.CTkFrame):
                      fg_color=C["btn"], text_color=C["text2"], width=70,
                      ).pack(side="left")
 
+    def _render_forecast_tab(self):
+        keys_with_schedule = [
+            (n, i) for n, i in self.vault.items()
+            if not n.startswith("_")
+            and i.get("rotation_schedule")
+            and isinstance(i["rotation_schedule"], (int, float))
+        ]
+
+        if not keys_with_schedule:
+            ctk.CTkLabel(self._timeline_content,
+                         text="No keys have rotation schedules set.\nSet one in the key detail view.",
+                         font=FONT_XS, text_color=C["text3"],
+                         justify="center").pack(pady=60)
+            return
+
+        DAYS = 90
+        COL_W = 18
+        ROW_H = 28
+        NAME_W = 160
+        PAD = 16
+
+        now = datetime.now().date()
+        day_range = [now + timedelta(days=d) for d in range(DAYS)]
+
+        outer = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=PAD, pady=(12, 0))
+
+        # Month headers
+        month_bar = tk.Canvas(outer, bg=C["bg"], height=20, highlightthickness=0)
+        month_bar.pack(fill="x")
+
+        x = NAME_W + 4
+        prev_month = None
+        for i, day in enumerate(day_range):
+            if day.month != prev_month:
+                month_bar.create_text(x + 2, 10,
+                                      text=day.strftime("%b"),
+                                      font=(_UI_FONT, 9), fill=C["text3"],
+                                      anchor="w")
+                prev_month = day.month
+            x += COL_W
+
+        # Day columns + key rows
+        canvas_h = ROW_H * len(keys_with_schedule) + 4
+        canvas_w = NAME_W + COL_W * DAYS + 4
+
+        scroll_x = tk.Scrollbar(outer, orient="horizontal")
+        scroll_x.pack(side="bottom", fill="x")
+
+        cv = tk.Canvas(outer, bg=C["bg"], height=canvas_h,
+                       xscrollcommand=scroll_x.set, highlightthickness=0)
+        cv.pack(fill="both", expand=True)
+        cv.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+        scroll_x.config(command=cv.xview)
+
+        for row_idx, (name, info) in enumerate(sorted(keys_with_schedule,
+                                                       key=lambda x: x[0])):
+            y0 = row_idx * ROW_H
+            y1 = y0 + ROW_H
+            row_bg = C["bg"] if row_idx % 2 == 0 else C["bg2"]
+            cv.create_rectangle(0, y0, canvas_w, y1, fill=row_bg, outline="")
+
+            cv.create_text(4, (y0 + y1) // 2, text=name,
+                           font=(_MONO_FONT, 10), fill=C["text"], anchor="w")
+
+            due_days = days_until_rotation(info)
+
+            for col_idx, day in enumerate(day_range):
+                x0 = NAME_W + col_idx * COL_W
+                x1 = x0 + COL_W - 1
+
+                if day == now:
+                    cv.create_rectangle(x0, y0, x1, y1,
+                                        fill=C["accent_dim"], outline="")
+
+                if due_days is not None:
+                    days_from_now = (day - now).days
+                    if due_days <= 0 and days_from_now == 0:
+                        cv.create_rectangle(x0 + 1, y0 + 4, x1 - 1, y1 - 4,
+                                            fill=C["red"], outline="")
+                    elif days_from_now >= 0 and days_from_now == int(due_days):
+                        cell_color = C["amber"] if due_days <= 7 else C["green_bg"]
+                        cv.create_rectangle(x0 + 1, y0 + 4, x1 - 1, y1 - 4,
+                                            fill=cell_color, outline="")
+
     def render_all(self):
         self.render_dashboard()
         self.render_keys()
