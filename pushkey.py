@@ -3780,6 +3780,113 @@ class AppFrame(ctk.CTkFrame):
         else:
             self._render_forecast_tab()
 
+    def _render_lifecycle(self):
+        real_keys = [(n, v) for n, v in self.vault.items() if not n.startswith("_")]
+        if not real_keys:
+            ctk.CTkLabel(self._timeline_content, text="No keys yet.",
+                         font=FONT_H3, text_color=C["text3"]).pack(pady=40)
+            return
+
+        container = ctk.CTkScrollableFrame(self._timeline_content,
+                                            fg_color=C["bg"], corner_radius=0)
+        container.pack(fill="both", expand=True)
+
+        def _parse_dt(s):
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        now = datetime.now()
+        all_created = [_parse_dt(v.get("created")) for _, v in real_keys]
+        all_created = [d for d in all_created if d]
+        t_start = min(all_created) if all_created else now - timedelta(days=90)
+        t_end   = now + timedelta(days=30)
+        span = (t_end - t_start).total_seconds()
+        if span <= 0:
+            span = 1
+
+        NAME_W = 150
+        ROW_H  = 32
+        PAD    = 12
+
+        header_row = ctk.CTkFrame(container, fg_color=C["bg2"], height=24)
+        header_row.pack(fill="x", padx=PAD, pady=(8, 2))
+        ctk.CTkLabel(header_row, text="KEY", font=FONT_XS,
+                     text_color=C["text3"], width=NAME_W, anchor="w").pack(side="left", padx=4)
+        ctk.CTkLabel(header_row, text="CREATED ──────────── NOW ──── DUE", font=FONT_XS,
+                     text_color=C["text3"], anchor="w").pack(side="left", fill="x", expand=True, padx=4)
+
+        for idx, (name, info) in enumerate(sorted(real_keys, key=lambda x: x[0])):
+            row_bg = C["bg"] if idx % 2 == 0 else C["bg2"]
+            row = ctk.CTkFrame(container, fg_color=row_bg, height=ROW_H, corner_radius=0)
+            row.pack(fill="x", padx=PAD, pady=1)
+            row.pack_propagate(False)
+            row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+
+            lbl = ctk.CTkLabel(row, text=name, font=FONT_MONO_SM,
+                               text_color=C["text"], width=NAME_W, anchor="w", cursor="hand2")
+            lbl.pack(side="left", padx=4)
+            lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+
+            cv = tk.Canvas(row, bg=row_bg, highlightthickness=0, height=ROW_H)
+            cv.pack(side="left", fill="x", expand=True, padx=4)
+
+            def _draw_lane(canvas=cv, inf=info, rb=row_bg):
+                canvas.update_idletasks()
+                W = canvas.winfo_width()
+                if W < 20:
+                    return
+                H = ROW_H
+
+                created_dt = _parse_dt(inf.get("created"))
+                rotated_dt = _parse_dt(inf.get("rotated"))
+                status = health_status(inf)
+                dot_color = health_color(status)
+
+                def _t_to_x(dt):
+                    if dt is None:
+                        return None
+                    return int((dt - t_start).total_seconds() / span * (W - 10))
+
+                cx_created = _t_to_x(created_dt)
+                cx_rotated = _t_to_x(rotated_dt)
+                cx_now     = _t_to_x(now)
+                days_left  = days_until_rotation(inf)
+                cx_due     = _t_to_x(
+                    now + timedelta(days=days_left)
+                    if days_left is not None else None
+                )
+
+                y = H // 2
+
+                if cx_created is not None and cx_now is not None:
+                    canvas.create_line(cx_created, y, cx_now, y,
+                                       fill=C["border2"], width=2)
+
+                if cx_created is not None:
+                    canvas.create_oval(cx_created - 4, y - 4, cx_created + 4, y + 4,
+                                       outline=dot_color, fill=rb, width=2)
+
+                if cx_rotated is not None:
+                    canvas.create_oval(cx_rotated - 4, y - 4, cx_rotated + 4, y + 4,
+                                       fill=dot_color, outline="")
+
+                if cx_now is not None:
+                    canvas.create_line(cx_now, 4, cx_now, H - 4,
+                                       fill=C["accent"], width=1, dash=(3, 3))
+
+                if cx_due is not None and cx_now is not None and cx_due > cx_now:
+                    canvas.create_line(cx_due, 4, cx_due, H - 4,
+                                       fill=C["amber"], width=1)
+                elif cx_now is not None:
+                    canvas.create_line(cx_now, y, min(W - 4, cx_now + 20), y,
+                                       fill=C["red"], width=2, dash=(4, 2))
+
+            cv.after(60, _draw_lane)
+
     def render_all(self):
         self.render_dashboard()
         self.render_keys()
