@@ -2086,7 +2086,7 @@ CAT_EMOJI = {
 # ═══════════════════════════════════════════════
 
 def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, height=32,
-             corner_radius=6, anchor=None):
+             corner_radius=6, anchor=None, border=True):
     fg = fg_color or C["btn"]
     tc = text_color or C["text2"]
     kw = dict(
@@ -2099,6 +2099,10 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
         corner_radius=corner_radius,
         height=height,
     )
+    # Always-visible border — critical for light theme where buttons blend into bg
+    if border:
+        kw["border_width"] = 1
+        kw["border_color"] = C["border"]
     if width:
         kw["width"] = width
     if anchor:

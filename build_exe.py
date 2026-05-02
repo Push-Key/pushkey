@@ -16,6 +16,7 @@ def build():
         "--name", "Pushkey",
         "--collect-all", "cryptography",
         "--collect-all", "customtkinter",
+        "--hidden-import", "pushkey_icons",
         str(root / "pushkey.py"),
     ]
 
