@@ -25,6 +25,18 @@ def build():
         cmd.insert(4, str(icon_path))
         cmd.insert(4, "--icon")
 
+    # Bundle logo PNG so it's available inside the exe
+    logo_path = root / "pushkey_logo.png"
+    if logo_path.exists():
+        cmd.insert(4, f"{logo_path};.")
+        cmd.insert(4, "--add-data")
+
+    # Bundle providers.json
+    providers_path = root / "providers.json"
+    if providers_path.exists():
+        cmd.insert(4, f"{providers_path};.")
+        cmd.insert(4, "--add-data")
+
     print(f"Building: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=root)
     return result.returncode
