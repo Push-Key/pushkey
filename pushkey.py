@@ -2369,6 +2369,13 @@ class AppFrame(ctk.CTkFrame):
         self._bulk_select_vars = {}
         self._clipboard_jobs = []
         self._search_var = tk.StringVar()
+        self._timeline_subtab = tk.StringVar(value="lifecycle")
+        self._timeline_page = 0
+        self._timeline_filter = tk.StringVar(value="all")
+        self._forecast_window = tk.StringVar(value="30")
+        self._tab_rendered: set = set()
+        self._tab_dirty: set = set()
+        self._search_debounce_id = None
 
         # ── Top bar ──
         top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=52)
@@ -2461,6 +2468,7 @@ class AppFrame(ctk.CTkFrame):
             ("projects",  "Projects"),
             ("security",  "Security"),
             ("cloud",     "Cloud"),
+            ("timeline",  "Timeline"),
         ]
 
         for key, label in nav_items:
@@ -2499,9 +2507,10 @@ class AppFrame(ctk.CTkFrame):
         self.proj_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
         self.scan_frame  = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
         self.cloud_frame = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
+        self.timeline_frame = ctk.CTkFrame(content, fg_color=C["bg"], corner_radius=0)
 
         for f in (self.dash_frame, self.keys_frame, self.proj_frame,
-                  self.scan_frame, self.cloud_frame):
+                  self.scan_frame, self.cloud_frame, self.timeline_frame):
             f.grid(row=0, column=0, sticky="nsew")
 
         # Show dashboard by default
@@ -2531,6 +2540,7 @@ class AppFrame(ctk.CTkFrame):
         "projects":  "proj_frame",
         "security":  "scan_frame",
         "cloud":     "cloud_frame",
+        "timeline":  "timeline_frame",
     }
 
     def _nav_switch(self, key: str):
@@ -3720,12 +3730,63 @@ class AppFrame(ctk.CTkFrame):
         self.render_all()
         messagebox.showinfo("Imported", f"Merged {len(new_keys)} new + {len(updated)} updated keys.")
 
+    # ═══════════════════════════════════════════
+    # TIMELINE TAB
+    # ═══════════════════════════════════════════
+
+    def render_timeline(self):
+        for w in self.timeline_frame.winfo_children():
+            w.destroy()
+
+        # Header
+        header = ctk.CTkFrame(self.timeline_frame, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 0))
+        ctk.CTkLabel(header, text="Timeline", font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
+
+        # Sub-tab bar
+        sub_bar = ctk.CTkFrame(self.timeline_frame, fg_color="transparent")
+        sub_bar.pack(fill="x", padx=20, pady=(12, 0))
+
+        subtabs = [("lifecycle", "Lifecycle"), ("activity", "Activity"), ("forecast", "Forecast")]
+        for key, label in subtabs:
+            is_active = self._timeline_subtab.get() == key
+            make_btn(
+                sub_bar, label,
+                lambda k=key: (self._timeline_subtab.set(k), self._switch_timeline_subtab()),
+                fg_color=C["accent_dim"] if is_active else "transparent",
+                text_color=C["accent"] if is_active else C["text2"],
+                width=90, height=28, corner_radius=6,
+            ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkFrame(self.timeline_frame, fg_color=C["border"], height=1).pack(
+            fill="x", padx=20, pady=(8, 0))
+
+        # Sub-tab content container
+        self._timeline_content = ctk.CTkFrame(self.timeline_frame,
+                                               fg_color="transparent", corner_radius=0)
+        self._timeline_content.pack(fill="both", expand=True)
+
+        self._switch_timeline_subtab()
+
+    def _switch_timeline_subtab(self):
+        for w in self._timeline_content.winfo_children():
+            w.destroy()
+        sub = self._timeline_subtab.get()
+        if sub == "lifecycle":
+            self._render_lifecycle()
+        elif sub == "activity":
+            self._render_activity_tab()
+        else:
+            self._render_forecast_tab()
+
     def render_all(self):
         self.render_dashboard()
         self.render_keys()
         self.render_projects()
         self.render_scan()
         self.render_cloud()
+        self.render_timeline()
 
     # ═══════════════════════════════════════════
     # DASHBOARD TAB
