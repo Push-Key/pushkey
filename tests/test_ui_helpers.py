@@ -19,3 +19,7 @@ def test_log_line_age_days_parses_old():
 def test_log_line_age_days_bad_format_returns_inf():
     assert pushkey._log_line_age_days("no timestamp here") == float("inf")
     assert pushkey._log_line_age_days("") == float("inf")
+
+
+def test_log_line_age_days_invalid_date_returns_inf():
+    assert pushkey._log_line_age_days("[2024-99-01 00:00:00] bad date") == float("inf")
