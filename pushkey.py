@@ -2520,7 +2520,6 @@ class AppFrame(ctk.CTkFrame):
         self._git_scan_results = []
         self._scan_ts = None
 
-        self.render_all()
         self.after(600, self._check_rotation_schedule)
         # Start local health HTTP server for browser extension
         _start_health_server()
@@ -2543,20 +2542,40 @@ class AppFrame(ctk.CTkFrame):
         "timeline":  "timeline_frame",
     }
 
+    # Maps nav key → render method name (security tab uses render_scan)
+    _NAV_RENDER = {
+        "dashboard": "render_dashboard",
+        "keys":      "render_keys",
+        "projects":  "render_projects",
+        "security":  "render_scan",
+        "cloud":     "render_cloud",
+        "timeline":  "render_timeline",
+    }
+
     def _nav_switch(self, key: str):
         self._active_nav.set(key)
-        # Update sidebar button styles
         for k, btn in self._nav_btns.items():
             if k == key:
-                btn.configure(
-                    fg_color=C["accent_dim"],
-                    text_color=C["accent"],
-                )
+                btn.configure(fg_color=C["accent_dim"], text_color=C["accent"])
             else:
                 btn.configure(fg_color="transparent", text_color=C["text2"])
-        # Raise the matching content frame
         frame = getattr(self, self._NAV_FRAMES[key])
         frame.tkraise()
+
+        if key not in self._tab_rendered:
+            getattr(self, self._NAV_RENDER[key])()
+            self._tab_rendered.add(key)
+        elif key in self._tab_dirty:
+            getattr(self, self._NAV_RENDER[key])()
+            self._tab_dirty.discard(key)
+
+    def _invalidate_tabs(self, *tabs: str):
+        active = self._active_nav.get()
+        for t in tabs:
+            if t == active:
+                getattr(self, self._NAV_RENDER[t])()
+            else:
+                self._tab_dirty.add(t)
 
     def _toggle_theme(self):
         new_mode = "light" if _CURRENT_THEME == "dark" else "dark"
@@ -2710,7 +2729,7 @@ class AppFrame(ctk.CTkFrame):
                 global _LICENSE_CACHE
                 _LICENSE_CACHE = None   # force reload
                 msg_lbl.configure(text=msg, text_color=C["green"])
-                self.render_all()
+                self._invalidate_tabs("dashboard")
                 self.after(1500, win.destroy)
             else:
                 msg_lbl.configure(text=f"❌ {msg}", text_color=C["red"])
@@ -2729,7 +2748,7 @@ class AppFrame(ctk.CTkFrame):
                 msg_lbl.configure(text=msg, text_color=color)
                 global _LICENSE_CACHE
                 _LICENSE_CACHE = None
-                self.render_all()
+                self._invalidate_tabs("dashboard")
 
             make_btn(btn_row, "🗑 Deactivate Device", do_deactivate,
                      fg_color=C["bg3"], text_color=C["text3"], width=160, height=34).pack(side="left", padx=4)
@@ -2820,7 +2839,7 @@ class AppFrame(ctk.CTkFrame):
                 return
             win.destroy()
             self._apply_rotation(name, val)
-            self.render_all()
+            self._invalidate_tabs("dashboard", "keys", "timeline")
             if remaining:
                 self.after(300, lambda: self._prompt_rotation_queue(remaining))
 
@@ -2902,7 +2921,7 @@ class AppFrame(ctk.CTkFrame):
             win.destroy()
             # Show backup codes
             self._show_backup_codes(backup_codes)
-            self.render_all()
+            self._invalidate_tabs("security")
             log_event("MFA enabled")
 
         code_entry.bind("<Return>", lambda e: activate())
@@ -2943,7 +2962,7 @@ class AppFrame(ctk.CTkFrame):
                                     "⚠️  Disable two-factor authentication?\n\nThis will remove the extra security layer."):
             return
         MFA_FILE.unlink(missing_ok=True)
-        self.render_all()
+        self._invalidate_tabs("security")
         log_event("MFA disabled")
         messagebox.showinfo("MFA Disabled", "Two-factor authentication has been disabled.")
 
@@ -3006,7 +3025,7 @@ class AppFrame(ctk.CTkFrame):
                     fido2_save(cred)
                     status_lbl.configure(text="✓ YubiKey enrolled!", text_color=C["green"])
                     log_event("FIDO2 credential registered")
-                    win.after(1200, lambda: (win.destroy(), self.render_all()))
+                    win.after(1200, lambda: (win.destroy(), self._invalidate_tabs("security")))
                 except Exception as e:
                     status_lbl.configure(text=f"Error: {e}", text_color=C["red"])
 
@@ -3680,7 +3699,7 @@ class AppFrame(ctk.CTkFrame):
                     key_data["_rbac"] = permissions[k]
             self.vault.update(team_vault)
             self.save()
-            self.render_all()
+            self._invalidate_tabs("dashboard", "keys", "timeline")
             win.destroy()
             log_event(f"team vault imported from {path}: {len(new_keys)} new, {len(updated_keys)} updated")
             messagebox.showinfo("✅ Imported",
@@ -3727,7 +3746,7 @@ class AppFrame(ctk.CTkFrame):
             if proj not in self.config.get("projects", {}):
                 self.config.setdefault("projects", {})[proj] = info
         self.save()
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Imported", f"Merged {len(new_keys)} new + {len(updated)} updated keys.")
 
     # ═══════════════════════════════════════════
@@ -4262,7 +4281,7 @@ class AppFrame(ctk.CTkFrame):
                 ctk.CTkLabel(row, text=days_lbl, font=FONT_XS,
                              text_color=bar_color, width=70).pack(side="left")
                 make_btn(row, "Rotate",
-                         lambda n=name: (self.rotate_key(n), self.render_all()),
+                         lambda n=name: (self.rotate_key(n), self._invalidate_tabs("dashboard", "keys", "timeline")),
                          fg_color=C["red_bg"] if overdue else C["btn"],
                          text_color=C["red"] if overdue else C["text2"],
                          width=60, height=24).pack(side="right")
@@ -4296,7 +4315,7 @@ class AppFrame(ctk.CTkFrame):
                 prov_url = PROVIDERS.get(prov, {}).get("url")
                 btn_col = ctk.CTkFrame(row, fg_color="transparent")
                 btn_col.pack(side="right", padx=8, pady=8)
-                make_btn(btn_col, "Rotate Now", lambda n=name: (self.rotate_key(n), self.render_all()),
+                make_btn(btn_col, "Rotate Now", lambda n=name: (self.rotate_key(n), self._invalidate_tabs("dashboard", "keys", "timeline")),
                          fg_color=C["amber_bg"], text_color=C["amber"], width=90).pack()
                 if prov_url:
                     make_btn(btn_col, f"Open {prov or 'Dashboard'}",
@@ -4742,7 +4761,7 @@ class AppFrame(ctk.CTkFrame):
             self.revealed.discard(name)
             log_event(f"bulk delete: removed {name}")
         self.save()
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
 
     def _show_add_key_modal(self):
         win = ctk.CTkToplevel(self)
@@ -4867,7 +4886,7 @@ class AppFrame(ctk.CTkFrame):
             self.add_value.delete(0, "end")
         except Exception:
             pass
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Done", msg)
 
     def add_group_manual(self, prefill_group=None):
@@ -5059,7 +5078,7 @@ class AppFrame(ctk.CTkFrame):
             self._refresh_all_projects()
             self.save()
             win.destroy()
-            self.render_all()
+            self._invalidate_tabs("dashboard", "keys", "timeline")
             messagebox.showinfo("Saved", f"✓ Added {len(added)} key(s) to group '{group}':\n" + "\n".join(added))
 
         make_btn(btn_bar, "✓ Save Group", save_group, fg_color=C["green_bg"], text_color=C["green"]).pack(side="right")
@@ -5146,7 +5165,7 @@ class AppFrame(ctk.CTkFrame):
 
         self.save()
         self._refresh_all_projects()
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Scan Complete",
             f"✓ Imported {len(added)} key(s) from {len(files)} file(s)\n\n"
             f"Folder: {IMPORT_DIR}")
@@ -5238,7 +5257,7 @@ class AppFrame(ctk.CTkFrame):
         if injected:
             msg += f" and synced to {injected} project(s)"
 
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Bulk Upload Complete", msg)
 
     def _show_bulk_preview_dialog(self, parsed_entries, errors):
@@ -5383,7 +5402,7 @@ class AppFrame(ctk.CTkFrame):
             del self.vault[name]
             self.revealed.discard(name)
             self.save()
-            self.render_all()
+            self._invalidate_tabs("dashboard", "keys", "timeline")
 
     def _apply_rotation(self, name, new_value):
         info = self.vault[name]
@@ -5398,7 +5417,7 @@ class AppFrame(ctk.CTkFrame):
         info["rotation_count"] = info.get("rotation_count", 0) + 1
         self.save()
         injected, errors = self._auto_inject_key(name)
-        self.render_all()
+        self._invalidate_tabs("dashboard", "keys", "timeline")
         msg = f"{name} rotated"
         if injected:
             msg += f" and synced to {injected} project(s)"
