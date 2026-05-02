@@ -223,6 +223,17 @@ def _log_decrypt_all() -> list[str]:
     return lines
 
 
+def _log_line_age_days(line: str) -> float:
+    m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+    if not m:
+        return float("inf")
+    try:
+        dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - dt).total_seconds() / 86400
+    except ValueError:
+        return float("inf")
+
+
 def _migrate_plaintext_log() -> None:
     """Convert legacy plaintext log to encrypted binary format."""
     if not LOG_FILE.exists():
