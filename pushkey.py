@@ -3957,6 +3957,64 @@ class AppFrame(ctk.CTkFrame):
                              lambda u=prov_url: webbrowser.open(u),
                              fg_color="transparent", text_color=C["accent"], width=120).pack(pady=(4, 0))
 
+        # ── Row 3: Recent Activity Feed ──
+        all_log = list(reversed(_log_decrypt_all()))  # newest first
+        if all_log:
+            feed_hdr = ctk.CTkFrame(pad, fg_color="transparent")
+            feed_hdr.pack(fill="x", pady=(0, 4))
+            ctk.CTkLabel(feed_hdr, text="RECENT ACTIVITY", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left")
+            view_all = make_btn(feed_hdr, "View all →",
+                                lambda: (self._timeline_subtab.set("activity"),
+                                         self._nav_switch("timeline")),
+                                fg_color="transparent", text_color=C["accent"],
+                                width=80, height=22)
+            view_all.pack(side="right")
+
+            feed_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
+                                      border_width=1, border_color=C["border"])
+            feed_frame.pack(fill="x", pady=(0, 16))
+
+            _event_colors = {
+                "rotated":  C["green"],
+                "added":    C["accent"],
+                "imported": C["accent"],
+                "deleted":  C["amber"],
+                "overdue":  C["red"],
+            }
+
+            for line in all_log[:8]:
+                dot_color = C["text3"]
+                for kw, col in _event_colors.items():
+                    if kw in line.lower():
+                        dot_color = col
+                        break
+
+                entry = ctk.CTkFrame(feed_frame, fg_color="transparent")
+                entry.pack(fill="x", padx=12, pady=2)
+
+                ctk.CTkLabel(entry, text="●", font=(_MONO_FONT, 9),
+                             text_color=dot_color, width=16).pack(side="left")
+
+                # Strip the timestamp prefix for display, show age
+                display = line
+                m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.*)", line)
+                if m:
+                    age = _log_line_age_days(line)
+                    if age < 1/24:
+                        age_str = f"{int(age * 1440)}m ago"
+                    elif age < 1:
+                        age_str = f"{int(age * 24)}h ago"
+                    else:
+                        age_str = f"{int(age)}d ago"
+                    display = m.group(2)
+                    ctk.CTkLabel(entry, text=age_str, font=FONT_XS,
+                                 text_color=C["text3"], width=55,
+                                 anchor="w").pack(side="left", padx=(2, 6))
+
+                ctk.CTkLabel(entry, text=display, font=FONT_XS,
+                             text_color=C["text2"], anchor="w").pack(side="left", fill="x", expand=True)
+
         # ── Action needed callout cards ──
         if critical + warning > 0:
             ctk.CTkLabel(pad, text="ACTION NEEDED", font=FONT_XS,
