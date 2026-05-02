@@ -2608,6 +2608,28 @@ class AppFrame(ctk.CTkFrame):
         _start_health_server()
         # Start cloud auto-sync background thread
         self._start_cloud_sync()
+        # Background pre-render — eliminates first-visit lag on every tab.
+        # Stagger by 250ms each so the active tab finishes painting first.
+        self.after(800, self._idle_prerender_tabs)
+
+    def _idle_prerender_tabs(self):
+        """Render every non-active tab during idle time so future switches feel instant."""
+        active = self._active_nav.get() if hasattr(self, "_active_nav") else "dashboard"
+        order = ["keys", "dashboard", "projects", "timeline", "security", "cloud"]
+        delay = 0
+        for key in order:
+            if key == active or key in self._tab_rendered:
+                continue
+            def _render(k=key):
+                if not self.winfo_exists() or k in self._tab_rendered:
+                    return
+                try:
+                    getattr(self, self._NAV_RENDER[k])()
+                    self._tab_rendered.add(k)
+                except Exception:
+                    pass
+            self.after(delay, _render)
+            delay += 250
 
     def save(self):
         save_vault(self.vault, self.password)
@@ -2669,10 +2691,43 @@ class AppFrame(ctk.CTkFrame):
         self.config["theme"] = new_mode
         save_config(self.config)
         if self.app is not None:
-            pw, vault = self.password, self.vault
-            self.master.after(0, lambda: self.app.reload_app(pw, vault))
+            # In-place recolor — drastically faster than a full AppFrame rebuild.
+            # Updates root + sidebar chrome, then re-renders only the active tab.
+            self.master.after(0, self._apply_theme_inplace)
         else:
             self._theme_btn.configure(text="☀" if new_mode == "dark" else "☾")
+
+    def _apply_theme_inplace(self):
+        """Re-skin chrome (root, sidebar, content frames) without destroying AppFrame."""
+        try:
+            self.master.configure(fg_color=C["bg"])
+            self.configure(fg_color=C["bg"])
+            if hasattr(self, "_sidebar"):
+                self._sidebar.configure(fg_color=C["bg2"])
+            for f in (getattr(self, n, None) for n in (
+                "dash_frame", "keys_frame", "proj_frame",
+                "scan_frame", "cloud_frame", "timeline_frame",
+            )):
+                if f is not None:
+                    f.configure(fg_color=C["bg"])
+            # Update sidebar count label
+            if hasattr(self, "_sidebar_count_lbl"):
+                self._sidebar_count_lbl.configure(text_color=C["text3"])
+        except Exception:
+            pass
+        # Force nav buttons to re-skin via _nav_switch (recolors icon + bg)
+        active = self._active_nav.get() if hasattr(self, "_active_nav") else "dashboard"
+        # Mark every tab dirty so next visit re-renders against new palette
+        if hasattr(self, "_tab_dirty"):
+            self._tab_dirty.update(self._NAV_RENDER.keys())
+        # Toggle theme button glyph
+        if hasattr(self, "_theme_btn"):
+            try:
+                self._theme_btn.configure(text="☀" if _CURRENT_THEME == "dark" else "☾")
+            except Exception:
+                pass
+        # Re-run nav switch to recolor sidebar buttons + repaint active tab
+        self._nav_switch(active)
 
     def _show_settings(self):
         win = ctk.CTkToplevel(self)
@@ -3886,6 +3941,12 @@ class AppFrame(ctk.CTkFrame):
             self._render_forecast_tab()
 
     def _render_lifecycle(self):
+        """Card-based lifecycle view — one card per key, scannable at a glance.
+
+        Each card shows: name + provider badge + status pill,
+        three milestone columns (Created / Rotated / Due) with relative dates,
+        and a progress bar showing how far through the current rotation cycle.
+        """
         real_keys = [(n, v) for n, v in self.vault.items() if not n.startswith("_")]
         if not real_keys:
             ctk.CTkLabel(self._timeline_content, text="No keys yet.",
@@ -3904,95 +3965,126 @@ class AppFrame(ctk.CTkFrame):
             except Exception:
                 return None
 
-        now = datetime.now()
-        all_created = [_parse_dt(v.get("created")) for _, v in real_keys]
-        all_created = [d for d in all_created if d]
-        t_start = min(all_created) if all_created else now - timedelta(days=90)
-        t_end   = now + timedelta(days=30)
-        span = (t_end - t_start).total_seconds()
-        if span <= 0:
-            span = 1
+        def _ago(dt):
+            if dt is None:
+                return None
+            d = (datetime.now() - dt).days
+            if d == 0:
+                return "today"
+            if d == 1:
+                return "yesterday"
+            if d < 30:
+                return f"{d}d ago"
+            if d < 365:
+                return f"{d // 30}mo ago"
+            return f"{d // 365}y ago"
 
-        NAME_W = 150
-        ROW_H  = 32
-        PAD    = 12
+        # Sort: critical first, then warning, then by oldest
+        def _rank(item):
+            _, v = item
+            order = {"critical": 0, "warning": 1, "healthy": 2}.get(health_status(v), 3)
+            return (order, -days_since(v.get("rotated") or v.get("created")))
 
-        header_row = ctk.CTkFrame(container, fg_color=C["bg2"], height=24)
-        header_row.pack(fill="x", padx=PAD, pady=(8, 2))
-        ctk.CTkLabel(header_row, text="KEY", font=FONT_XS,
-                     text_color=C["text3"], width=NAME_W, anchor="w").pack(side="left", padx=4)
-        ctk.CTkLabel(header_row, text="CREATED ──────────── NOW ──── DUE", font=FONT_XS,
-                     text_color=C["text3"], anchor="w").pack(side="left", fill="x", expand=True, padx=4)
+        for name, info in sorted(real_keys, key=_rank):
+            status = health_status(info)
+            status_color = health_color(status)
+            status_label = {"critical": "CRITICAL", "warning": "WARNING",
+                            "healthy": "HEALTHY"}.get(status, status.upper())
 
-        for idx, (name, info) in enumerate(sorted(real_keys, key=lambda x: x[0])):
-            row_bg = C["bg"] if idx % 2 == 0 else C["bg2"]
-            row = ctk.CTkFrame(container, fg_color=row_bg, height=ROW_H, corner_radius=0)
-            row.pack(fill="x", padx=PAD, pady=1)
-            row.pack_propagate(False)
-            row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+            created_dt = _parse_dt(info.get("created"))
+            rotated_dt = _parse_dt(info.get("rotated"))
+            schedule = info.get("rotation_schedule")
+            days_left = days_until_rotation(info)
+            provider = info.get("provider") or "—"
 
-            lbl = ctk.CTkLabel(row, text=name, font=FONT_MONO_SM,
-                               text_color=C["text"], width=NAME_W, anchor="w", cursor="hand2")
-            lbl.pack(side="left", padx=4)
-            lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+            # Card with colored left accent reflecting status
+            outer = ctk.CTkFrame(container, fg_color=status_color, corner_radius=8)
+            outer.pack(fill="x", padx=14, pady=6)
+            card = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7,
+                                cursor="hand2")
+            card.pack(fill="both", expand=True, padx=(4, 0))
+            card.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            cv = tk.Canvas(row, bg=row_bg, highlightthickness=0, height=ROW_H)
-            cv.pack(side="left", fill="x", expand=True, padx=4)
+            # Header row: name + provider + status pill
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=14, pady=(10, 4))
+            name_lbl = ctk.CTkLabel(top, text=name, font=(_MONO_FONT, 13, "bold"),
+                                    text_color=C["text"], anchor="w", cursor="hand2")
+            name_lbl.pack(side="left")
+            name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            def _draw_lane(canvas=cv, inf=info, rb=row_bg):
-                if not canvas.winfo_exists():
-                    return
-                canvas.update_idletasks()
-                W = canvas.winfo_width()
-                if W < 20:
-                    return
-                H = ROW_H
+            ctk.CTkLabel(top, text=f"  •  {provider}", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left")
 
-                created_dt = _parse_dt(inf.get("created"))
-                rotated_dt = _parse_dt(inf.get("rotated"))
-                status = health_status(inf)
-                dot_color = health_color(status)
+            pill = ctk.CTkFrame(top, fg_color=status_color, corner_radius=10)
+            pill.pack(side="right")
+            ctk.CTkLabel(pill, text=status_label,
+                         font=(_UI_FONT, 9, "bold"),
+                         text_color="#FFFFFF").pack(padx=8, pady=2)
 
-                def _t_to_x(dt):
-                    if dt is None:
-                        return None
-                    return int((dt - t_start).total_seconds() / span * (W - 10))
+            # Milestone row: 3 columns with icon + label + date
+            mile = ctk.CTkFrame(card, fg_color="transparent")
+            mile.pack(fill="x", padx=14, pady=(2, 6))
 
-                cx_created = _t_to_x(created_dt)
-                cx_rotated = _t_to_x(rotated_dt)
-                cx_now     = _t_to_x(now)
-                days_left  = days_until_rotation(inf)
-                cx_due     = _t_to_x(
-                    now + timedelta(days=days_left)
-                    if days_left is not None else None
-                )
+            def _milestone(parent, ico_name, label, value, value_color):
+                col = ctk.CTkFrame(parent, fg_color="transparent")
+                col.pack(side="left", fill="x", expand=True, padx=(0, 8))
+                hdr = ctk.CTkFrame(col, fg_color="transparent")
+                hdr.pack(anchor="w")
+                if ico_name and "icon" in globals():
+                    ico_lbl = ctk.CTkLabel(hdr, text="", image=icon(ico_name, 12, C["text3"]),
+                                           width=14)
+                    ico_lbl.pack(side="left")
+                ctk.CTkLabel(hdr, text=label, font=(_UI_FONT, 9, "bold"),
+                             text_color=C["text3"]).pack(side="left", padx=(2, 0))
+                ctk.CTkLabel(col, text=value, font=FONT_SM,
+                             text_color=value_color, anchor="w").pack(anchor="w")
 
-                y = H // 2
+            _milestone(mile, "plus",    "CREATED",
+                       _ago(created_dt) or "unknown", C["text2"])
+            _milestone(mile, "refresh", "LAST ROTATED",
+                       _ago(rotated_dt) or "never", C["text2"] if rotated_dt else C["text3"])
+            if days_left is not None:
+                if days_left < 0:
+                    due_txt = f"OVERDUE by {abs(int(days_left))}d"
+                    due_col = C["red"]
+                elif days_left == 0:
+                    due_txt = "due today"
+                    due_col = C["amber"]
+                elif days_left <= 7:
+                    due_txt = f"in {int(days_left)}d"
+                    due_col = C["amber"]
+                else:
+                    due_txt = f"in {int(days_left)}d"
+                    due_col = C["text2"]
+            else:
+                due_txt = "not scheduled"
+                due_col = C["text3"]
+            _milestone(mile, "clock",   "NEXT ROTATION", due_txt, due_col)
 
-                if cx_created is not None and cx_now is not None:
-                    canvas.create_line(cx_created, y, cx_now, y,
-                                       fill=C["border2"], width=2)
+            # Progress bar showing where we are in the rotation cycle
+            if schedule and isinstance(schedule, (int, float)) and days_left is not None:
+                bar_wrap = ctk.CTkFrame(card, fg_color=C["bg3"], height=6,
+                                        corner_radius=3)
+                bar_wrap.pack(fill="x", padx=14, pady=(0, 12))
+                bar_wrap.pack_propagate(False)
+                used = max(0, schedule - days_left)
+                pct = max(0.02, min(1.0, used / schedule))
 
-                if cx_created is not None:
-                    canvas.create_oval(cx_created - 4, y - 4, cx_created + 4, y + 4,
-                                       outline=dot_color, fill=rb, width=2)
-
-                if cx_rotated is not None:
-                    canvas.create_oval(cx_rotated - 4, y - 4, cx_rotated + 4, y + 4,
-                                       fill=dot_color, outline="")
-
-                if cx_now is not None:
-                    canvas.create_line(cx_now, 4, cx_now, H - 4,
-                                       fill=C["accent"], width=1, dash=(3, 3))
-
-                if cx_due is not None and cx_now is not None and cx_due > cx_now:
-                    canvas.create_line(cx_due, 4, cx_due, H - 4,
-                                       fill=C["amber"], width=1)
-                elif cx_now is not None:
-                    canvas.create_line(cx_now, y, min(W - 4, cx_now + 20), y,
-                                       fill=C["red"], width=2, dash=(4, 2))
-
-            cv.after(60, _draw_lane)
+                def _fill(bw=bar_wrap, p=pct, c=status_color, _t=[0]):
+                    if not bw.winfo_exists():
+                        return
+                    bw.update_idletasks()
+                    w = bw.winfo_width()
+                    if w > 10:
+                        ctk.CTkFrame(bw, fg_color=c, height=6,
+                                     corner_radius=3, width=int(p * w)).place(x=0, y=0, relheight=1)
+                    elif _t[0] < 10:
+                        _t[0] += 1
+                        bw.after(50, _fill)
+                bar_wrap.after(50, _fill)
+            else:
+                ctk.CTkFrame(card, fg_color="transparent", height=8).pack()
 
     def _render_activity_tab(self):
         all_log = list(reversed(_log_decrypt_all()))  # newest first
@@ -4184,6 +4276,110 @@ class AppFrame(ctk.CTkFrame):
     # DASHBOARD TAB
     # ═══════════════════════════════════════════
 
+    def _draw_forecast_calendar(self, parent, all_scheduled, window_days):
+        """GitHub-contributions-style heatmap of upcoming rotations.
+
+        Each cell = one day; color intensity = number of rotations due that day.
+        Hover-friendly weekday header on the left.
+        """
+        # Bucket rotations by day-from-today
+        from collections import Counter
+        buckets: Counter = Counter()
+        for name, info in all_scheduled:
+            d = days_until_rotation(info)
+            if d is None:
+                continue
+            d = int(d)
+            if 0 <= d < window_days:
+                buckets[d] += 1
+            elif d < 0:
+                buckets[0] += 1  # overdue lumped onto today
+
+        max_count = max(buckets.values()) if buckets else 0
+
+        outer = ctk.CTkFrame(parent, fg_color=C["surface"], corner_radius=6,
+                             border_width=1, border_color=C["border"])
+        outer.pack(fill="x", pady=(0, 8))
+
+        head = ctk.CTkFrame(outer, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(head, text=f"NEXT {window_days} DAYS", font=FONT_XS,
+                     text_color=C["text3"]).pack(side="left")
+        legend = ctk.CTkLabel(
+            head,
+            text=f"{sum(buckets.values())} rotation{'s' if sum(buckets.values()) != 1 else ''} due  •  peak day: {max_count}",
+            font=FONT_XS, text_color=C["text2"])
+        legend.pack(side="right")
+
+        # 7 rows (weekdays) × N columns (weeks). Like GitHub graph but for future.
+        weeks = (window_days + 6) // 7
+        CELL = 14
+        GAP = 3
+        LABEL_W = 24
+        cv_w = LABEL_W + weeks * (CELL + GAP) + 4
+        cv_h = 7 * (CELL + GAP) + 18  # +18 for column month labels
+
+        cv = tk.Canvas(outer, width=cv_w, height=cv_h,
+                       bg=C["surface"], highlightthickness=0)
+        cv.pack(padx=12, pady=(2, 10), anchor="w")
+
+        weekday_letters = ["M", "T", "W", "T", "F", "S", "S"]
+        for i, ch in enumerate(weekday_letters):
+            cv.create_text(LABEL_W - 4, 18 + i * (CELL + GAP) + CELL // 2,
+                           text=ch, font=(_UI_FONT, 8), fill=C["text3"], anchor="e")
+
+        now = datetime.now().date()
+        # Align so today sits in column 0 at its weekday row
+        today_weekday = now.weekday()  # 0=Mon, 6=Sun
+
+        # Track which months we've labeled (only label first column of each month)
+        labeled_months: set = set()
+
+        for d in range(window_days):
+            day = now + timedelta(days=d)
+            week = (d + today_weekday) // 7
+            row = (d + today_weekday) % 7
+            x0 = LABEL_W + week * (CELL + GAP)
+            y0 = 18 + row * (CELL + GAP)
+            x1 = x0 + CELL
+            y1 = y0 + CELL
+
+            count = buckets.get(d, 0)
+            if count == 0:
+                fill = C["bg3"]
+                outline = C["border"]
+            else:
+                # Color ramp by intensity
+                ratio = count / max_count if max_count else 0
+                if ratio >= 0.66:
+                    fill = C["red"]
+                elif ratio >= 0.33:
+                    fill = C["amber"]
+                else:
+                    fill = C["accent"]
+                outline = fill
+
+            # Highlight today's cell with a thicker outline
+            if d == 0:
+                cv.create_rectangle(x0 - 1, y0 - 1, x1 + 1, y1 + 1,
+                                    outline=C["accent"], width=2)
+            cv.create_rectangle(x0, y0, x1, y1, fill=fill, outline=outline)
+
+            # Month label on the first cell of any new month
+            if day.day <= 7 and day.month not in labeled_months:
+                cv.create_text(x0, 6, text=day.strftime("%b"),
+                               font=(_UI_FONT, 8, "bold"),
+                               fill=C["text3"], anchor="w")
+                labeled_months.add(day.month)
+
+        # Empty-state inside the calendar
+        if not buckets:
+            ctk.CTkLabel(
+                outer,
+                text="No scheduled rotations in this window. Open a key to set one.",
+                font=FONT_XS, text_color=C["text3"]
+            ).pack(pady=(0, 10))
+
     def render_dashboard(self):
         for w in self.dash_frame.winfo_children():
             w.destroy()
@@ -4337,6 +4533,10 @@ class AppFrame(ctk.CTkFrame):
             button_hover_color=C["btn_hover"], text_color=C["text2"],
         )
         win_menu.pack(side="right")
+
+        # Mini contribution-style calendar — always shown, gives instant
+        # sense of "what's the next 30/60/90 days look like"
+        self._draw_forecast_calendar(pad, all_scheduled, window_days)
 
         gantt_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
                                    border_width=1, border_color=C["border"])
