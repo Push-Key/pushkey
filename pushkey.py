@@ -4215,7 +4215,14 @@ class AppFrame(ctk.CTkFrame):
                      font=FONT_XS, text_color=C["accent"]).pack(padx=8, pady=2)
 
         # ── Row 1: [Security Gauge] [Stat Cards] [Velocity Gauge] ──
-        row1 = ctk.CTkFrame(pad, fg_color="transparent")
+        # Horizontally scrollable so cards never get clipped when window is narrow.
+        # All cards have an explicit height of 190px so their bottom border renders
+        # (without it pack_propagate(False) collapses the frame and the bottom edge
+        # gets clipped).
+        CARD_H = 190
+        row1 = ctk.CTkScrollableFrame(
+            pad, fg_color="transparent", orientation="horizontal", height=CARD_H + 14,
+        )
         row1.pack(fill="x", pady=(0, 16))
 
         # Security score gauge (left)
@@ -4234,8 +4241,8 @@ class AppFrame(ctk.CTkFrame):
         )
         gauge_left = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
                                    border_width=1, border_color=C["border"],
-                                   width=170)
-        gauge_left.pack(side="left", padx=(0, 8), fill="y")
+                                   width=170, height=CARD_H)
+        gauge_left.pack(side="left", padx=(0, 8))
         gauge_left.pack_propagate(False)
         ctk.CTkLabel(gauge_left, text="Security Score", font=FONT_XS,
                      text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
@@ -4245,9 +4252,10 @@ class AppFrame(ctk.CTkFrame):
         _draw_arc_gauge(score_canvas, health_pct, score_color,
                         str(int(health_pct * 100)), score_label)
 
-        # Stat cards (center, expanding)
+        # Stat cards (center, expanding) — fixed width per card so they line up
+        STAT_W = 140
         stats_frame = ctk.CTkFrame(row1, fg_color="transparent")
-        stats_frame.pack(side="left", fill="both", expand=True)
+        stats_frame.pack(side="left")
 
         key_display = f"{total} / {key_limit}" if key_limit else str(total)
         key_color   = C["amber"] if key_limit and total >= key_limit * 0.8 else C["text"]
@@ -4262,22 +4270,22 @@ class AppFrame(ctk.CTkFrame):
         ]
         for label, val, color, bar_val, bar_max in stat_defs:
             card = ctk.CTkFrame(stats_frame, fg_color=C["surface"], corner_radius=8,
-                                border_width=1, border_color=C["border"])
-            card.pack(side="left", fill="x", expand=True, padx=(0, 8))
+                                border_width=1, border_color=C["border"],
+                                width=STAT_W, height=CARD_H)
+            card.pack(side="left", padx=(0, 8))
+            card.pack_propagate(False)
             ctk.CTkLabel(card, text=label, font=FONT_XS,
-                         text_color=C["text3"]).pack(anchor="w", padx=14, pady=(12, 2))
-            ctk.CTkLabel(card, text=val, font=(_UI_FONT, 26, "bold"),
-                         text_color=color).pack(anchor="w", padx=14)
+                         text_color=C["text3"]).pack(anchor="w", padx=14, pady=(16, 4))
+            ctk.CTkLabel(card, text=val, font=(_UI_FONT, 30, "bold"),
+                         text_color=color).pack(anchor="w", padx=14, pady=(0, 8))
             if bar_val is not None and bar_max and bar_max > 0:
                 bar_bg = ctk.CTkFrame(card, fg_color=C["bg3"], height=6, corner_radius=3)
-                bar_bg.pack(fill="x", padx=14, pady=(4, 12))
+                bar_bg.pack(fill="x", padx=14, pady=(0, 14))
                 bar_bg.pack_propagate(False)
                 pct_bar = max(0.02, bar_val / bar_max)
                 bar_fill = ctk.CTkFrame(bar_bg, fg_color=color, height=6, corner_radius=3,
-                                        width=int(pct_bar * 160))
+                                        width=int(pct_bar * (STAT_W - 28)))
                 bar_fill.place(x=0, y=0, relheight=1)
-            else:
-                ctk.CTkFrame(card, fg_color="transparent", height=22).pack()
 
         # Rotation velocity gauge (right)
         log_lines = _log_decrypt_all()
@@ -4290,8 +4298,8 @@ class AppFrame(ctk.CTkFrame):
 
         gauge_right = ctk.CTkFrame(row1, fg_color=C["surface"], corner_radius=8,
                                     border_width=1, border_color=C["border"],
-                                    width=170)
-        gauge_right.pack(side="left", padx=(0, 0), fill="y")
+                                    width=170, height=CARD_H)
+        gauge_right.pack(side="left", padx=(0, 0))
         gauge_right.pack_propagate(False)
         ctk.CTkLabel(gauge_right, text="Rotation Rate", font=FONT_XS,
                      text_color=C["text3"]).pack(anchor="w", padx=12, pady=(10, 0))
@@ -4453,28 +4461,36 @@ class AppFrame(ctk.CTkFrame):
                                       border_width=1, border_color=C["border"])
             feed_frame.pack(fill="x", pady=(0, 16))
 
-            _event_colors = {
-                "rotated":  C["green"],
-                "added":    C["accent"],
-                "imported": C["accent"],
-                "deleted":  C["amber"],
-                "overdue":  C["red"],
-            }
+            # Event taxonomy — keyword -> (color, short label tag)
+            _event_taxonomy = [
+                ("rotated",  C["green"],  "ROTATE"),
+                ("added",    C["accent"], "ADD"),
+                ("imported", C["accent"], "IMPORT"),
+                ("deleted",  C["amber"],  "DELETE"),
+                ("overdue",  C["red"],    "ALERT"),
+                ("updated",  C["blue"],   "EDIT"),
+                ("revealed", C["text3"],  "VIEW"),
+            ]
 
             for line in all_log[:8]:
                 dot_color = C["text3"]
-                for kw, col in _event_colors.items():
+                tag = "EVENT"
+                for kw, col, t in _event_taxonomy:
                     if kw in line.lower():
-                        dot_color = col
+                        dot_color, tag = col, t
                         break
 
-                entry = ctk.CTkFrame(feed_frame, fg_color="transparent")
-                entry.pack(fill="x", padx=12, pady=2)
+                # Outer wrapper with colored left bar — instantly readable category
+                outer = ctk.CTkFrame(feed_frame, fg_color=dot_color, corner_radius=4)
+                outer.pack(fill="x", padx=10, pady=3)
+                entry = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=3)
+                entry.pack(fill="both", expand=True, padx=(3, 0))
 
-                ctk.CTkLabel(entry, text="●", font=(_MONO_FONT, 9),
-                             text_color=dot_color, width=16).pack(side="left")
+                # Tag pill
+                ctk.CTkLabel(entry, text=tag, font=(_UI_FONT, 9, "bold"),
+                             text_color=dot_color, width=52,
+                             anchor="w").pack(side="left", padx=(10, 4), pady=4)
 
-                # Strip the timestamp prefix for display, show age
                 display = line
                 m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.*)", line)
                 if m:
@@ -4487,11 +4503,12 @@ class AppFrame(ctk.CTkFrame):
                         age_str = f"{int(age)}d ago"
                     display = m.group(2)
                     ctk.CTkLabel(entry, text=age_str, font=FONT_XS,
-                                 text_color=C["text3"], width=55,
-                                 anchor="w").pack(side="left", padx=(2, 6))
+                                 text_color=C["text3"], width=58,
+                                 anchor="w").pack(side="left", padx=(0, 6))
 
                 ctk.CTkLabel(entry, text=display, font=FONT_XS,
-                             text_color=C["text2"], anchor="w").pack(side="left", fill="x", expand=True)
+                             text_color=C["text2"], anchor="w").pack(
+                                 side="left", fill="x", expand=True, padx=(0, 10))
 
         # ── Action needed callout cards ──
         if critical + warning > 0:
