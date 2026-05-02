@@ -3848,6 +3848,79 @@ class AppFrame(ctk.CTkFrame):
         _draw_arc_gauge(vel_canvas, velocity_pct, C["accent"],
                         str(rotations_30d), "THIS MONTH")
 
+        # ── Row 2: Rotation Forecast Gantt ──
+        keys_with_schedule = [
+            (n, i) for n, i in real_keys
+            if i.get("rotation_schedule") and isinstance(i["rotation_schedule"], (int, float))
+        ]
+        if keys_with_schedule:
+            forecast_hdr = ctk.CTkFrame(pad, fg_color="transparent")
+            forecast_hdr.pack(fill="x", pady=(0, 4))
+            ctk.CTkLabel(forecast_hdr, text="ROTATION FORECAST", font=FONT_XS,
+                         text_color=C["text3"]).pack(side="left")
+
+            self._forecast_window = getattr(self, "_forecast_window", tk.StringVar(value="30"))
+            window_days = int(self._forecast_window.get())
+
+            win_menu = ctk.CTkOptionMenu(
+                forecast_hdr,
+                values=["30", "60", "90"],
+                variable=self._forecast_window,
+                command=lambda _: self.render_dashboard(),
+                width=72, height=24, font=FONT_XS,
+                fg_color=C["btn"], button_color=C["btn"],
+                button_hover_color=C["btn_hover"], text_color=C["text2"],
+            )
+            win_menu.pack(side="right")
+
+            gantt_frame = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
+                                       border_width=1, border_color=C["border"])
+            gantt_frame.pack(fill="x", pady=(0, 16))
+
+            for name, info in sorted(keys_with_schedule,
+                                     key=lambda x: days_until_rotation(x[1]) or 0):
+                schedule = int(info["rotation_schedule"])
+                days_left = days_until_rotation(info) or 0
+                days_used = schedule - days_left
+                fill_pct = max(0.02, min(1.0, days_used / schedule))
+                status = health_status(info)
+                bar_color = health_color(status)
+                overdue = days_left <= 0
+
+                row = ctk.CTkFrame(gantt_frame, fg_color="transparent")
+                row.pack(fill="x", padx=10, pady=3)
+
+                # Key name
+                ctk.CTkLabel(row, text=name, font=FONT_MONO_SM,
+                             text_color=C["text"], width=160,
+                             anchor="w").pack(side="left")
+
+                # Bar area
+                bar_wrap = ctk.CTkFrame(row, fg_color=C["bg3"], height=8,
+                                        corner_radius=4)
+                bar_wrap.pack(side="left", fill="x", expand=True, padx=(8, 8))
+                bar_wrap.pack_propagate(False)
+
+                def _draw_bar(bw=bar_wrap, pct=fill_pct, col=bar_color):
+                    bw.update_idletasks()
+                    w = bw.winfo_width()
+                    if w > 10:
+                        bar = ctk.CTkFrame(bw, fg_color=col, height=8,
+                                           corner_radius=4, width=int(pct * w))
+                        bar.place(x=0, y=0, relheight=1)
+
+                bar_wrap.after(50, _draw_bar)
+
+                # Days label + Rotate button
+                days_lbl = "OVERDUE" if overdue else f"{abs(int(days_left))}d left"
+                ctk.CTkLabel(row, text=days_lbl, font=FONT_XS,
+                             text_color=bar_color, width=70).pack(side="left")
+                make_btn(row, "Rotate",
+                         lambda n=name: (self.rotate_key(n), self.render_all()),
+                         fg_color=C["red_bg"] if overdue else C["btn"],
+                         text_color=C["red"] if overdue else C["text2"],
+                         width=60, height=24).pack(side="right")
+
         # Scheduled rotations due
         due_keys = [(n, i) for n, i in keys
                     if days_until_rotation(i) is not None and days_until_rotation(i) <= 0]
