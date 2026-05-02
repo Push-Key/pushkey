@@ -3887,6 +3887,99 @@ class AppFrame(ctk.CTkFrame):
 
             cv.after(60, _draw_lane)
 
+    def _render_activity_tab(self):
+        all_log = list(reversed(_log_decrypt_all()))  # newest first
+        PAGE_SIZE = 25
+
+        filter_val = self._timeline_filter.get()
+        _filter_map = {
+            "rotations": "rotated",
+            "imports":   "import",
+            "logins":    "unlock",
+        }
+
+        if filter_val != "all" and filter_val in _filter_map:
+            kw = _filter_map[filter_val]
+            all_log = [ln for ln in all_log if kw in ln.lower()]
+
+        total_pages = max(1, (len(all_log) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self._timeline_page = max(0, min(self._timeline_page, total_pages - 1))
+        page_entries = all_log[self._timeline_page * PAGE_SIZE:(self._timeline_page + 1) * PAGE_SIZE]
+
+        # Filter bar
+        filter_bar = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
+        filter_bar.pack(fill="x", padx=20, pady=(12, 6))
+        for fval, flabel in [("all", "All"), ("rotations", "Rotations"),
+                              ("imports", "Imports"), ("logins", "Logins")]:
+            is_active = self._timeline_filter.get() == fval
+            make_btn(
+                filter_bar, flabel,
+                lambda v=fval: (self._timeline_filter.set(v),
+                                setattr(self, "_timeline_page", 0),
+                                self._switch_timeline_subtab()),
+                fg_color=C["accent_dim"] if is_active else C["btn"],
+                text_color=C["accent"] if is_active else C["text2"],
+                width=80, height=24, corner_radius=12,
+            ).pack(side="left", padx=2)
+
+        # Log entries
+        scroll = ctk.CTkScrollableFrame(self._timeline_content,
+                                         fg_color=C["bg"], corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=0, pady=0)
+
+        _event_colors = {
+            "rotated":  C["green"],
+            "added":    C["accent"],
+            "imported": C["accent"],
+            "deleted":  C["amber"],
+            "overdue":  C["red"],
+            "unlock":   C["text3"],
+        }
+
+        if not page_entries:
+            ctk.CTkLabel(scroll, text="No activity yet.", font=FONT_XS,
+                         text_color=C["text3"]).pack(pady=40)
+        else:
+            for line in page_entries:
+                dot_color = C["text3"]
+                for kw, col in _event_colors.items():
+                    if kw in line.lower():
+                        dot_color = col
+                        break
+
+                m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.*)", line)
+                ts_str = m.group(1) if m else ""
+                body   = m.group(2) if m else line
+
+                entry = ctk.CTkFrame(scroll, fg_color="transparent")
+                entry.pack(fill="x", padx=20, pady=1)
+
+                ctk.CTkLabel(entry, text="●", font=(_MONO_FONT, 9),
+                             text_color=dot_color, width=14).pack(side="left")
+                ctk.CTkLabel(entry, text=ts_str, font=FONT_XS,
+                             text_color=C["text3"], width=130,
+                             anchor="w").pack(side="left", padx=(4, 8))
+                ctk.CTkLabel(entry, text=body, font=FONT_XS,
+                             text_color=C["text2"], anchor="w").pack(side="left", fill="x", expand=True)
+
+        # Pagination controls
+        if total_pages > 1:
+            pg_bar = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
+            pg_bar.pack(fill="x", padx=20, pady=8)
+            make_btn(pg_bar, "← Prev",
+                     lambda: (setattr(self, "_timeline_page", self._timeline_page - 1),
+                              self._switch_timeline_subtab()),
+                     fg_color=C["btn"], text_color=C["text2"], width=70,
+                     ).pack(side="left")
+            ctk.CTkLabel(pg_bar,
+                         text=f"Page {self._timeline_page + 1} of {total_pages}",
+                         font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=12)
+            make_btn(pg_bar, "Next →",
+                     lambda: (setattr(self, "_timeline_page", self._timeline_page + 1),
+                              self._switch_timeline_subtab()),
+                     fg_color=C["btn"], text_color=C["text2"], width=70,
+                     ).pack(side="left")
+
     def render_all(self):
         self.render_dashboard()
         self.render_keys()
