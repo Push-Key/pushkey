@@ -2113,6 +2113,16 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
     return ctk.CTkButton(parent, **kw)
 
 
+def _parse_iso(s):
+    """Parse an ISO datetime string into a naive datetime, or None on failure."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
 # Resize debouncer — coalesces <Configure> floods during window drag/resize
 class _ResizeDebouncer:
     """Throttles redraws of registered Canvas widgets to fire once per 100ms.
@@ -4174,117 +4184,143 @@ class AppFrame(ctk.CTkFrame):
             order = {"critical": 0, "warning": 1, "healthy": 2}.get(health_status(v), 3)
             return (order, -days_since(v.get("rotated") or v.get("created")))
 
-        # ── One card per key (original flat layout, restored per request) ──
+        # ── One compact card per key ──
+        # Two-line horizontal layout: row 1 = identity + status, row 2 =
+        # rotation cycle bar + days-until + rotate action. The big "days
+        # until due" number on the right is the one metric that tells the
+        # user whether they need to act on this key right now.
         for name, info in sorted(real_keys, key=_rank):
-            status = health_status(info)
-            status_color = health_color(status)
-            status_label = {"critical": "CRITICAL", "warning": "WARNING",
-                            "healthy": "HEALTHY"}.get(status, status.upper())
+            self._draw_lifecycle_card(container, name, info, _ago)
 
-            created_dt = _parse_dt(info.get("created"))
-            rotated_dt = _parse_dt(info.get("rotated"))
-            schedule = info.get("rotation_schedule")
-            days_left = days_until_rotation(info)
-            provider = info.get("provider") or "—"
+    def _draw_lifecycle_card(self, parent, name, info, ago_fn):
+        """Compact 2-line lifecycle card: cleaner than the milestone-grid
+        version, with stronger visual hierarchy (status accent, bold name,
+        single big metric for days-until-due, inline progress bar)."""
+        status = health_status(info)
+        status_color = health_color(status)
+        provider = info.get("provider") or "—"
+        cat = PROVIDERS.get(provider, {}).get("category", "General")
+        cat_col = CAT_COLORS.get(cat, C["text3"])
+        schedule = info.get("rotation_schedule")
+        days_left = days_until_rotation(info)
+        rotated_dt = info.get("rotated")
+        env = info.get("env", "all")
 
-            # Card with colored left accent reflecting status
-            outer = ctk.CTkFrame(container, fg_color=status_color, corner_radius=8)
-            outer.pack(fill="x", padx=14, pady=6)
-            card = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7,
-                                cursor="hand2")
-            card.pack(fill="both", expand=True, padx=(4, 0))
-            card.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        # Status-tinted background so the whole card glows softly with state
+        card_bg = (C["red_bg"] if status == "critical"
+                   else C["amber_bg"] if status == "warning"
+                   else C["green_bg"] if status == "healthy"
+                   else C["surface"])
 
-            # Header row: category dot + name + provider + status pill + Rotate
-            top = ctk.CTkFrame(card, fg_color="transparent")
-            top.pack(fill="x", padx=14, pady=(10, 4))
+        # Outer wrapper: thick status border + tinted bg
+        card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=8,
+                            border_width=2, border_color=status_color,
+                            cursor="hand2")
+        card.pack(fill="x", padx=14, pady=5)
+        card.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            cat = PROVIDERS.get(provider, {}).get("category", "General")
-            cat_col = CAT_COLORS.get(cat, C["text3"])
-            ctk.CTkLabel(top, text="●", font=(_MONO_FONT, 14),
-                         text_color=cat_col, width=16).pack(side="left")
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="x", padx=14, pady=10)
+        body.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            name_lbl = ctk.CTkLabel(top, text=name, font=(_MONO_FONT, 13, "bold"),
-                                    text_color=C["text"], anchor="w", cursor="hand2")
-            name_lbl.pack(side="left")
-            name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        # ── Right side first (so its width is honored) ──
+        # Big days-until-due metric — the headline of every card
+        if days_left is None:
+            big_txt, sub_txt, big_col = "—", "no schedule", C["text3"]
+        elif days_left < 0:
+            big_txt, sub_txt, big_col = f"{abs(int(days_left))}d", "OVERDUE", C["red"]
+        elif days_left == 0:
+            big_txt, sub_txt, big_col = "TODAY", "DUE", C["amber"]
+        elif days_left <= 7:
+            big_txt, sub_txt, big_col = f"{int(days_left)}d", "DUE IN", C["amber"]
+        else:
+            big_txt, sub_txt, big_col = f"{int(days_left)}d", "DUE IN", status_color
 
-            ctk.CTkLabel(top, text=f"  •  {provider}  •  {cat}", font=FONT_XS,
-                         text_color=C["text3"]).pack(side="left")
+        right = ctk.CTkFrame(body, fg_color="transparent", width=110)
+        right.pack(side="right", padx=(12, 0))
+        right.pack_propagate(False)
 
-            make_btn(
-                top, "Rotate",
-                lambda n=name: (self.rotate_key(n),
-                                self._invalidate_tabs("dashboard", "keys", "timeline")),
-                fg_color=C["red_bg"] if status == "critical" else C["btn"],
-                text_color=status_color,
-                width=72, height=24,
-            ).pack(side="right", padx=(8, 0))
+        ctk.CTkLabel(right, text=sub_txt, font=(_UI_FONT, 9, "bold"),
+                     text_color=big_col, anchor="e").pack(anchor="e")
+        ctk.CTkLabel(right, text=big_txt,
+                     font=(_UI_FONT, 24 if big_txt != "TODAY" else 18, "bold"),
+                     text_color=big_col, anchor="e").pack(anchor="e")
 
-            pill = ctk.CTkFrame(top, fg_color=status_color, corner_radius=10)
-            pill.pack(side="right")
-            ctk.CTkLabel(pill, text=status_label,
-                         font=(_UI_FONT, 9, "bold"),
-                         text_color="#FFFFFF").pack(padx=8, pady=2)
+        # Inline Rotate button under the metric (icon-led)
+        ctk.CTkButton(
+            right, text="  Rotate", image=icon("refresh", 12, "#FFFFFF"),
+            compound="left",
+            command=lambda n=name: (self.rotate_key(n),
+                                    self._invalidate_tabs("dashboard", "keys", "timeline")),
+            fg_color=status_color, hover_color=C["btn_hover"],
+            text_color="#FFFFFF", font=(_UI_FONT, 10, "bold"),
+            corner_radius=6, height=24, width=92,
+        ).pack(anchor="e", pady=(6, 0))
 
-            # Milestone row: 3 columns with icon + label + date
-            mile = ctk.CTkFrame(card, fg_color="transparent")
-            mile.pack(fill="x", padx=14, pady=(2, 6))
+        # ── Left side: identity + cycle bar ──
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.pack(side="left", fill="both", expand=True)
 
-            def _milestone(parent, ico_name, label, value, value_color):
-                col = ctk.CTkFrame(parent, fg_color="transparent")
-                col.pack(side="left", fill="x", expand=True, padx=(0, 8))
-                hdr = ctk.CTkFrame(col, fg_color="transparent")
-                hdr.pack(anchor="w")
-                if ico_name:
-                    ctk.CTkLabel(hdr, text="", image=icon(ico_name, 12, C["text3"]),
-                                 width=14).pack(side="left")
-                ctk.CTkLabel(hdr, text=label, font=(_UI_FONT, 9, "bold"),
-                             text_color=C["text3"]).pack(side="left", padx=(2, 0))
-                ctk.CTkLabel(col, text=value, font=FONT_SM,
-                             text_color=value_color, anchor="w").pack(anchor="w")
+        # Row 1: category dot + name + meta
+        identity = ctk.CTkFrame(left, fg_color="transparent")
+        identity.pack(fill="x", anchor="w")
 
-            _milestone(mile, "plus",    "CREATED",
-                       _ago(created_dt) or "unknown", C["text2"])
-            _milestone(mile, "refresh", "LAST ROTATED",
-                       _ago(rotated_dt) or "never",
-                       C["text2"] if rotated_dt else C["text3"])
-            if days_left is not None:
-                if days_left < 0:
-                    due_txt, due_col = f"OVERDUE by {abs(int(days_left))}d", C["red"]
-                elif days_left == 0:
-                    due_txt, due_col = "due today", C["amber"]
-                elif days_left <= 7:
-                    due_txt, due_col = f"in {int(days_left)}d", C["amber"]
-                else:
-                    due_txt, due_col = f"in {int(days_left)}d", C["text2"]
-            else:
-                due_txt, due_col = "not scheduled", C["text3"]
-            _milestone(mile, "clock", "NEXT ROTATION", due_txt, due_col)
+        ctk.CTkLabel(identity, text="●", font=(_MONO_FONT, 13),
+                     text_color=cat_col, width=16
+                     ).pack(side="left", padx=(0, 2))
+        name_lbl = ctk.CTkLabel(identity, text=name,
+                                font=(_MONO_FONT, 14, "bold"),
+                                text_color=C["text"], cursor="hand2", anchor="w")
+        name_lbl.pack(side="left")
+        name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-            # Progress bar showing where we are in the rotation cycle
-            if schedule and isinstance(schedule, (int, float)) and days_left is not None:
-                bar_wrap = ctk.CTkFrame(card, fg_color=C["bg3"], height=6,
-                                        corner_radius=3)
-                bar_wrap.pack(fill="x", padx=14, pady=(0, 12))
-                bar_wrap.pack_propagate(False)
-                used = max(0, schedule - days_left)
-                pct = max(0.02, min(1.0, used / schedule))
+        meta = f"{provider}  ·  {cat}"
+        if env != "all":
+            meta += f"  ·  {env.upper()}"
+        ctk.CTkLabel(identity, text=f"   {meta}", font=FONT_XS,
+                     text_color=C["text3"]).pack(side="left")
 
-                def _fill(bw=bar_wrap, p=pct, c=status_color, _t=[0]):
-                    if not bw.winfo_exists():
-                        return
-                    bw.update_idletasks()
-                    w = bw.winfo_width()
-                    if w > 10:
-                        ctk.CTkFrame(bw, fg_color=c, height=6, corner_radius=3,
-                                     width=int(p * w)).place(x=0, y=0, relheight=1)
-                    elif _t[0] < 10:
-                        _t[0] += 1
-                        bw.after(50, _fill)
-                bar_wrap.after(50, _fill)
-            else:
-                ctk.CTkFrame(card, fg_color="transparent", height=8).pack()
+        # Row 2: cycle progress bar + supporting text (inline)
+        if schedule and isinstance(schedule, (int, float)) and days_left is not None:
+            used = max(0, schedule - days_left)
+            pct = max(0.02, min(1.0, used / schedule))
+        else:
+            used, pct = 0, 0
+
+        sub_row = ctk.CTkFrame(left, fg_color="transparent")
+        sub_row.pack(fill="x", anchor="w", pady=(8, 0))
+
+        if schedule and days_left is not None:
+            bar_wrap = ctk.CTkFrame(sub_row, fg_color=C["bg3"], height=8,
+                                    corner_radius=4)
+            bar_wrap.pack(side="left", fill="x", expand=True, pady=(2, 0))
+            bar_wrap.pack_propagate(False)
+
+            def _fill(bw=bar_wrap, p=pct, c=status_color, _t=[0]):
+                if not bw.winfo_exists():
+                    return
+                bw.update_idletasks()
+                w = bw.winfo_width()
+                if w > 10:
+                    ctk.CTkFrame(bw, fg_color=c, height=8, corner_radius=4,
+                                 width=int(p * w)).place(x=0, y=0, relheight=1)
+                elif _t[0] < 10:
+                    _t[0] += 1
+                    bw.after(50, _fill)
+            bar_wrap.after(50, _fill)
+
+            ctk.CTkLabel(
+                sub_row,
+                text=f"  {used}/{int(schedule)}d cycle  ·  rotated {ago_fn(_parse_iso(rotated_dt)) or 'never'}",
+                font=FONT_XS, text_color=C["text3"], anchor="w",
+            ).pack(side="left", padx=(8, 0))
+        else:
+            # No schedule — show a hint instead of an empty bar
+            ctk.CTkLabel(
+                sub_row,
+                text=f"No rotation schedule  ·  last rotated {ago_fn(_parse_iso(rotated_dt)) or 'never'}",
+                font=FONT_XS, text_color=C["text3"], anchor="w",
+            ).pack(side="left")
 
     def _make_filter_chip(self, parent, label, count, color, active, command):
         """Segmented-control chip: status dot + label + count badge.
