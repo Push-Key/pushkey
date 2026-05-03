@@ -6714,7 +6714,11 @@ class AppFrame(ctk.CTkFrame):
 
         def _verify():
             entered = pw_entry.get().strip()
-            result, _ = load_vault(entered)
+            try:
+                result, _ = load_vault(entered)
+            except ValueError as e:
+                err_lbl.configure(text=f"Vault error: {e}")
+                return
             if result is None:
                 err_lbl.configure(text="Wrong password")
                 pw_entry.delete(0, "end")
