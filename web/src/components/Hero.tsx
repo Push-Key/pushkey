@@ -30,7 +30,7 @@ function TerminalWindow() {
         <div className="w-3 h-3 rounded-full" style={{ background: "#FF5F57" }} />
         <div className="w-3 h-3 rounded-full" style={{ background: "#FFBD2E" }} />
         <div className="w-3 h-3 rounded-full" style={{ background: "#28C840" }} />
-        <span className="ml-2 text-xs font-mono" style={{ color: "#64748B" }}>pushkey — vault</span>
+        <span className="ml-2 text-xs font-mono" style={{ color: "#64748B" }}>pushkey-cli — vault</span>
       </div>
       <div className="p-4 font-mono text-sm min-h-[220px]">
         {TERMINAL_LINES.map((line, i) => (
@@ -61,7 +61,7 @@ export default function Hero() {
                 <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
                 AES-256-GCM · Zero network access
               </div>
-              <a href="https://github.com/ebothegreat/pushkey" target="_blank" rel="noopener noreferrer"
+              <a href="https://github.com/Push-Key/pushkey" target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono transition-all"
                 style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", color: "#94A3B8" }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)"; e.currentTarget.style.color = "#F8FAFC" }}
@@ -90,7 +90,7 @@ export default function Hero() {
             </p>
 
             <div className="flex flex-wrap gap-4 mb-12">
-              <a href="#pricing"
+              <a href="https://github.com/Push-Key/pushkey/releases" target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm transition-all glow-green"
                 style={{ background: "#00DC82", color: "#060B14" }}
                 onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.opacity = "0.92" }}

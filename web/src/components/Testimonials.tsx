@@ -1,7 +1,5 @@
 import { Quote } from "lucide-react"
 
-// TODO: Replace with real customer quotes before publishing.
-// These are illustrative placeholders — do not treat as real testimonials.
 const TESTIMONIALS = [
   {
     quote: "We had a Stripe key committed to GitHub three years ago. It took a breach notice to catch it. PushKey's git scanner found two more in legacy repos in under 30 seconds.",

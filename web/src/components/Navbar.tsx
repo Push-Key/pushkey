@@ -40,12 +40,14 @@ export default function Navbar() {
         </div>
 
         <div className="hidden md:flex items-center gap-3">
-          <a href="#pricing" className="text-sm px-4 py-2 rounded-lg transition-colors" style={{ color: "#94A3B8" }}
+          <a href="https://github.com/Push-Key/pushkey" target="_blank" rel="noopener noreferrer"
+            className="text-sm px-4 py-2 rounded-lg transition-colors" style={{ color: "#94A3B8" }}
             onMouseEnter={e => (e.currentTarget.style.color = "#F8FAFC")}
             onMouseLeave={e => (e.currentTarget.style.color = "#94A3B8")}>
-            Sign in
+            GitHub
           </a>
-          <a href="#pricing" className="text-sm px-4 py-2 rounded-lg font-medium transition-all"
+          <a href="https://github.com/Push-Key/pushkey/releases" target="_blank" rel="noopener noreferrer"
+            className="text-sm px-4 py-2 rounded-lg font-medium transition-all"
             style={{ background: "#00DC82", color: "#060B14" }}
             onMouseEnter={e => (e.currentTarget.style.opacity = "0.9")}
             onMouseLeave={e => (e.currentTarget.style.opacity = "1")}>
@@ -66,7 +68,8 @@ export default function Navbar() {
             <a key={item} href={`#${item.toLowerCase()}`} onClick={() => setOpen(false)}
               className="block text-sm py-2" style={{ color: "#94A3B8" }}>{item}</a>
           ))}
-          <a href="#pricing" className="block text-sm px-4 py-2 rounded-lg font-medium text-center mt-2"
+          <a href="https://github.com/Push-Key/pushkey/releases" target="_blank" rel="noopener noreferrer"
+            className="block text-sm px-4 py-2 rounded-lg font-medium text-center mt-2"
             style={{ background: "#00DC82", color: "#060B14" }}>
             Download Free
           </a>

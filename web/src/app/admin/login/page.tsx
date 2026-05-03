@@ -17,7 +17,7 @@ export default function AdminLogin() {
     setLoading(true)
     try {
       await adminApi.stats(secret)
-      sessionStorage.setItem("pk_admin_secret", secret)
+      localStorage.setItem("pk_admin_secret", secret)
       router.replace("/admin/licenses")
     } catch {
       setError("Invalid admin secret")

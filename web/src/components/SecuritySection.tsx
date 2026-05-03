@@ -26,7 +26,7 @@ export default function SecuritySection() {
                 {[
                   { title: "AES-256-GCM encryption", desc: "Authenticated encryption — encrypted AND tamper-evident." },
                   { title: "Argon2id KDF", desc: "200,000 iterations. GPU brute-force is not economically viable." },
-                  { title: "Open source crypto layer", desc: "The vault is MIT licensed on GitHub. Read every line that touches your keys before you trust it.", link: "https://github.com/ebothegreat/pushkey" },
+                  { title: "Open source crypto layer", desc: "The vault is MIT licensed on GitHub. Read every line that touches your keys before you trust it.", link: "https://github.com/Push-Key/pushkey" },
                   { title: "chmod 600 vault files", desc: "Vault files are owner-read-only. Other users on the same machine can't read them." },
                 ].map(item => (
                   <div key={item.title} className="flex items-start gap-3">

@@ -27,7 +27,7 @@ export default function CTA() {
             </p>
 
             <div className="flex flex-wrap justify-center gap-4">
-              <a href="#pricing"
+              <a href="https://github.com/Push-Key/pushkey/releases" target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-8 py-4 rounded-xl font-semibold text-sm transition-all glow-green"
                 style={{ background: "#00DC82", color: "#060B14" }}
                 onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.opacity = "0.92" }}
@@ -35,14 +35,14 @@ export default function CTA() {
                 <Download size={16} />
                 Download PushKey Free
               </a>
-              <a href="mailto:hello@pushkey.dev?subject=Lifetime Deal"
+              <a href={process.env.NEXT_PUBLIC_STRIPE_LIFETIME || "mailto:hello@push-key.com?subject=Lifetime Deal"} target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-8 py-4 rounded-xl font-semibold text-sm transition-all"
                 style={{ background: "rgba(251,191,36,0.1)", color: "#FBBF24", border: "1px solid rgba(251,191,36,0.3)" }}
                 onMouseEnter={e => { e.currentTarget.style.background = "rgba(251,191,36,0.18)" }}
                 onMouseLeave={e => { e.currentTarget.style.background = "rgba(251,191,36,0.1)" }}>
                 🔑 Get Lifetime Deal — $149
               </a>
-              <a href="mailto:hello@pushkey.dev"
+              <a href="mailto:hello@push-key.com"
                 className="inline-flex items-center gap-2 px-8 py-4 rounded-xl font-semibold text-sm transition-all"
                 style={{ background: "rgba(255,255,255,0.06)", color: "#F8FAFC", border: "1px solid rgba(255,255,255,0.12)" }}
                 onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.1)" }}

@@ -66,7 +66,19 @@ const FEATURES: Feature[] = [
   },
   {
     category: "Access",
-    label: "Desktop GUI app (no CLI required)",
+    label: "Native desktop GUI app",
+    pushkey: "yes",
+    competitors: { Doppler: "no", "1Password Secrets": "no", Infisical: "no", "dotenv vault": "no" },
+  },
+  {
+    category: "Access",
+    label: "Full-featured CLI (scriptable, CI-ready)",
+    pushkey: "yes",
+    competitors: { Doppler: "yes", "1Password Secrets": "yes", Infisical: "yes", "dotenv vault": "partial" },
+  },
+  {
+    category: "Access",
+    label: "GUI + CLI — both available",
     pushkey: "yes",
     competitors: { Doppler: "no", "1Password Secrets": "no", Infisical: "no", "dotenv vault": "no" },
   },

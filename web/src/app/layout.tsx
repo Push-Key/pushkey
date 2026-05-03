@@ -15,10 +15,15 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "PushKey — Encrypted API Key Vault",
   description: "Store, rotate, and inject your API secrets into every project automatically. AES-256-GCM encrypted. Zero network access. Built for dev teams.",
+  icons: {
+    icon: "/favicon.ico",
+    apple: "/icon-512.png",
+  },
   openGraph: {
     title: "PushKey — Encrypted API Key Vault",
     description: "Your secrets. Encrypted. Where you need them.",
     type: "website",
+    images: [{ url: "/icon-512.png", width: 512, height: 512 }],
   },
 }
 
