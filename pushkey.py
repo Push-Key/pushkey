@@ -6635,6 +6635,185 @@ class AppFrame(ctk.CTkFrame):
                   f"{len(self._git_scan_results)} git finding(s)")
         self.render_scan()
 
+    def _render_recovery_key_card(self, parent):
+        """Recovery key status card for the Security tab."""
+        try:
+            raw = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
+        except OSError:
+            raw = b""
+        is_v3 = raw.startswith(_V3_MAGIC)
+
+        status_color = C["green"] if is_v3 else C["amber"]
+        status_text  = "Active" if is_v3 else "Not configured"
+        status_bg    = C["green_bg"] if is_v3 else C["amber_bg"]
+
+        card = ctk.CTkFrame(parent, fg_color=status_color, corner_radius=8)
+        card.pack(fill="x", pady=(0, 12))
+        inner = ctk.CTkFrame(card, fg_color=C["surface"], corner_radius=7)
+        inner.pack(fill="x", padx=(4, 0))
+
+        row = ctk.CTkFrame(inner, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=10)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="y")
+        ctk.CTkLabel(left, text="", image=icon("shield", 16, status_color),
+                     width=20).pack(side="left")
+        ctk.CTkLabel(left, text="RECOVERY KEY", font=(_UI_FONT, 10, "bold"),
+                     text_color=C["text"]).pack(side="left", padx=(6, 0))
+
+        pill = ctk.CTkFrame(left, fg_color=status_bg, corner_radius=6,
+                            border_width=1, border_color=status_color)
+        pill.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(pill, text=status_text, font=(_UI_FONT, 9, "bold"),
+                     text_color=status_color).pack(padx=8, pady=2)
+
+        btn_text = "Regenerate" if is_v3 else "Set Up Recovery Key"
+
+        def _setup_or_regen():
+            self._recovery_key_setup_flow()
+
+        make_btn(row, btn_text, _setup_or_regen,
+                 fg_color=C["bg3"], text_color=C["text"],
+                 width=160, height=28).pack(side="right")
+
+    def _recovery_key_setup_flow(self):
+        """Re-auth modal → recovery code display modal → save V3 vault."""
+        win = ctk.CTkToplevel(self)
+        win.title("Recovery Key Setup")
+        win.geometry("420x280")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+        win.resizable(False, False)
+
+        ctk.CTkFrame(win, fg_color=C["accent"], height=3).pack(fill="x")
+        ctk.CTkLabel(win, text="Confirm your password",
+                     font=FONT_H2, text_color=C["text"]
+                     ).pack(pady=(20, 4), padx=20, anchor="w")
+        ctk.CTkLabel(win, text="Re-enter your master password to continue.",
+                     font=FONT_SM, text_color=C["text2"]
+                     ).pack(padx=20, anchor="w")
+
+        form = ctk.CTkFrame(win, fg_color="transparent")
+        form.pack(padx=20, pady=(14, 0), fill="x")
+        pw_entry = ctk.CTkEntry(
+            form, show="●", font=FONT_MONO,
+            fg_color=C["bg3"], text_color=C["text"],
+            placeholder_text="Master password",
+            placeholder_text_color=C["text3"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=40,
+        )
+        pw_entry.pack(fill="x")
+        pw_entry.focus_set()
+
+        err_lbl = ctk.CTkLabel(form, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack(pady=(6, 0))
+
+        def _verify():
+            entered = pw_entry.get().strip()
+            result, _ = load_vault(entered)
+            if result is None:
+                err_lbl.configure(text="Wrong password")
+                pw_entry.delete(0, "end")
+                return
+            win.destroy()
+            self._show_recovery_code_dialog(entered)
+
+        make_btn(form, "Continue", _verify,
+                 fg_color=C["accent"], text_color="#FFFFFF",
+                 height=38).pack(fill="x", pady=(12, 0))
+        pw_entry.bind("<Return>", lambda e: _verify())
+        ctk.CTkFrame(win, fg_color="transparent", height=12).pack()
+
+    def _show_recovery_code_dialog(self, password):
+        """Display new recovery code and save V3 vault on confirm."""
+        code = generate_recovery_code()
+
+        win = ctk.CTkToplevel(self)
+        win.title("Your Recovery Key")
+        win.geometry("500x360")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+        win.lift()
+        win.resizable(False, False)
+
+        ctk.CTkFrame(win, fg_color=C["accent"], height=3).pack(fill="x")
+        ctk.CTkLabel(win, text="Save Your Recovery Key",
+                     font=(_UI_FONT, 17, "bold"),
+                     text_color=C["text"]).pack(pady=(20, 4), padx=24, anchor="w")
+        ctk.CTkLabel(
+            win,
+            text=(
+                "Write this down. It's the only way to recover your vault\n"
+                "if you forget your master password."
+            ),
+            font=FONT_SM, text_color=C["text2"],
+            anchor="w", justify="left",
+        ).pack(padx=24, anchor="w")
+
+        code_box = ctk.CTkFrame(win, fg_color=C["bg3"], corner_radius=8,
+                                border_width=1, border_color=C["accent"])
+        code_box.pack(padx=24, pady=(16, 0), fill="x")
+        inner = ctk.CTkFrame(code_box, fg_color="transparent")
+        inner.pack(padx=12, pady=12, fill="x")
+        ctk.CTkLabel(inner, text=code,
+                     font=("Consolas", 16, "bold"),
+                     text_color=C["accent"]).pack(side="left", expand=True)
+
+        def _copy():
+            win.clipboard_clear()
+            win.clipboard_append(code)
+            copy_btn.configure(text="Copied!")
+            win.after(1500, lambda: copy_btn.configure(text="Copy"))
+
+        copy_btn = make_btn(inner, "Copy", _copy, width=70, height=28)
+        copy_btn.pack(side="right")
+
+        confirmed = tk.BooleanVar(value=False)
+        chk_row = ctk.CTkFrame(win, fg_color="transparent")
+        chk_row.pack(padx=24, pady=(16, 0), anchor="w")
+
+        save_btn = make_btn(win, "Save & Activate", lambda: None,
+                            fg_color=C["accent"], text_color="#FFFFFF",
+                            width=160, height=38)
+        save_btn.pack(pady=(16, 0))
+        save_btn.configure(state="disabled")
+
+        err_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack(pady=(4, 0))
+
+        def _toggle():
+            save_btn.configure(state="normal" if confirmed.get() else "disabled")
+
+        ctk.CTkCheckBox(
+            chk_row,
+            text="I've written this down somewhere safe",
+            variable=confirmed, command=_toggle,
+            font=FONT_SM, text_color=C["text"],
+            fg_color=C["accent"], hover_color=C["accent2"],
+        ).pack(side="left")
+
+        def _save():
+            try:
+                raw = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
+                new_token = add_recovery_key(raw, password, code)
+                tmp = VAULT_FILE.with_suffix('.tmp')
+                tmp.write_bytes(new_token)
+                os.replace(str(tmp), str(VAULT_FILE))
+                _, self.vault_key = load_vault(password)
+                log_event("recovery key configured")
+                win.destroy()
+                self.render_scan()
+            except (ValueError, OSError) as e:
+                err_lbl.configure(text=f"Failed to save: {e}")
+
+        save_btn.configure(command=_save)
+        ctk.CTkFrame(win, fg_color="transparent", height=12).pack()
+
     def render_scan(self):
         for w in self.scan_frame.winfo_children():
             w.destroy()
@@ -6671,6 +6850,9 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["bg3"], text_color=C["text"], width=110, height=28).pack(side="left", padx=4)
         make_btn(ent_row, "⚙️ Dynamic Secrets", self.manage_dynamic_secrets,
                  fg_color=C["bg3"], text_color=C["text"], width=140, height=28).pack(side="left", padx=4)
+
+        # ── Recovery Key card ─────────────────────────────────────────────
+        self._render_recovery_key_card(pad)
 
         if not self._scan_ts:
             # Pre-scan state
