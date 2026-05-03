@@ -238,6 +238,69 @@ def _gen_key(tier: str) -> str:
     return f"{prefix}-{seg1}-{seg2}-{seg3}"
 
 
+SMTP_HOST  = os.environ.get("SMTP_HOST", "")
+SMTP_PORT  = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER  = os.environ.get("SMTP_USER", "")
+SMTP_PASS  = os.environ.get("SMTP_PASS", "")
+FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
+APP_URL    = os.environ.get("APP_URL", "https://pushkey.app")
+
+
+def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at: str | None) -> dict:
+    if not SMTP_HOST:
+        return {"sent": False, "reason": "smtp_not_configured"}
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    display_name = name or to_email.split("@")[0]
+    tier_label   = tier.capitalize()
+    expiry_line  = f"\nThis key expires on {expires_at[:10]}.\n" if expires_at else ""
+
+    plain = f"""Hi {display_name},
+
+Here's your Pushkey {tier_label} license key:
+
+  {key}
+
+To activate:
+1. Download Pushkey: {APP_URL}/download
+2. Open Settings → License
+3. Enter your key
+{expiry_line}
+Questions? Reply to this email.
+"""
+    msg = MIMEText(plain, "plain")
+    msg["Subject"] = f"Your Pushkey {tier_label} access key"
+    msg["From"]    = FROM_EMAIL
+    msg["To"]      = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+        return {"sent": True}
+    except Exception as exc:
+        return {"sent": False, "reason": str(exc)}
+
+
+def _auto_expire(lic: dict) -> bool:
+    """Set status=expired for any record past its expires_at. Returns True if any changed."""
+    now = datetime.utcnow().isoformat()
+    changed = False
+    for entry in lic.values():
+        if (
+            entry.get("expires_at")
+            and entry["status"] == "active"
+            and entry["expires_at"] < now
+        ):
+            entry["status"] = "expired"
+            entry["stage"]  = "churned"
+            changed = True
+    return changed
+
+
 # ── Admin endpoints ──────────────────────────────────────────────
 @app.get("/api/admin/stats")
 async def admin_stats(_: None = Depends(_require_admin)):
@@ -262,7 +325,10 @@ async def admin_stats(_: None = Depends(_require_admin)):
 
 @app.get("/api/admin/licenses")
 async def admin_list_licenses(_: None = Depends(_require_admin)):
-    return list(_load_licenses().values())
+    lic = _load_licenses()
+    if _auto_expire(lic):
+        _save_licenses(lic)
+    return list(lic.values())
 
 
 @app.post("/api/admin/licenses/generate")
@@ -289,6 +355,161 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     _save_licenses(lic)
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
     return entry
+
+
+VALID_SOURCES = {"Twitter", "ProductHunt", "Referral", "Direct", "Conference", "Other"}
+VALID_TRIAL_DAYS = {7, 14, 30}
+
+
+@app.post("/api/admin/licenses/issue")
+async def admin_issue(request: Request, _: None = Depends(_require_admin)):
+    body       = await request.json()
+    tier       = body.get("tier", "free").lower()
+    email      = body.get("email", "").strip().lower()
+    name       = body.get("name", "").strip()
+    company    = body.get("company", "").strip()
+    source     = body.get("source", "Direct").strip()
+    trial_days = body.get("trial_days")  # int or null
+    follow_up  = body.get("follow_up_date", "")
+    notes      = body.get("notes", "").strip()
+    send_email = bool(body.get("send_email", False))
+
+    if tier not in TIER_PREFIXES:
+        raise HTTPException(400, f"tier must be one of: {list(TIER_PREFIXES)}")
+    if not email:
+        raise HTTPException(400, "email is required")
+    if source not in VALID_SOURCES:
+        source = "Other"
+    if trial_days is not None and trial_days not in VALID_TRIAL_DAYS:
+        raise HTTPException(400, f"trial_days must be one of: {list(VALID_TRIAL_DAYS)} or null")
+
+    expires_at = None
+    if trial_days:
+        expires_at = (datetime.utcnow() + timedelta(days=trial_days)).isoformat()
+
+    lic = _load_licenses()
+    key = _gen_key(tier)
+    while key in lic:
+        key = _gen_key(tier)
+
+    entry = {
+        "key":            key,
+        "tier":           tier,
+        "email":          email,
+        "name":           name,
+        "company":        company,
+        "source":         source,
+        "platform":       "",
+        "activated":      datetime.utcnow().isoformat(),
+        "last_heartbeat": None,
+        "status":         "active",
+        "notes":          notes,
+        "expires_at":     expires_at,
+        "follow_up_date": follow_up,
+        "stage":          "trial" if trial_days else "active",
+        "sent_invite":    False,
+    }
+
+    email_result = {"sent": False, "reason": "not_requested"}
+    if send_email:
+        email_result = _send_invite_email(email, name, tier, key, expires_at)
+        entry["sent_invite"] = email_result.get("sent", False)
+
+    lic[key] = entry
+    _save_licenses(lic)
+    _log_event("issued", {"key": key[:8] + "…", "tier": tier, "email": email})
+    return {**entry, "email_result": email_result}
+
+
+@app.get("/api/admin/contacts")
+async def admin_contacts(_: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    if _auto_expire(lic):
+        _save_licenses(lic)
+
+    by_email: dict[str, dict] = {}
+    for entry in lic.values():
+        email = entry.get("email", "").lower()
+        if not email:
+            continue
+        if email not in by_email:
+            by_email[email] = {
+                "email":           email,
+                "name":            entry.get("name", ""),
+                "company":         entry.get("company", ""),
+                "source":          entry.get("source", ""),
+                "follow_up_date":  entry.get("follow_up_date", ""),
+                "stage":           entry.get("stage", ""),
+                "notes":           entry.get("notes", ""),
+                "keys":            [],
+                "latest_activity": "",
+            }
+        contact = by_email[email]
+        for field in ("name", "company", "source", "notes"):
+            if entry.get(field) and not contact[field]:
+                contact[field] = entry[field]
+        if entry.get("follow_up_date") and not contact["follow_up_date"]:
+            contact["follow_up_date"] = entry["follow_up_date"]
+        if entry.get("stage") == "converted":
+            contact["stage"] = "converted"
+        elif not contact["stage"] and entry.get("stage"):
+            contact["stage"] = entry["stage"]
+
+        contact["keys"].append({
+            "key":        entry["key"],
+            "tier":       entry["tier"],
+            "status":     entry["status"],
+            "expires_at": entry.get("expires_at"),
+            "activated":  entry.get("activated", ""),
+        })
+        act = entry.get("last_heartbeat") or entry.get("activated", "")
+        if act and act > contact["latest_activity"]:
+            contact["latest_activity"] = act
+
+    today = datetime.utcnow().date().isoformat()
+    result = sorted(
+        by_email.values(),
+        key=lambda c: (
+            0 if (c["follow_up_date"] and c["follow_up_date"] <= today) else 1,
+            c["latest_activity"],
+        ),
+    )
+    return result
+
+
+@app.patch("/api/admin/contacts/{email}")
+async def admin_update_contact(
+    email: str, request: Request, _: None = Depends(_require_admin)
+):
+    email = email.lower()
+    body  = await request.json()
+    lic   = _load_licenses()
+    matched = [v for v in lic.values() if v.get("email", "").lower() == email]
+    if not matched:
+        raise HTTPException(404, "Contact not found")
+    allowed = {"name", "company", "follow_up_date", "stage", "notes", "source"}
+    for entry in matched:
+        for field in allowed:
+            if field in body:
+                entry[field] = body[field]
+    _save_licenses(lic)
+    return {"ok": True, "updated": len(matched)}
+
+
+@app.post("/api/admin/licenses/{key}/send-invite")
+async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+    entry  = lic[key]
+    result = _send_invite_email(
+        entry["email"], entry.get("name", ""), entry["tier"],
+        key, entry.get("expires_at")
+    )
+    if result.get("sent"):
+        entry["sent_invite"] = True
+        _save_licenses(lic)
+    return result
 
 
 @app.post("/api/admin/licenses/{key}/expire")
