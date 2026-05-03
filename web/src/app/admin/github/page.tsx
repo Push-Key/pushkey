@@ -12,11 +12,7 @@ interface Repo {
   lastScan: string
 }
 
-const DEMO_REPOS: Repo[] = [
-  { id: "1", url: "https://github.com/example/backend-api", name: "example/backend-api", addedAt: "2026-04-20", status: "warning", findings: 2, lastScan: "2026-05-03T08:00:00" },
-  { id: "2", url: "https://github.com/example/frontend-app", name: "example/frontend-app", addedAt: "2026-04-22", status: "clean", findings: 0, lastScan: "2026-05-03T08:00:00" },
-  { id: "3", url: "https://github.com/example/infra-scripts", name: "example/infra-scripts", addedAt: "2026-04-28", status: "scanning", findings: 0, lastScan: "2026-05-03T09:00:00" },
-]
+const DEMO_REPOS: Repo[] = []
 
 const STATUS_CFG = {
   clean:    { icon: <CheckCircle size={15} />, text: "text-emerald-400", label: "Clean",    bg: "bg-emerald-900/30 border-emerald-800/50" },

@@ -1,16 +1,10 @@
 "use client"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { MessageSquare, ChevronDown, ChevronUp, CheckCircle, Clock, AlertCircle } from "lucide-react"
+import { adminApi, type SupportTicket } from "@/lib/admin-api"
+import { useAdmin } from "../_context"
 
-interface Ticket {
-  id: string
-  subject: string
-  message: string
-  email: string
-  priority: "low" | "medium" | "high"
-  status: "open" | "pending" | "resolved"
-  createdAt: string
-}
+type Ticket = SupportTicket & { createdAt?: string }
 
 const FAQS = [
   { q: "How do I rotate a compromised key?", a: "Go to Licenses → find the key → click Expire to immediately invalidate it, then generate a new key for the same tier and email it to the client. The client's app will prompt them to re-enter their license on next launch." },
@@ -36,27 +30,38 @@ const STATUS_CFG = {
 function fmtDate(iso: string) { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) }
 
 export default function SupportPage() {
+  const { secret } = useAdmin()
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [openFaq, setOpenFaq] = useState<number | null>(null)
   const [form, setForm] = useState({ subject: "", message: "", email: "", priority: "medium" as Ticket["priority"] })
   const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [busyId, setBusyId] = useState<string | null>(null)
 
-  function submitTicket() {
+  function load() {
+    if (!secret) return
+    adminApi.listTickets(secret).then(setTickets).catch(() => {})
+  }
+  useEffect(() => { load() }, [secret])
+
+  async function submitTicket() {
     if (!form.subject || !form.message) return
     setSubmitting(true)
-    setTimeout(() => {
-      setTickets(t => [{
-        id: Date.now().toString(),
-        ...form,
-        status: "open",
-        createdAt: new Date().toISOString(),
-      }, ...t])
+    try {
+      await adminApi.createTicket(secret, form)
       setForm({ subject: "", message: "", email: "", priority: "medium" })
       setSubmitted(true)
+      setTimeout(() => setSubmitted(false), 4000)
+      load()
+    } finally {
       setSubmitting(false)
-      setTimeout(() => setSubmitted(false), 3000)
-    }, 600)
+    }
+  }
+
+  async function changeStatus(id: string, status: SupportTicket["status"]) {
+    setBusyId(id)
+    try { await adminApi.updateTicket(secret, id, { status }); load() }
+    finally { setBusyId(null) }
   }
 
   return (
@@ -128,8 +133,9 @@ export default function SupportPage() {
           {/* Ticket list */}
           {tickets.length > 0 && (
             <div className="bg-[#0D1B2A] border border-white/8 rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-white/8">
-                <p className="font-semibold text-white">Your Tickets</p>
+              <div className="px-5 py-4 border-b border-white/8 flex items-center justify-between">
+                <p className="font-semibold text-white">All Tickets</p>
+                <p className="text-xs text-[#94A3B8]">{tickets.length} total</p>
               </div>
               <div className="divide-y divide-white/5">
                 {tickets.map(t => {
@@ -138,14 +144,27 @@ export default function SupportPage() {
                   return (
                     <div key={t.id} className="px-5 py-4">
                       <div className="flex items-start justify-between gap-3">
-                        <div>
+                        <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-white">{t.subject}</p>
-                          <p className="text-xs text-[#94A3B8] mt-0.5 line-clamp-2">{t.message}</p>
-                          <p className="text-xs text-[#94A3B8]/60 mt-1">{fmtDate(t.createdAt)}</p>
+                          {t.email && <p className="text-xs text-sky-400 mt-0.5">{t.email}</p>}
+                          <p className="text-xs text-[#94A3B8] mt-1 line-clamp-2">{t.message}</p>
+                          <p className="text-[10px] text-[#94A3B8]/60 mt-1">{fmtDate(t.created_at || t.createdAt || "")}</p>
+                          {t.replies && t.replies.length > 0 && (
+                            <p className="text-[10px] text-emerald-400 mt-1">{t.replies.length} repl{t.replies.length === 1 ? "y" : "ies"}</p>
+                          )}
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-col items-end gap-1.5 shrink-0">
                           <span className={`text-xs px-2 py-1 rounded-full border ${p.bg} ${p.color}`}>{p.label}</span>
-                          <span className={`flex items-center gap-1 text-xs ${s.color}`}>{s.icon} {s.label}</span>
+                          <select
+                            value={t.status}
+                            onChange={e => changeStatus(t.id, e.target.value as SupportTicket["status"])}
+                            disabled={busyId === t.id}
+                            className={`text-xs bg-[#060B14] border border-white/10 rounded-md px-2 py-1 outline-none disabled:opacity-40 ${s.color}`}
+                          >
+                            <option value="open">Open</option>
+                            <option value="pending">Pending</option>
+                            <option value="resolved">Resolved</option>
+                          </select>
                         </div>
                       </div>
                     </div>

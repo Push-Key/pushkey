@@ -1,0 +1,37 @@
+# fly.io deployment config — run `fly launch --copy-config` to deploy
+app = "pushkey-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PUSHKEY_DATA_DIR = "/data"
+  APP_URL          = "https://pushkey.app"
+
+[[mounts]]
+  source      = "pushkey_data"
+  destination = "/data"
+
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 100
+    hard_limit = 200
+
+  [[http_service.checks]]
+    grace_period  = "10s"
+    interval      = "30s"
+    method        = "GET"
+    timeout       = "5s"
+    path          = "/api/v1/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
