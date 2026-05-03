@@ -251,7 +251,6 @@ def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at
         return {"sent": False, "reason": "smtp_not_configured"}
     import smtplib
     from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
 
     display_name = name or to_email.split("@")[0]
     tier_label   = tier.capitalize()
@@ -384,7 +383,7 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
         raise HTTPException(400, f"trial_days must be one of: {list(VALID_TRIAL_DAYS)} or null")
 
     expires_at = None
-    if trial_days:
+    if trial_days is not None:
         expires_at = (datetime.utcnow() + timedelta(days=trial_days)).isoformat()
 
     lic = _load_licenses()
