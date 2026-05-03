@@ -5172,20 +5172,44 @@ class AppFrame(ctk.CTkFrame):
         make_btn(right_btns, "+ New Key", self._show_add_key_modal,
                  fg_color=C["accent"], text_color=C["bg"], height=30).pack(side="left", padx=(6, 0))
 
-        # ── Search bar ── (icon + label inside so the affordance is unambiguous)
-        # 2px stronger border so it's visible on both themes.
-        search_wrap = ctk.CTkFrame(self.keys_frame, fg_color=C["bg3"],
-                                    corner_radius=8, border_width=2,
-                                    border_color=C["border2"])
-        search_wrap.pack(fill="x", padx=20, pady=(12, 4))
-        ctk.CTkLabel(search_wrap, text="", image=icon("search", 16, C["text3"]),
-                     fg_color="transparent", width=22).pack(side="left", padx=(8, 0))
-        ctk.CTkEntry(
-            search_wrap, textvariable=self._search_var,
-            placeholder_text="Search keys by name, provider, or category…",
-            fg_color="transparent", text_color=C["text"],
-            border_width=0, font=FONT_SM,
-        ).pack(side="left", fill="x", expand=True, padx=4, ipady=4)
+        # ── Search bar ── (CTkEntry's native border, no wrap-frame trick)
+        # Section label above the input so it's never ambiguous what this
+        # field is for, plus the entry has its own visible 2px border.
+        search_section = ctk.CTkFrame(self.keys_frame, fg_color="transparent")
+        search_section.pack(fill="x", padx=20, pady=(12, 4))
+
+        ctk.CTkLabel(
+            search_section, text="SEARCH",
+            font=(_UI_FONT, 9, "bold"), text_color=C["text3"], anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+
+        search_row = ctk.CTkFrame(search_section, fg_color="transparent")
+        search_row.pack(fill="x")
+
+        # Inline search icon (decorative)
+        ctk.CTkLabel(
+            search_row, text="", image=icon("search", 18, C["text2"]),
+            fg_color="transparent", width=24,
+        ).pack(side="left", padx=(0, 6))
+
+        # Native CTkEntry with strong border — most reliable widget for this
+        search_entry = ctk.CTkEntry(
+            search_row, textvariable=self._search_var,
+            placeholder_text="Search keys by name, provider, env, or category…",
+            font=FONT_SM,
+            fg_color=C["surface"], text_color=C["text"],
+            placeholder_text_color=C["text3"],
+            border_width=2, border_color=C["accent"],
+            corner_radius=8, height=36,
+        )
+        search_entry.pack(side="left", fill="x", expand=True, ipady=2)
+        # Subtle clear-shortcut hint
+        ctk.CTkLabel(
+            search_row, text="esc to clear", font=(_UI_FONT, 9),
+            text_color=C["text3"],
+        ).pack(side="left", padx=(8, 0))
+        search_entry.bind("<Escape>", lambda e: self._search_var.set(""))
+
         self._search_var.trace_add("write", self._on_search_change)
 
         # ── Env filter pills ──
