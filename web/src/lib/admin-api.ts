@@ -9,6 +9,50 @@ export interface License {
   last_heartbeat: string | null
   status: "active" | "expired" | "revoked"
   notes: string
+  // CRM fields (may be absent on older records)
+  name?: string
+  company?: string
+  source?: string
+  follow_up_date?: string
+  expires_at?: string | null
+  stage?: "trial" | "active" | "converted" | "churned" | "cold"
+  sent_invite?: boolean
+}
+
+export interface ContactKey {
+  key: string
+  tier: License["tier"]
+  status: License["status"]
+  expires_at: string | null
+  activated: string
+}
+
+export interface Contact {
+  email: string
+  name: string
+  company: string
+  source: string
+  follow_up_date: string
+  stage: string
+  notes: string
+  keys: ContactKey[]
+  latest_activity: string
+}
+
+export interface IssueKeyRequest {
+  email: string
+  tier: License["tier"]
+  name?: string
+  company?: string
+  source?: string
+  trial_days?: 7 | 14 | 30 | null
+  follow_up_date?: string
+  notes?: string
+  send_email: boolean
+}
+
+export interface IssueKeyResponse extends License {
+  email_result: { sent: boolean; reason?: string }
 }
 
 export interface AdminStats {
@@ -63,6 +107,33 @@ export const adminApi = {
       event_totals: Record<string, number>
     }>(s, "/api/admin/analytics"),
 
+  issueKey: (s: string, payload: IssueKeyRequest) =>
+    call<IssueKeyResponse>(s, "/api/admin/licenses/issue", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  getContacts: (s: string) =>
+    call<Contact[]>(s, "/api/admin/contacts"),
+
+  updateContact: (
+    s: string,
+    email: string,
+    data: Partial<Pick<Contact, "name" | "company" | "follow_up_date" | "stage" | "notes" | "source">>
+  ) =>
+    call<{ ok: boolean; updated: number }>(
+      s,
+      `/api/admin/contacts/${encodeURIComponent(email)}`,
+      { method: "PATCH", body: JSON.stringify(data) }
+    ),
+
+  sendInvite: (s: string, key: string) =>
+    call<{ sent: boolean; reason?: string }>(
+      s,
+      `/api/admin/licenses/${encodeURIComponent(key)}/send-invite`,
+      { method: "POST" }
+    ),
+
   async exportCsv(s: string): Promise<void> {
     const r = await fetch(`${API}/api/admin/export`, { headers: h(s) })
     if (!r.ok) throw new Error("Export failed")
@@ -96,4 +167,20 @@ export function timeAgo(iso: string | null): string {
 
 export function fmtDate(iso: string): string {
   return new Date(iso).toISOString().slice(0, 10)
+}
+
+export function fmtDateOrDash(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  return new Date(iso).toISOString().slice(0, 10)
+}
+
+export function isExpiringSoon(iso: string | null | undefined): boolean {
+  if (!iso) return false
+  const diff = new Date(iso).getTime() - Date.now()
+  return diff > 0 && diff < 7 * 24 * 60 * 60 * 1000
+}
+
+export function isOverdue(dateStr: string | null | undefined): boolean {
+  if (!dateStr) return false
+  return dateStr <= new Date().toISOString().slice(0, 10)
 }
