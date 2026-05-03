@@ -31,7 +31,7 @@ def vault_setup(tmp_path, monkeypatch):
 def test_rotation_timestamp(vault_setup):
     """Track when keys were rotated."""
     password, vault = vault_setup
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
 
     assert loaded["OPENAI_API_KEY"]["rotated_at"] is not None
     assert isinstance(loaded["OPENAI_API_KEY"]["rotated_at"], str)
@@ -57,12 +57,12 @@ def test_rotation_history_preserved(tmp_path, monkeypatch):
     pushkey.save_vault(vault, password)
 
     # Simulate rotation
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
     loaded["STRIPE_KEY"]["previous"] = loaded["STRIPE_KEY"]["current"]
     loaded["STRIPE_KEY"]["current"] = "rk_live_new"
     pushkey.save_vault(loaded, password)
 
-    rotated = pushkey.load_vault(password)
+    rotated, _ = pushkey.load_vault(password)
     assert rotated["STRIPE_KEY"]["previous"] == "rk_live_old"
     assert rotated["STRIPE_KEY"]["current"] == "rk_live_new"
 
@@ -89,7 +89,7 @@ def test_health_status_age_tracking(tmp_path, monkeypatch):
     }
     pushkey.save_vault(vault, password)
 
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
     rotated_date = datetime.fromisoformat(loaded["ANTHROPIC_KEY"]["rotated_at"])
     days_old = (datetime.now() - rotated_date).days
 
@@ -107,6 +107,6 @@ def test_cannot_rotate_nonexistent_key(tmp_path, monkeypatch):
     vault = {}
     pushkey.save_vault(vault, password)
 
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
     # Key doesn't exist, can't rotate
     assert "NONEXISTENT_KEY" not in loaded
