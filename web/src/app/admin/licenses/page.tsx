@@ -2,7 +2,7 @@
 import { useEffect, useState, useMemo, useCallback, Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import { Search, Download, Plus, ChevronLeft, ChevronRight, X, Check, Copy } from "lucide-react"
-import { adminApi, maskKey, timeAgo, fmtDate, type License } from "@/lib/admin-api"
+import { adminApi, maskKey, timeAgo, fmtDate, fmtDateOrDash, isExpiringSoon, type License, type IssueKeyRequest, type IssueKeyResponse } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
 // ── Tier config ──────────────────────────────────────────────────
@@ -284,6 +284,154 @@ function PageBtn({ label, icon, onClick, disabled, active }: {
   )
 }
 
+// ── Issue Key Panel ──────────────────────────────────────────────
+const SOURCES = ["Twitter", "ProductHunt", "Referral", "Direct", "Conference", "Other"]
+const TRIAL_OPTIONS: { label: string; value: 7 | 14 | 30 | null }[] = [
+  { label: "No expiry", value: null },
+  { label: "7 days",    value: 7 },
+  { label: "14 days",   value: 14 },
+  { label: "30 days",   value: 30 },
+]
+
+function IssueKeyPanel({ onClose, onIssued }: { onClose: () => void; onIssued: () => void }) {
+  const { secret } = useAdmin()
+  const [form, setForm] = useState<IssueKeyRequest>({
+    email: "", tier: "pro", name: "", company: "", source: "Direct",
+    trial_days: 14, follow_up_date: "", notes: "", send_email: true,
+  })
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState("")
+  const [success, setSuccess] = useState("")
+
+  function set<K extends keyof IssueKeyRequest>(k: K, v: IssueKeyRequest[K]) {
+    setForm(f => ({ ...f, [k]: v }))
+  }
+
+  async function submit() {
+    if (!form.email.trim()) { setError("Email is required"); return }
+    setLoading(true); setError("")
+    try {
+      const res = await adminApi.issueKey(secret, form)
+      const emailMsg = res.email_result.sent
+        ? " Invite sent."
+        : res.email_result.reason === "smtp_not_configured"
+        ? " (SMTP not configured — key generated only)"
+        : ` (Email failed: ${res.email_result.reason})`
+      setSuccess(`Key issued: ${res.key.slice(0, 12)}…${emailMsg}`)
+      onIssued()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const inputCls = "w-full bg-[#060B14] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-[#475569] focus:outline-none focus:border-[#7C3AED]/60"
+  const labelCls = "text-[10px] uppercase tracking-wider text-[#94A3B8] mb-1 block"
+
+  return (
+    <div className="w-80 shrink-0 border-l border-white/8 bg-[#0D1B2A] flex flex-col">
+      <div className="flex items-center justify-between px-5 py-4 border-b border-white/8">
+        <span className="text-sm font-bold text-white">Issue New Key</span>
+        <button onClick={onClose} className="text-[#94A3B8] hover:text-white"><X size={16} /></button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div>
+          <label className={labelCls}>Email *</label>
+          <input className={inputCls} placeholder="sarah@acme.com" value={form.email}
+            onChange={e => set("email", e.target.value)} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Name</label>
+            <input className={inputCls} placeholder="Sarah Chen" value={form.name ?? ""}
+              onChange={e => set("name", e.target.value)} />
+          </div>
+          <div>
+            <label className={labelCls}>Company</label>
+            <input className={inputCls} placeholder="Acme Corp" value={form.company ?? ""}
+              onChange={e => set("company", e.target.value)} />
+          </div>
+        </div>
+
+        <div>
+          <label className={labelCls}>Tier *</label>
+          <select className={inputCls} value={form.tier}
+            onChange={e => set("tier", e.target.value as IssueKeyRequest["tier"])}>
+            {(["free","starter","pro","team","enterprise"] as const).map(t => (
+              <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Trial Duration</label>
+            <select className={inputCls} value={form.trial_days === null ? "null" : String(form.trial_days)}
+              onChange={e => {
+                const v = e.target.value
+                set("trial_days", v === "null" ? null : Number(v) as 7 | 14 | 30)
+              }}>
+              {TRIAL_OPTIONS.map(o => (
+                <option key={String(o.value)} value={String(o.value)}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls}>Source</label>
+            <select className={inputCls} value={form.source ?? "Direct"}
+              onChange={e => set("source", e.target.value)}>
+              {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className={labelCls}>Follow-up Date</label>
+          <input type="date" className={inputCls} value={form.follow_up_date ?? ""}
+            onChange={e => set("follow_up_date", e.target.value)} />
+        </div>
+
+        <div>
+          <label className={labelCls}>Notes</label>
+          <textarea className={`${inputCls} h-20 resize-none`} placeholder="Met at NYC meetup…"
+            value={form.notes ?? ""} onChange={e => set("notes", e.target.value)} />
+        </div>
+
+        <div className="bg-[#060B14] rounded-lg p-3 border border-white/6">
+          <label className={labelCls}>Send email?</label>
+          <div className="flex gap-2">
+            <button
+              onClick={() => set("send_email", true)}
+              className={`flex-1 text-xs py-2 rounded-md border transition-colors ${form.send_email ? "bg-[#7C3AED]/20 border-[#7C3AED]/60 text-violet-300" : "border-white/10 text-[#94A3B8]"}`}>
+              ✉ Send invite
+            </button>
+            <button
+              onClick={() => set("send_email", false)}
+              className={`flex-1 text-xs py-2 rounded-md border transition-colors ${!form.send_email ? "bg-white/8 border-white/20 text-white" : "border-white/10 text-[#94A3B8]"}`}>
+              Generate only
+            </button>
+          </div>
+        </div>
+
+        {error   && <p className="text-xs text-red-400">{error}</p>}
+        {success && <p className="text-xs text-emerald-400">{success}</p>}
+      </div>
+
+      <div className="px-5 py-4 border-t border-white/8">
+        <button
+          onClick={submit}
+          disabled={loading}
+          className="w-full bg-[#7C3AED] hover:bg-[#6D28D9] disabled:opacity-50 text-white text-sm font-semibold py-2.5 rounded-lg transition-colors">
+          {loading ? "Issuing…" : "Issue Key →"}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Inner page (uses useSearchParams — must be inside Suspense) ──
 const TIER_TABS = ["All", "Free", "Starter", "Pro", "Team", "Ent", "Revoked"] as const
 const PAGE_SIZE = 10
@@ -303,6 +451,7 @@ function LicensesInner() {
   const [showGenerate, setShowGenerate] = useState(searchParams.get("generate") === "1")
   const [viewLic, setViewLic] = useState<License | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [showIssuePanel, setShowIssuePanel] = useState(false)
 
   const load = useCallback(() => {
     if (!secret) return
@@ -395,6 +544,12 @@ function LicensesInner() {
           >
             <Plus size={14} /> Generate Key
           </button>
+          <button
+            onClick={() => setShowIssuePanel(p => !p)}
+            className="flex items-center gap-2 bg-[#7C3AED] hover:bg-[#6D28D9] text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">
+            <Plus size={15} />
+            Issue Key
+          </button>
         </div>
       </div>
 
@@ -416,7 +571,9 @@ function LicensesInner() {
         <StatCard label="Revoked" value={stats?.revoked ?? 0} sub={`${stats?.revoked ?? 0} total revoked`} accent="bg-red-500" />
       </div>
 
-      {/* Table */}
+      {/* Table + Issue Panel */}
+      <div className="flex flex-1 min-h-0">
+      <div className="flex-1 overflow-auto">
       <div className="bg-[#0D1B2A] border border-white/8 rounded-xl overflow-hidden">
         {/* Filter tabs */}
         <div className="flex items-center gap-1 px-5 pt-4 pb-3 border-b border-white/8">
@@ -440,7 +597,7 @@ function LicensesInner() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/8">
-                {["License Key", "Tier", "Platform", "Activated", "Last Heartbeat", "Status", "Actions"].map(h => (
+                {["License Key", "Tier", "Platform", "Activated", "Last Heartbeat", "Expires", "Status", "Actions"].map(h => (
                   <th key={h} className="px-5 py-3 text-left text-[10px] tracking-widest uppercase text-[#94A3B8] font-medium whitespace-nowrap">
                     {h}
                   </th>
@@ -449,16 +606,38 @@ function LicensesInner() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-5 py-12 text-center text-[#94A3B8]">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-5 py-12 text-center text-[#94A3B8]">Loading…</td></tr>
               ) : pageData.length === 0 ? (
-                <tr><td colSpan={7} className="px-5 py-12 text-center text-[#94A3B8]">No licenses found</td></tr>
+                <tr><td colSpan={8} className="px-5 py-12 text-center text-[#94A3B8]">No licenses found</td></tr>
               ) : pageData.map(lic => (
                 <tr key={lic.key} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors">
-                  <td className="px-5 py-4 font-mono text-sm text-sky-400 whitespace-nowrap">{maskKey(lic.key)}</td>
+                  <td className="px-5 py-4 whitespace-nowrap">
+                    <p className="font-mono text-sm text-sky-400">{maskKey(lic.key)}</p>
+                    {(lic.name || lic.company) && (
+                      <p className="text-[10px] text-[#64748B] mt-0.5">
+                        {[lic.name, lic.company].filter(Boolean).join(" · ")}
+                      </p>
+                    )}
+                  </td>
                   <td className="px-5 py-4"><TierBadge tier={lic.tier} /></td>
                   <td className="px-5 py-4"><PlatformCell platform={lic.platform} /></td>
                   <td className="px-5 py-4 text-[#94A3B8] whitespace-nowrap">{fmtDate(lic.activated)}</td>
                   <td className="px-5 py-4 text-[#94A3B8] whitespace-nowrap">{timeAgo(lic.last_heartbeat)}</td>
+                  <td className="px-4 py-3 text-sm whitespace-nowrap">
+                    {lic.expires_at ? (
+                      <span className={
+                        lic.expires_at < new Date().toISOString()
+                          ? "text-red-400"
+                          : isExpiringSoon(lic.expires_at)
+                          ? "text-amber-400"
+                          : "text-[#94A3B8]"
+                      }>
+                        {fmtDateOrDash(lic.expires_at)}
+                      </span>
+                    ) : (
+                      <span className="text-[#475569]">—</span>
+                    )}
+                  </td>
                   <td className="px-5 py-4"><StatusBadge status={lic.status} /></td>
                   <td className="px-5 py-4">
                     <div className="flex items-center gap-1.5">
@@ -511,6 +690,14 @@ function LicensesInner() {
           </div>
         </div>
       </div>
+      </div>{/* flex-1 overflow-auto */}
+      {showIssuePanel && (
+        <IssueKeyPanel
+          onClose={() => setShowIssuePanel(false)}
+          onIssued={() => { setShowIssuePanel(false); load(); refreshStats() }}
+        />
+      )}
+      </div>{/* flex flex-1 min-h-0 */}
     </div>
   )
 }
