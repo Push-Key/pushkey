@@ -1565,7 +1565,7 @@ class LoginFrame(ctk.CTkFrame):
                 text_color=C["accent"], cursor="hand2",
             )
             link.pack(side="left")
-            link.bind("<Button-1>", lambda e: self._show_restore_hint())
+            link.bind("<Button-1>", lambda e: self._show_forgot_password())
 
         # Card bottom padding (compact)
         ctk.CTkFrame(card, fg_color="transparent", height=18).pack()
@@ -1607,36 +1607,138 @@ class LoginFrame(ctk.CTkFrame):
         eye.pack(side="left", padx=(6, 0))
         return entry, eye
 
-    def _show_restore_hint(self):
-        """Brief modal explaining how to restore a vault from backup."""
+    def _show_forgot_password(self):
+        """Forgot password dialog. Uses recovery key for V3 vaults; shows restore hint for V2."""
         win = ctk.CTkToplevel(self)
-        win.title("Restore from backup")
-        win.geometry("440x260")
+        win.title("Forgot Password")
+        win.geometry("460x400")
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
+        win.lift()
+        win.resizable(False, False)
 
         ctk.CTkFrame(win, fg_color=C["accent"], height=3).pack(fill="x")
-        ctk.CTkLabel(win, text="Restore from backup",
+
+        # Detect vault format
+        is_v3 = False
+        if VAULT_FILE.exists():
+            raw = VAULT_FILE.read_bytes()
+            is_v3 = raw.startswith(_V3_MAGIC)
+
+        ctk.CTkLabel(win, text="Forgot Password",
                      font=FONT_H2, text_color=C["text"]
                      ).pack(pady=(20, 4), padx=20, anchor="w")
+
+        if not is_v3:
+            ctk.CTkLabel(
+                win,
+                text=(
+                    "No recovery key is set up for this vault.\n\n"
+                    "Pushkey cannot recover a forgotten master password.\n"
+                    "If you have an exported backup file, copy it to:\n"
+                    f"  {VAULT_FILE.parent}\n"
+                    "as 'vault.enc', then unlock with the password you\n"
+                    "used when you created that backup."
+                ),
+                font=FONT_SM, text_color=C["text2"],
+                anchor="w", justify="left",
+            ).pack(padx=20, pady=(0, 16), anchor="w")
+            make_btn(win, "Got it", win.destroy,
+                     fg_color=C["accent"], text_color="#FFFFFF",
+                     width=120, height=34).pack(pady=(0, 16))
+            return
+
+        # V3 vault — show recovery flow
         ctk.CTkLabel(
             win,
-            text=(
-                "Pushkey cannot recover a forgotten master password — the\n"
-                "vault is end-to-end encrypted with your password as the key.\n\n"
-                "If you have an exported backup file, copy it to:\n"
-                f"  {VAULT_FILE.parent}\n"
-                "as 'vault.enc', then unlock with the password you used\n"
-                "when you created that backup."
-            ),
+            text="Enter your recovery key to set a new master password.",
             font=FONT_SM, text_color=C["text2"],
-            anchor="w", justify="left",
-        ).pack(padx=20, pady=(0, 16), anchor="w")
+        ).pack(padx=20, anchor="w")
 
-        make_btn(win, "Got it", win.destroy,
+        form = ctk.CTkFrame(win, fg_color="transparent")
+        form.pack(padx=20, pady=(12, 0), fill="x")
+
+        ctk.CTkLabel(form, text="RECOVERY KEY", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+        rec_entry = ctk.CTkEntry(
+            form, font=FONT_MONO,
+            fg_color=C["bg3"], text_color=C["text"],
+            placeholder_text="PUSH-XXXX-XXXX-XXXX-XXXX",
+            placeholder_text_color=C["text3"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=40,
+        )
+        rec_entry.pack(fill="x")
+
+        ctk.CTkFrame(form, fg_color="transparent", height=8).pack()
+        ctk.CTkLabel(form, text="NEW PASSWORD", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+        pw_entry = ctk.CTkEntry(
+            form, show="●", font=FONT_MONO,
+            fg_color=C["bg3"], text_color=C["text"],
+            placeholder_text="New master password",
+            placeholder_text_color=C["text3"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=40,
+        )
+        pw_entry.pack(fill="x")
+
+        ctk.CTkFrame(form, fg_color="transparent", height=4).pack()
+        ctk.CTkLabel(form, text="CONFIRM PASSWORD", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+        pw2_entry = ctk.CTkEntry(
+            form, show="●", font=FONT_MONO,
+            fg_color=C["bg3"], text_color=C["text"],
+            placeholder_text="Re-enter new password",
+            placeholder_text_color=C["text3"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=40,
+        )
+        pw2_entry.pack(fill="x")
+
+        err_lbl = ctk.CTkLabel(form, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack(pady=(6, 0))
+
+        def _submit():
+            rec_code = rec_entry.get().strip()
+            new_pw = pw_entry.get().strip()
+            new_pw2 = pw2_entry.get().strip()
+            if not rec_code:
+                err_lbl.configure(text="Enter your recovery key")
+                return
+            if not new_pw:
+                err_lbl.configure(text="Enter a new password")
+                return
+            if new_pw != new_pw2:
+                err_lbl.configure(text="Passwords don't match")
+                return
+            try:
+                raw = VAULT_FILE.read_bytes()
+                new_token = rekey_vault(raw, rec_code, new_pw)
+                tmp = VAULT_FILE.with_suffix('.tmp')
+                tmp.write_bytes(new_token)
+                os.replace(str(tmp), str(VAULT_FILE))
+                log_event("master password reset via recovery key")
+                win.destroy()
+                self.err.configure(
+                    text="Password reset — unlock with your new password",
+                    text_color=C["green"],
+                )
+                self.pw.delete(0, "end")
+            except ValueError as e:
+                if "wrong_recovery_code" in str(e):
+                    err_lbl.configure(text="Recovery key incorrect — check your written copy")
+                else:
+                    err_lbl.configure(text=f"Error: {e}")
+
+        make_btn(form, "Reset Password", _submit,
                  fg_color=C["accent"], text_color="#FFFFFF",
-                 width=120, height=34).pack(pady=(0, 16))
+                 height=38).pack(fill="x", pady=(12, 0))
+        rec_entry.bind("<Return>", lambda e: pw_entry.focus_set())
+        pw_entry.bind("<Return>", lambda e: pw2_entry.focus_set())
+        pw2_entry.bind("<Return>", lambda e: _submit())
+        ctk.CTkFrame(win, fg_color="transparent", height=12).pack()
 
     def _toggle_reveal(self):
         self._reveal_state = not self._reveal_state
