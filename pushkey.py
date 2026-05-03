@@ -2268,123 +2268,206 @@ class LoginFrame(ctk.CTkFrame):
         self.is_new = not VAULT_FILE.exists()
         self._reveal_state = False
 
-        # Vertical centering — empty spacer above pushes the card down
+        # ── Page chrome: top spacer for vertical centering, footer pinned ──
+        # Footer (sits on top of bottom edge) — vault path + version line
+        footer = ctk.CTkFrame(self, fg_color="transparent", height=40)
+        footer.pack(side="bottom", fill="x", pady=(0, 14))
+        footer.pack_propagate(False)
+        try:
+            vault_disp = "~" + str(VAULT_FILE).replace(str(Path.home()), "")
+        except Exception:
+            vault_disp = str(VAULT_FILE)
+        ctk.CTkLabel(
+            footer, text=f"Vault  ·  {vault_disp}",
+            font=(_UI_FONT, 9), text_color=C["text3"]
+        ).pack()
+
+        # Top spacer to center the card vertically
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
-        # ── Card with cyan accent strip on top ──
-        # The logo image already carries the wordmark + tagline so the card
-        # is leaner: logo block, password row, CTA. No redundant text.
-        card = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=14,
+        # ── Sign-in card ──
+        card = ctk.CTkFrame(self, fg_color=C["surface"], corner_radius=16,
                             border_width=1, border_color=C["border"])
-        card.pack(pady=12, padx=200, fill="x")
+        card.pack(padx=240, fill="x")
 
-        # Cyan accent stripe at the very top of the card
+        # Cyan accent stripe — single visual anchor at the top of the card
         ctk.CTkFrame(card, fg_color=C["accent"], height=3, corner_radius=0
                      ).pack(fill="x")
 
-        # ── Logo block (the PNG is the brand) ──
+        # ── Logo (the PNG already carries wordmark + tagline) ──
         logo_box = ctk.CTkFrame(card, fg_color="transparent")
-        logo_box.pack(pady=(20, 6), padx=32)
-
-        # Placeholder — replaced in _load_login_logo with the real PNG (which
-        # already includes the PUSHKEY wordmark + offline-first tagline)
-        self._logo_slot = ctk.CTkLabel(logo_box, text="PUSHKEY",
-                                       font=(_UI_FONT, 32, "bold"),
-                                       text_color=C["accent"])
+        logo_box.pack(pady=(36, 8))
+        self._logo_slot = ctk.CTkLabel(
+            logo_box, text="PUSHKEY",
+            font=(_UI_FONT, 28, "bold"), text_color=C["accent"]
+        )
         self._logo_slot.pack()
         self._logo_card = card
         self.after(0, self._load_login_logo)
 
-        # Single one-line action prompt under the logo
-        prompt = ("Create a master password to get started"
-                  if self.is_new
-                  else "Enter your master password to unlock")
-        ctk.CTkLabel(card, text=prompt, font=FONT_SM,
-                     text_color=C["text3"]).pack(pady=(0, 18))
+        # ── Welcome heading + subtitle ──
+        if self.is_new:
+            heading, subtitle = "Create your vault", "Set a master password to begin"
+        else:
+            heading, subtitle = "Welcome back", "Unlock your vault to continue"
+        ctk.CTkLabel(card, text=heading, font=(_UI_FONT, 22, "bold"),
+                     text_color=C["text"]).pack(pady=(8, 4))
+        ctk.CTkLabel(card, text=subtitle, font=FONT_SM,
+                     text_color=C["text3"]).pack(pady=(0, 26))
 
         # ── Form ──
         form = ctk.CTkFrame(card, fg_color="transparent")
-        form.pack(padx=36, fill="x")
+        form.pack(padx=44, fill="x")
 
-        # Master password label with lock icon
-        pw_lbl_row = ctk.CTkFrame(form, fg_color="transparent")
-        pw_lbl_row.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(pw_lbl_row, text="", image=icon("lock", 12, C["text3"]),
-                     width=14).pack(side="left")
-        ctk.CTkLabel(pw_lbl_row, text="MASTER PASSWORD",
-                     font=(_UI_FONT, 9, "bold"),
-                     text_color=C["text3"]).pack(side="left", padx=(4, 0))
-
-        # Password input + reveal toggle
-        pw_row = ctk.CTkFrame(form, fg_color="transparent")
-        pw_row.pack(fill="x")
-        self.pw = ctk.CTkEntry(
-            pw_row, show="●", font=FONT_MONO,
-            fg_color=C["bg3"], text_color=C["text"],
-            border_color=C["accent"], border_width=2,
-            placeholder_text="Enter your password",
-            placeholder_text_color=C["text3"],
-            corner_radius=8, height=44,
+        # Password field block
+        self._pw_label_row(form, "MASTER PASSWORD")
+        self.pw, self._reveal_btn = self._pw_input_with_eye(
+            form, placeholder="Enter your password"
         )
-        self.pw.pack(side="left", fill="x", expand=True, ipady=2)
-        self.pw.focus_set()
         self.pw.bind("<Return>", lambda e: self.unlock())
-
-        self._reveal_btn = ctk.CTkButton(
-            pw_row, text="", image=icon("eye", 16, C["text2"]),
-            command=self._toggle_reveal,
-            fg_color=C["bg3"], hover_color=C["btn_hover"],
-            border_width=2, border_color=C["accent"],
-            corner_radius=8, height=44, width=44,
-        )
-        self._reveal_btn.pack(side="left", padx=(6, 0))
+        self.pw.focus_set()
 
         if self.is_new:
-            # Live password strength feedback
+            # Strength meter (live)
             self._strength_var = tk.StringVar(value="")
             self._strength_lbl = ctk.CTkLabel(
                 form, textvariable=self._strength_var,
                 font=(_UI_FONT, 9, "bold"),
                 text_color=C["text3"], anchor="w",
             )
-            self._strength_lbl.pack(anchor="w", pady=(6, 0))
+            self._strength_lbl.pack(anchor="w", pady=(8, 0))
             self.pw.bind("<KeyRelease>", lambda e: self._update_strength())
 
-            ctk.CTkLabel(form, text="CONFIRM PASSWORD",
-                         font=(_UI_FONT, 9, "bold"),
-                         text_color=C["text3"]
-                         ).pack(anchor="w", pady=(14, 6))
+            # Confirm field
+            ctk.CTkFrame(form, fg_color="transparent", height=14).pack()
+            self._pw_label_row(form, "CONFIRM PASSWORD")
             self.pw2 = ctk.CTkEntry(
                 form, show="●", font=FONT_MONO,
                 fg_color=C["bg3"], text_color=C["text"],
-                border_color=C["border2"], border_width=2,
-                placeholder_text="Re-enter password",
+                placeholder_text="Re-enter your password",
                 placeholder_text_color=C["text3"],
-                corner_radius=8, height=44,
+                border_color=C["border2"], border_width=1,
+                corner_radius=10, height=46,
             )
             self.pw2.pack(fill="x", ipady=2)
             self.pw2.bind("<Return>", lambda e: self.unlock())
 
-        # Primary CTA
+        # ── CTA button ──
         ctk.CTkButton(
             form,
-            text="  " + ("Create Vault" if self.is_new else "Unlock Vault"),
-            image=icon("key" if self.is_new else "shield", 16, "#FFFFFF"),
-            compound="left",
+            text="Create Vault" if self.is_new else "Unlock Vault",
             command=self.unlock,
             fg_color=C["accent"], hover_color=C["accent2"],
-            text_color="#FFFFFF", font=(_UI_FONT, 13, "bold"),
-            corner_radius=8, height=46,
-        ).pack(fill="x", pady=(18, 0))
+            text_color="#FFFFFF",
+            font=(_UI_FONT, 14, "bold"),
+            corner_radius=10, height=48,
+        ).pack(fill="x", pady=(22, 0))
 
-        self.err = ctk.CTkLabel(form, text="", font=FONT_XS, text_color=C["red"])
-        self.err.pack(pady=(8, 0))
+        # Inline error/status line
+        self.err = ctk.CTkLabel(form, text="", font=FONT_XS,
+                                text_color=C["red"])
+        self.err.pack(pady=(10, 0))
 
-        # Trust chips removed — the logo's tagline ("Offline-first API key vault")
-        # already carries that signal; the chips were redundant.
-        ctk.CTkFrame(card, fg_color="transparent", height=24).pack()
+        # ── Secondary action / safety note ──
+        if self.is_new:
+            note = ctk.CTkFrame(form, fg_color=C["amber_bg"],
+                                corner_radius=8, border_width=1,
+                                border_color=C["amber"])
+            note.pack(fill="x", pady=(14, 0))
+            note_inner = ctk.CTkFrame(note, fg_color="transparent")
+            note_inner.pack(padx=10, pady=8)
+            ctk.CTkLabel(note_inner, text="", image=icon("shield", 14, C["amber"]),
+                         width=18).pack(side="left")
+            ctk.CTkLabel(
+                note_inner,
+                text="This password cannot be recovered. Store it safely.",
+                font=FONT_XS, text_color=C["amber"], anchor="w", justify="left",
+                wraplength=320,
+            ).pack(side="left", padx=(4, 0))
+        else:
+            link_row = ctk.CTkFrame(form, fg_color="transparent")
+            link_row.pack(pady=(16, 0))
+            ctk.CTkLabel(link_row, text="Forgot password?",
+                         font=FONT_XS, text_color=C["text3"]
+                         ).pack(side="left", padx=(0, 4))
+            link = ctk.CTkLabel(
+                link_row, text="Restore from backup",
+                font=(_UI_FONT, 11, "bold"),
+                text_color=C["accent"], cursor="hand2",
+            )
+            link.pack(side="left")
+            link.bind("<Button-1>", lambda e: self._show_restore_hint())
 
+        # Bottom padding inside card
+        ctk.CTkFrame(card, fg_color="transparent", height=32).pack()
+
+        # Bottom spacer to share centering equally with top
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
+
+    # ── helpers ──────────────────────────────────────────────
+
+    def _pw_label_row(self, parent, text):
+        """Row with a small lock icon + uppercase field label."""
+        r = ctk.CTkFrame(parent, fg_color="transparent")
+        r.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(r, text="", image=icon("lock", 12, C["text3"]),
+                     width=14).pack(side="left")
+        ctk.CTkLabel(r, text=text, font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(side="left", padx=(4, 0))
+
+    def _pw_input_with_eye(self, parent, placeholder):
+        """Password entry + reveal toggle in a single horizontal row."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+        entry = ctk.CTkEntry(
+            row, show="●", font=FONT_MONO,
+            fg_color=C["bg3"], text_color=C["text"],
+            placeholder_text=placeholder,
+            placeholder_text_color=C["text3"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=46,
+        )
+        entry.pack(side="left", fill="x", expand=True, ipady=2)
+        eye = ctk.CTkButton(
+            row, text="", image=icon("eye", 16, C["text2"]),
+            command=self._toggle_reveal,
+            fg_color=C["bg3"], hover_color=C["btn_hover"],
+            border_color=C["border2"], border_width=1,
+            corner_radius=10, height=46, width=46,
+        )
+        eye.pack(side="left", padx=(6, 0))
+        return entry, eye
+
+    def _show_restore_hint(self):
+        """Brief modal explaining how to restore a vault from backup."""
+        win = ctk.CTkToplevel(self)
+        win.title("Restore from backup")
+        win.geometry("440x260")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkFrame(win, fg_color=C["accent"], height=3).pack(fill="x")
+        ctk.CTkLabel(win, text="Restore from backup",
+                     font=FONT_H2, text_color=C["text"]
+                     ).pack(pady=(20, 4), padx=20, anchor="w")
+        ctk.CTkLabel(
+            win,
+            text=(
+                "Pushkey cannot recover a forgotten master password — the\n"
+                "vault is end-to-end encrypted with your password as the key.\n\n"
+                "If you have an exported backup file, copy it to:\n"
+                f"  {VAULT_FILE.parent}\n"
+                "as 'vault.enc', then unlock with the password you used\n"
+                "when you created that backup."
+            ),
+            font=FONT_SM, text_color=C["text2"],
+            anchor="w", justify="left",
+        ).pack(padx=20, pady=(0, 16), anchor="w")
+
+        make_btn(win, "Got it", win.destroy,
+                 fg_color=C["accent"], text_color="#FFFFFF",
+                 width=120, height=34).pack(pady=(0, 16))
 
     def _toggle_reveal(self):
         self._reveal_state = not self._reveal_state
@@ -2427,12 +2510,11 @@ class LoginFrame(ctk.CTkFrame):
         try:
             from PIL import Image as _PILImage
             pil = _PILImage.open(_logo_path).convert("RGBA")
-            # Logo PNG includes wordmark + tagline already, so scale wide
-            # rather than square. Keep the source aspect ratio so the
-            # rendered image isn't squashed.
+            # Logo PNG includes wordmark + tagline. Scale to a target height
+            # (140px) keeping aspect ratio so the rendered image isn't squashed.
             w, h = pil.size
-            target_w = 280
-            target_h = int(h * target_w / w)
+            target_h = 140
+            target_w = int(w * target_h / h)
             img = ctk.CTkImage(light_image=pil, dark_image=pil,
                                size=(target_w, target_h))
             self._logo_slot.configure(image=img, text="")
