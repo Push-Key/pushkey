@@ -4,6 +4,10 @@ import { ChevronDown } from "lucide-react"
 
 const FAQS = [
   {
+    q: "Is PushKey open source?",
+    a: "Yes — the desktop app and crypto layer are MIT licensed on GitHub. The AES-256-GCM vault, Argon2id key derivation, and all code that touches your secrets is fully auditable. You don't have to trust our claims. The cloud sync backend is proprietary — that's how we fund development and keep the core app free forever.",
+  },
+  {
     q: "Is PushKey really local-only? No cloud at all?",
     a: "Correct. By default, PushKey stores everything in ~/.pushkey/ on your machine with chmod 600 permissions. Starter+ plans add an optional encrypted cloud backup — but it's opt-in, and your keys are encrypted before leaving your device. We never see plaintext secrets.",
   },
@@ -26,10 +30,6 @@ const FAQS = [
   {
     q: "How does CI/CD sync work?",
     a: "Pro+ plans can push secrets directly to GitHub Actions secrets, Vercel environment variables, and Railway variables from inside PushKey. You authorize the integrations once, then manage secrets in one place instead of separate dashboards for each CI provider.",
-  },
-  {
-    q: "Is the source code available?",
-    a: "Yes — PushKey is open source (MIT license). The encryption, key derivation, and vault logic are all auditable. You don't have to trust our claims — you can read the code.",
   },
   {
     q: "What is the Vault Key USB?",

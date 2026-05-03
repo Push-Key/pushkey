@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { ArrowRight, Download, Lock, RefreshCw, FolderSync } from "lucide-react"
+import { ArrowRight, Download, Lock, RefreshCw, FolderSync, Github } from "lucide-react"
 
 const TERMINAL_LINES = [
   { text: "$ pushkey add OPENAI_API_KEY sk-proj-...", delay: 0, color: "#94A3B8" },
@@ -55,10 +55,21 @@ export default function Hero() {
         <div className="grid lg:grid-cols-2 gap-16 items-center">
           {/* Left: Copy */}
           <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono mb-6"
-              style={{ background: "rgba(0,220,130,0.1)", border: "1px solid rgba(0,220,130,0.25)", color: "#00DC82" }}>
-              <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-              AES-256-GCM · Zero network access · Open source
+            <div className="flex flex-wrap items-center gap-3 mb-6">
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono"
+                style={{ background: "rgba(0,220,130,0.1)", border: "1px solid rgba(0,220,130,0.25)", color: "#00DC82" }}>
+                <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                AES-256-GCM · Zero network access
+              </div>
+              <a href="https://github.com/ebothegreat/pushkey" target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono transition-all"
+                style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", color: "#94A3B8" }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)"; e.currentTarget.style.color = "#F8FAFC" }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)"; e.currentTarget.style.color = "#94A3B8" }}>
+                <Github size={11} />
+                Open source — audit the vault
+                <ArrowRight size={10} />
+              </a>
             </div>
 
             <h1 className="text-5xl lg:text-6xl xl:text-7xl font-bold leading-tight tracking-tight mb-6"
