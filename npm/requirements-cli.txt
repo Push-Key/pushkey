@@ -1,0 +1,5 @@
+# Pushkey CLI — runtime dependencies (open core)
+# GUI dependencies (customtkinter, pystray) are in the full app only.
+cryptography>=41.0.0
+argon2-cffi>=21.3.0
+pyotp>=2.9.0
