@@ -5167,121 +5167,107 @@ class AppFrame(ctk.CTkFrame):
         env_bg    = C.get(f"{'blue' if env=='dev' else 'amber' if env=='staging' else 'red' if env=='prod' else 'violet'}_bg",
                           C["bg3"])
 
-        # Compact row card. Whole row is clickable -> opens detail modal.
-        # Right-side columns use fixed-width slots so health pill + action
-        # buttons line up identically across every row. Provider column
-        # removed (the category color dot already conveys grouping) and
-        # value column shrunk so the key name keeps real estate on
-        # narrow windows.
+        # Thin list-row design (Linear/Notion-style). Borderless. Hairline
+        # divider between rows. Hover tint on entire row. Whole row click
+        # opens the detail modal. Heavy details (value, provider name) live
+        # in the modal — the row is for scanning + quick actions only.
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
-        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
-                           corner_radius=6, border_width=1,
-                           border_color=C["border"], cursor="hand2")
-        row.pack(fill="x", padx=4, pady=2)
-        # WHOLE row click -> open detail (user shouldn't have to hit only the name)
+        # Hairline divider above each row except the first
+        if self.keys_scroll.winfo_children():
+            ctk.CTkFrame(self.keys_scroll, fg_color=C["border"], height=1
+                         ).pack(fill="x", padx=2)
+
+        row = ctk.CTkFrame(self.keys_scroll, fg_color="transparent",
+                           corner_radius=4, cursor="hand2")
+        row.pack(fill="x", padx=2)
         row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
+        # Hover effect — bg lights up under cursor
+        def _hover_in(e, r=row): r.configure(fg_color=C["bg3"])
+        def _hover_out(e, r=row): r.configure(fg_color="transparent")
+        row.bind("<Enter>", _hover_in)
+        row.bind("<Leave>", _hover_out)
+
         inner = ctk.CTkFrame(row, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=5)
+        inner.pack(fill="x", padx=10, pady=4)
         inner.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-        # ── LEFT cluster: checkbox + category dot ──
+        # ── LEFT: checkbox + category dot + name ──
         sel_var = ctk.BooleanVar(value=False)
         self._bulk_select_vars[name] = sel_var
         ctk.CTkCheckBox(
             inner, variable=sel_var, text="",
             fg_color=C["accent"], hover_color=C["accent2"],
             border_color=C["border2"], checkmark_color=C["bg"],
-            width=14, height=14,
+            width=12, height=12,
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkLabel(inner, text="●", font=(_MONO_FONT, 10),
-                     text_color=cat_col, width=12).pack(side="left", padx=(0, 4))
+                     text_color=cat_col, width=10).pack(side="left", padx=(0, 4))
 
         # ── RIGHT cluster (packed first so widths are honored) ──
-        # Action buttons — fixed slot
-        BTN_W = 200 if prov_data.get("url") else 158
-        btns = ctk.CTkFrame(inner, fg_color="transparent", width=BTN_W)
+        def _stop(e): return "break"
+
+        # Compact action buttons — icon-only would be ideal but we keep
+        # short text labels. Slot width tuned for visual balance.
+        BTN_W = 178 if prov_data.get("url") else 144
+        btns = ctk.CTkFrame(inner, fg_color="transparent", width=BTN_W, height=22)
         btns.pack(side="right")
         btns.pack_propagate(False)
 
-        # Stop click bubbling up so button clicks don't also open the modal
-        def _stop(e):
-            return "break"
-
         b_del = make_btn(btns, "Del", lambda n=name: self.delete_key(n),
-                 fg_color=C["red_bg"], text_color=C["red"],
-                 width=36, height=22, border=False)
-        b_del.pack(side="right", padx=(2, 0))
-        b_del.bind("<Button-1>", _stop, add="+")
+                         fg_color=C["red_bg"], text_color=C["red"],
+                         width=32, height=20, border=False)
+        b_del.pack(side="right", padx=(2, 0)); b_del.bind("<Button-1>", _stop, add="+")
         if prov_data.get("url"):
             b_open = make_btn(btns, "Open",
-                     lambda u=prov_data["url"]: webbrowser.open(u),
-                     fg_color=C["btn"], text_color=C["accent"],
-                     width=40, height=22, border=False)
+                              lambda u=prov_data["url"]: webbrowser.open(u),
+                              fg_color=C["btn"], text_color=C["accent"],
+                              width=34, height=20, border=False)
             b_open.pack(side="right", padx=(2, 0))
             b_open.bind("<Button-1>", _stop, add="+")
         b_rot = make_btn(btns, "Rotate", lambda n=name: self.rotate_key(n),
-                 fg_color=C["amber_bg"], text_color=C["amber"],
-                 width=48, height=22, border=False)
-        b_rot.pack(side="right", padx=(2, 0))
-        b_rot.bind("<Button-1>", _stop, add="+")
+                         fg_color=C["amber_bg"], text_color=C["amber"],
+                         width=44, height=20, border=False)
+        b_rot.pack(side="right", padx=(2, 0)); b_rot.bind("<Button-1>", _stop, add="+")
         b_show = make_btn(btns, "Hide" if revealed else "Show",
-                 lambda n=name: self.toggle_reveal(n),
-                 fg_color=C["btn"], text_color=C["text2"],
-                 width=40, height=22, border=False)
-        b_show.pack(side="right", padx=(2, 0))
-        b_show.bind("<Button-1>", _stop, add="+")
+                          lambda n=name: self.toggle_reveal(n),
+                          fg_color=C["btn"], text_color=C["text2"],
+                          width=34, height=20, border=False)
+        b_show.pack(side="right", padx=(2, 0)); b_show.bind("<Button-1>", _stop, add="+")
         b_copy = make_btn(btns, "Copy", lambda v=val: self.copy_key(v),
-                 fg_color=C["btn"], text_color=C["text2"],
-                 width=40, height=22, border=False)
-        b_copy.pack(side="right", padx=(2, 0))
-        b_copy.bind("<Button-1>", _stop, add="+")
+                          fg_color=C["btn"], text_color=C["text2"],
+                          width=34, height=20, border=False)
+        b_copy.pack(side="right", padx=(2, 0)); b_copy.bind("<Button-1>", _stop, add="+")
 
-        # Health pill — fixed slot
-        h_slot = ctk.CTkFrame(inner, fg_color="transparent", width=104)
+        # Health pill — fixed slot, columns line up across every row
+        h_slot = ctk.CTkFrame(inner, fg_color="transparent", width=92, height=22)
         h_slot.pack(side="right", padx=(6, 6))
         h_slot.pack_propagate(False)
-        h_pill = ctk.CTkFrame(h_slot, fg_color=h_bg, corner_radius=10,
+        h_pill = ctk.CTkFrame(h_slot, fg_color=h_bg, corner_radius=8,
                               border_width=1, border_color=h_fg)
-        h_pill.pack(side="left")
+        h_pill.pack(side="left", anchor="center")
         ctk.CTkLabel(h_pill, text=f"●  {h_label.upper()}",
-                     font=(_UI_FONT, 9, "bold"),
-                     text_color=h_fg).pack(padx=7, pady=2)
+                     font=(_UI_FONT, 8, "bold"),
+                     text_color=h_fg).pack(padx=6, pady=1)
 
-        # Env pill — fixed slot (always reserves 50px even when env is 'all',
-        # so the health pill x-position is identical across rows)
-        e_slot = ctk.CTkFrame(inner, fg_color="transparent", width=50)
+        # Env pill — fixed slot reserves 46px even when env="all" so the
+        # Health column above starts at the same x on every row.
+        e_slot = ctk.CTkFrame(inner, fg_color="transparent", width=46, height=22)
         e_slot.pack(side="right", padx=(0, 2))
         e_slot.pack_propagate(False)
         if env != "all":
-            env_pill = ctk.CTkFrame(e_slot, fg_color=env_bg, corner_radius=8,
+            env_pill = ctk.CTkFrame(e_slot, fg_color=env_bg, corner_radius=6,
                                     border_width=1, border_color=env_color)
-            env_pill.pack(side="left")
+            env_pill.pack(side="left", anchor="center")
             ctk.CTkLabel(env_pill, text=env.upper(),
-                         font=(_UI_FONT, 9, "bold"),
-                         text_color=env_color).pack(padx=5, pady=2)
+                         font=(_UI_FONT, 8, "bold"),
+                         text_color=env_color).pack(padx=4, pady=1)
 
-        # Value display — compact slot (110px). Provider column removed —
-        # the category color dot already conveys provider grouping.
-        if revealed:
-            display = val
-        elif len(val) > 8:
-            display = val[:4] + "●" * min(8, len(val) - 8) + val[-4:]
-        else:
-            display = "●" * len(val)
-        v_slot = ctk.CTkFrame(inner, fg_color="transparent", width=110)
-        v_slot.pack(side="right", padx=(0, 6))
-        v_slot.pack_propagate(False)
-        ctk.CTkLabel(v_slot, text=display, font=FONT_MONO_SM,
-                     text_color=C["accent"] if revealed else C["text3"],
-                     anchor="e").pack(fill="both", expand=True)
-
-        # Key name — fills remaining space, never collapses below ~120px
-        # because the right-side cluster total is now ~470px instead of ~600.
-        name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11, "bold"),
-                                text_color=C["text"], anchor="w")
+        # Key name — fills remaining space, smaller font for compact row
+        name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11),
+                                text_color=C["text"], anchor="w", cursor="hand2")
         name_lbl.pack(side="left", fill="x", expand=True, padx=(0, 8))
         name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
