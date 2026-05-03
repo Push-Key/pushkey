@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pushkey
+import pushkey_shared as _s
 
 
 @pytest.fixture
@@ -13,6 +14,9 @@ def vault_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey, "VAULT_FILE", tmp_path / "vault.enc")
     monkeypatch.setattr(pushkey, "SALT_FILE", tmp_path / ".salt")
     monkeypatch.setattr(pushkey, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
 
     password = "test123"
     vault = {
@@ -43,6 +47,9 @@ def test_rotation_history_preserved(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey, "VAULT_FILE", tmp_path / "vault.enc")
     monkeypatch.setattr(pushkey, "SALT_FILE", tmp_path / ".salt")
     monkeypatch.setattr(pushkey, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
 
     password = "test123"
     vault = {
@@ -73,6 +80,9 @@ def test_health_status_age_tracking(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey, "VAULT_FILE", tmp_path / "vault.enc")
     monkeypatch.setattr(pushkey, "SALT_FILE", tmp_path / ".salt")
     monkeypatch.setattr(pushkey, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
 
     password = "test123"
 
@@ -102,6 +112,9 @@ def test_cannot_rotate_nonexistent_key(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey, "VAULT_FILE", tmp_path / "vault.enc")
     monkeypatch.setattr(pushkey, "SALT_FILE", tmp_path / ".salt")
     monkeypatch.setattr(pushkey, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
 
     password = "test123"
     vault = {}
