@@ -452,6 +452,8 @@ function LicensesInner() {
   const [viewLic, setViewLic] = useState<License | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [showIssuePanel, setShowIssuePanel] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   const load = useCallback(() => {
     if (!secret) return
@@ -593,10 +595,65 @@ function LicensesInner() {
           </div>
         </div>
 
+        {/* Bulk action bar (shows when selection > 0) */}
+        {selected.size > 0 && (
+          <div className="flex items-center gap-3 px-5 py-3 border-b border-white/8 bg-sky-900/20">
+            <span className="text-sm text-white font-medium">{selected.size} selected</span>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                disabled={bulkBusy}
+                onClick={async () => {
+                  if (!confirm(`Expire ${selected.size} license(s)?`)) return
+                  setBulkBusy(true)
+                  try { await adminApi.bulkAction(secret, "expire", Array.from(selected)); setSelected(new Set()); load(); refreshStats() }
+                  finally { setBulkBusy(false) }
+                }}
+                className="text-xs border border-amber-700/60 bg-amber-900/30 text-amber-300 hover:bg-amber-900/50 disabled:opacity-40 px-3 py-1.5 rounded transition-colors"
+              >Bulk Expire</button>
+              <button
+                disabled={bulkBusy}
+                onClick={async () => {
+                  if (!confirm(`Revoke ${selected.size} license(s)? This cannot be undone via UI.`)) return
+                  setBulkBusy(true)
+                  try { await adminApi.bulkAction(secret, "revoke", Array.from(selected)); setSelected(new Set()); load(); refreshStats() }
+                  finally { setBulkBusy(false) }
+                }}
+                className="text-xs border border-red-700/60 bg-red-900/30 text-red-300 hover:bg-red-900/50 disabled:opacity-40 px-3 py-1.5 rounded transition-colors"
+              >Bulk Revoke</button>
+              <button
+                disabled={bulkBusy}
+                onClick={async () => {
+                  setBulkBusy(true)
+                  try { await adminApi.bulkAction(secret, "renew", Array.from(selected)); setSelected(new Set()); load(); refreshStats() }
+                  finally { setBulkBusy(false) }
+                }}
+                className="text-xs border border-emerald-700/60 bg-emerald-900/30 text-emerald-300 hover:bg-emerald-900/50 disabled:opacity-40 px-3 py-1.5 rounded transition-colors"
+              >Bulk Renew</button>
+              <button
+                onClick={() => setSelected(new Set())}
+                className="text-xs border border-white/10 text-[#94A3B8] hover:text-white px-3 py-1.5 rounded transition-colors"
+              >Clear</button>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/8">
+                <th className="px-3 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 accent-[#00DC82] cursor-pointer"
+                    checked={pageData.length > 0 && pageData.every(l => selected.has(l.key))}
+                    onChange={e => {
+                      const next = new Set(selected)
+                      if (e.target.checked) pageData.forEach(l => next.add(l.key))
+                      else pageData.forEach(l => next.delete(l.key))
+                      setSelected(next)
+                    }}
+                  />
+                </th>
                 {["License Key", "Tier", "Platform", "Activated", "Last Heartbeat", "Expires", "Status", "Actions"].map(h => (
                   <th key={h} className="px-5 py-3 text-left text-[10px] tracking-widest uppercase text-[#94A3B8] font-medium whitespace-nowrap">
                     {h}
@@ -606,11 +663,23 @@ function LicensesInner() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-5 py-12 text-center text-[#94A3B8]">Loading…</td></tr>
+                <tr><td colSpan={9} className="px-5 py-12 text-center text-[#94A3B8]">Loading…</td></tr>
               ) : pageData.length === 0 ? (
-                <tr><td colSpan={8} className="px-5 py-12 text-center text-[#94A3B8]">No licenses found</td></tr>
+                <tr><td colSpan={9} className="px-5 py-12 text-center text-[#94A3B8]">No licenses found</td></tr>
               ) : pageData.map(lic => (
-                <tr key={lic.key} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors">
+                <tr key={lic.key} className={`border-b border-white/5 transition-colors ${selected.has(lic.key) ? "bg-sky-900/10" : "hover:bg-white/[0.03]"}`}>
+                  <td className="px-3 py-4">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 accent-[#00DC82] cursor-pointer"
+                      checked={selected.has(lic.key)}
+                      onChange={e => {
+                        const next = new Set(selected)
+                        if (e.target.checked) next.add(lic.key); else next.delete(lic.key)
+                        setSelected(next)
+                      }}
+                    />
+                  </td>
                   <td className="px-5 py-4 whitespace-nowrap">
                     <p className="font-mono text-sm text-sky-400">{maskKey(lic.key)}</p>
                     {(lic.name || lic.company) && (

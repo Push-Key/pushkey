@@ -65,6 +65,42 @@ export interface AdminStats {
   today_delta: number
 }
 
+export interface SupportTicket {
+  id: string
+  email: string
+  subject: string
+  message: string
+  priority: "low" | "medium" | "high"
+  status: "open" | "pending" | "resolved"
+  created_at: string
+  updated_at: string
+  replies: { ts: string; body: string }[]
+}
+
+export interface AuditEntry {
+  ts: string
+  action: string
+  target: string
+  details: Record<string, unknown>
+}
+
+export interface AdminSettings {
+  smtp: {
+    host: string
+    port: number
+    user: string
+    password: string
+    from: string
+    configured: boolean
+  }
+  app_url: string
+  admin_secret_set: boolean
+  data_dir: string
+  license_count: number
+  event_count: number
+  version: string
+}
+
 function h(secret: string): HeadersInit {
   return { "Content-Type": "application/json", "X-Admin-Secret": secret }
 }
@@ -106,6 +142,40 @@ export const adminApi = {
       daily_heartbeats:  { date: string; count: number }[]
       event_totals: Record<string, number>
     }>(s, "/api/admin/analytics"),
+
+  settings: (s: string) =>
+    call<AdminSettings>(s, "/api/admin/settings"),
+
+  audit: (s: string) =>
+    call<AuditEntry[]>(s, "/api/admin/audit"),
+
+  // Support tickets
+  listTickets: (s: string) =>
+    call<SupportTicket[]>(s, "/api/admin/tickets"),
+
+  createTicket: (s: string, payload: { email: string; subject: string; message: string; priority: "low" | "medium" | "high" }) =>
+    call<SupportTicket>(s, "/api/admin/tickets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateTicket: (s: string, id: string, payload: { status?: SupportTicket["status"]; reply?: string }) =>
+    call<SupportTicket>(s, `/api/admin/tickets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  bulkAction: (s: string, action: "expire" | "revoke" | "renew", keys: string[]) =>
+    call<{ ok: boolean; affected: number; not_found: number }>(s, "/api/admin/licenses/bulk", {
+      method: "POST",
+      body: JSON.stringify({ action, keys }),
+    }),
+
+  testEmail: (s: string, to: string) =>
+    call<{ sent: boolean; reason?: string; to?: string }>(s, "/api/admin/settings/test-email", {
+      method: "POST",
+      body: JSON.stringify({ to }),
+    }),
 
   issueKey: (s: string, payload: IssueKeyRequest) =>
     call<IssueKeyResponse>(s, "/api/admin/licenses/issue", {

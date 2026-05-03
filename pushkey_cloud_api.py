@@ -163,6 +163,7 @@ async def health():
 
 # ── Event log (append-only JSONL for analytics) ──────────────────
 EVENTS_FILE = DATA_DIR / "events.jsonl"
+AUDIT_FILE  = DATA_DIR / "audit.jsonl"
 
 def _log_event(event_type: str, data: dict) -> None:
     entry = {"ts": datetime.utcnow().isoformat(), "type": event_type, **data}
@@ -173,6 +174,29 @@ def _load_events() -> list[dict]:
     if not EVENTS_FILE.exists():
         return []
     lines = EVENTS_FILE.read_text().splitlines()
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+def _log_audit(action: str, target: str, details: dict | None = None) -> None:
+    """Record admin action for compliance audit trail."""
+    entry = {
+        "ts":      datetime.utcnow().isoformat(),
+        "action":  action,
+        "target":  target,
+        "details": details or {},
+    }
+    with AUDIT_FILE.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def _load_audit() -> list[dict]:
+    if not AUDIT_FILE.exists():
+        return []
+    lines = AUDIT_FILE.read_text().splitlines()
     out = []
     for line in lines:
         try:
@@ -353,6 +377,7 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     lic[key] = entry
     _save_licenses(lic)
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
+    _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]})
     return entry
 
 
@@ -417,6 +442,10 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
     lic[key] = entry
     _save_licenses(lic)
     _log_event("issued", {"key": key[:8] + "…", "tier": tier, "email": email})
+    _log_audit("issue_license", key, {
+        "tier": tier, "email": email, "trial_days": trial_days,
+        "send_email": send_email, "email_sent": email_result.get("sent", False),
+    })
     return {**entry, "email_result": email_result}
 
 
@@ -485,11 +514,13 @@ async def admin_update_contact(
     if not matched:
         raise HTTPException(404, "Contact not found")
     allowed = {"name", "company", "follow_up_date", "stage", "notes", "source"}
+    changes = {k: v for k, v in body.items() if k in allowed}
     for entry in matched:
         for field in allowed:
             if field in body:
                 entry[field] = body[field]
     _save_licenses(lic)
+    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": len(matched)})
     return {"ok": True, "updated": len(matched)}
 
 
@@ -506,6 +537,7 @@ async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
     if result.get("sent"):
         entry["sent_invite"] = True
         _save_licenses(lic)
+    _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)})
     return result
 
 
@@ -517,6 +549,7 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
     lic[key]["status"] = "expired"
     _save_licenses(lic)
     _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
+    _log_audit("expire_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
 
 
@@ -529,6 +562,7 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
     lic[key]["last_heartbeat"] = None
     _save_licenses(lic)
     _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
+    _log_audit("revoke_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
 
 
@@ -540,6 +574,7 @@ async def admin_renew(key: str, _: None = Depends(_require_admin)):
     lic[key]["status"] = "active"
     _save_licenses(lic)
     _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
+    _log_audit("renew_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
 
 
@@ -600,6 +635,260 @@ async def admin_export(_: None = Depends(_require_admin)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=licenses.csv"},
     )
+
+
+# ── Support tickets ──────────────────────────────────────────────
+TICKETS_FILE = DATA_DIR / "tickets.json"
+
+def _load_tickets() -> list[dict]:
+    if not TICKETS_FILE.exists():
+        return []
+    return json.loads(TICKETS_FILE.read_text())
+
+def _save_tickets(tickets: list[dict]) -> None:
+    TICKETS_FILE.write_text(json.dumps(tickets, indent=2))
+
+
+@app.post("/api/admin/tickets")
+async def admin_create_ticket(request: Request, _: None = Depends(_require_admin)):
+    body  = await request.json()
+    email = body.get("email", "").strip().lower()
+    subj  = body.get("subject", "").strip()
+    msg   = body.get("message", "").strip()
+    pri   = body.get("priority", "medium")
+    if not subj or not msg:
+        raise HTTPException(400, "subject and message required")
+    if pri not in {"low", "medium", "high"}:
+        pri = "medium"
+
+    tickets = _load_tickets()
+    ticket = {
+        "id":         secrets.token_hex(8),
+        "email":      email,
+        "subject":    subj,
+        "message":    msg,
+        "priority":   pri,
+        "status":     "open",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "replies":    [],
+    }
+    tickets.append(ticket)
+    _save_tickets(tickets)
+    _log_audit("create_ticket", ticket["id"], {"email": email, "subject": subj, "priority": pri})
+
+    # Notify admin via email if SMTP configured
+    if SMTP_HOST and FROM_EMAIL:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            text = f"New Pushkey support ticket:\n\nFrom: {email}\nSubject: {subj}\nPriority: {pri}\n\n{msg}"
+            m = MIMEText(text, "plain")
+            m["Subject"] = f"[Pushkey Support — {pri.upper()}] {subj}"
+            m["From"]    = FROM_EMAIL
+            m["To"]      = FROM_EMAIL
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+                s.starttls()
+                s.login(SMTP_USER, SMTP_PASS)
+                s.sendmail(FROM_EMAIL, [FROM_EMAIL], m.as_string())
+        except Exception:
+            pass  # email failure shouldn't break ticket creation
+
+    return ticket
+
+
+@app.get("/api/admin/tickets")
+async def admin_list_tickets(_: None = Depends(_require_admin)):
+    return list(reversed(_load_tickets()))
+
+
+@app.patch("/api/admin/tickets/{ticket_id}")
+async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depends(_require_admin)):
+    body    = await request.json()
+    tickets = _load_tickets()
+    target  = next((t for t in tickets if t["id"] == ticket_id), None)
+    if not target:
+        raise HTTPException(404, "Ticket not found")
+
+    if "status" in body and body["status"] in {"open", "pending", "resolved"}:
+        target["status"] = body["status"]
+    if "reply" in body and body["reply"].strip():
+        target["replies"].append({
+            "ts":   datetime.utcnow().isoformat(),
+            "body": body["reply"].strip(),
+        })
+    target["updated_at"] = datetime.utcnow().isoformat()
+    _save_tickets(tickets)
+    _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body})
+    return target
+
+
+# ── Customer self-serve portal ───────────────────────────────────
+@app.post("/api/v1/portal/lookup")
+async def portal_lookup(request: Request):
+    """
+    Customer enters their license key to view info.
+    Returns sanitized license info — never exposes other customers' data.
+    """
+    body = await request.json()
+    key = body.get("license_key", "").strip().upper()
+    if not key:
+        raise HTTPException(400, "license_key required")
+
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+
+    entry = lic[key]
+    # Auto-expire if past expiry
+    if (entry.get("expires_at")
+            and entry["status"] == "active"
+            and entry["expires_at"] < datetime.utcnow().isoformat()):
+        entry["status"] = "expired"
+        _save_licenses(lic)
+
+    return {
+        "key":            entry["key"],
+        "tier":           entry["tier"],
+        "status":         entry["status"],
+        "email":          entry.get("email", ""),
+        "name":           entry.get("name", ""),
+        "activated":      entry.get("activated", ""),
+        "expires_at":     entry.get("expires_at"),
+        "last_heartbeat": entry.get("last_heartbeat"),
+        "platform":       entry.get("platform", ""),
+        "stage":          entry.get("stage", ""),
+    }
+
+
+@app.post("/api/v1/portal/request-renewal")
+async def portal_request_renewal(request: Request):
+    """Customer requests renewal — opens a support ticket internally."""
+    body = await request.json()
+    key      = body.get("license_key", "").strip().upper()
+    message  = body.get("message", "").strip()
+
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+    entry = lic[key]
+    email = entry.get("email", "")
+
+    tickets = _load_tickets()
+    ticket = {
+        "id":         secrets.token_hex(8),
+        "email":      email,
+        "subject":    f"Renewal request — {entry['tier'].upper()} key",
+        "message":    message or f"Customer requested renewal for {key[:12]}…",
+        "priority":   "medium",
+        "status":     "open",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "replies":    [],
+        "type":       "renewal_request",
+        "license_key": key,
+    }
+    tickets.append(ticket)
+    _save_tickets(tickets)
+    _log_audit("portal_renewal_request", key, {"email": email})
+    return {"ok": True, "ticket_id": ticket["id"]}
+
+
+# ── Audit log endpoint ───────────────────────────────────────────
+@app.get("/api/admin/audit")
+async def admin_audit_log(_: None = Depends(_require_admin)):
+    """Returns last 500 audit entries (newest first)."""
+    entries = _load_audit()
+    return list(reversed(entries[-500:]))
+
+
+# ── Bulk operations ──────────────────────────────────────────────
+@app.post("/api/admin/licenses/bulk")
+async def admin_bulk_action(request: Request, _: None = Depends(_require_admin)):
+    """
+    Bulk action across multiple keys.
+    Body: {"action": "expire"|"revoke"|"renew", "keys": ["KEY1","KEY2",...]}
+    """
+    body   = await request.json()
+    action = body.get("action", "")
+    keys   = body.get("keys", [])
+    if action not in {"expire", "revoke", "renew"}:
+        raise HTTPException(400, "action must be one of: expire, revoke, renew")
+    if not keys:
+        raise HTTPException(400, "keys list required")
+
+    lic = _load_licenses()
+    affected: list[str] = []
+    not_found: list[str] = []
+    for key in keys:
+        if key not in lic:
+            not_found.append(key)
+            continue
+        if action == "expire":
+            lic[key]["status"] = "expired"
+        elif action == "revoke":
+            lic[key]["status"] = "revoked"
+            lic[key]["last_heartbeat"] = None
+        elif action == "renew":
+            lic[key]["status"] = "active"
+        affected.append(key)
+        _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
+    _save_licenses(lic)
+    _log_audit(f"bulk_{action}", f"{len(affected)} licenses", {
+        "affected": [k[:8] + "…" for k in affected],
+        "not_found": len(not_found),
+    })
+    return {"ok": True, "affected": len(affected), "not_found": len(not_found)}
+
+
+# ── Settings ─────────────────────────────────────────────────────
+@app.get("/api/admin/settings")
+async def admin_settings(_: None = Depends(_require_admin)):
+    """Returns config (no secret values, just presence)."""
+    return {
+        "smtp": {
+            "host":     SMTP_HOST,
+            "port":     SMTP_PORT,
+            "user":     SMTP_USER,
+            "password": "•••••••" if SMTP_PASS else "",
+            "from":     FROM_EMAIL,
+            "configured": bool(SMTP_HOST and SMTP_USER and SMTP_PASS),
+        },
+        "app_url":             APP_URL,
+        "admin_secret_set":    ADMIN_SECRET != "dev-change-me",
+        "data_dir":            str(DATA_DIR),
+        "license_count":       len(_load_licenses()),
+        "event_count":         len(_load_events()),
+        "version":             "1.0.3",
+    }
+
+
+@app.post("/api/admin/settings/test-email")
+async def admin_test_email(request: Request, _: None = Depends(_require_admin)):
+    """Send a test email to verify SMTP config."""
+    body = await request.json()
+    to_email = body.get("to", "").strip().lower()
+    if not to_email:
+        raise HTTPException(400, "Recipient email required")
+
+    if not SMTP_HOST:
+        return {"sent": False, "reason": "SMTP not configured. Set SMTP_HOST/SMTP_USER/SMTP_PASS env vars."}
+
+    import smtplib
+    from email.mime.text import MIMEText
+    msg = MIMEText("This is a Pushkey admin test email. Your SMTP config is working.", "plain")
+    msg["Subject"] = "Pushkey SMTP Test"
+    msg["From"]    = FROM_EMAIL
+    msg["To"]      = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+        return {"sent": True, "to": to_email}
+    except Exception as exc:
+        return {"sent": False, "reason": str(exc)}
 
 
 if __name__ == "__main__":
