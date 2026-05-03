@@ -1,6 +1,7 @@
 import Navbar from "@/components/Navbar"
 import Hero from "@/components/Hero"
 import TrustBar from "@/components/TrustBar"
+import AudienceSection from "@/components/AudienceSection"
 import HowItWorks from "@/components/HowItWorks"
 import Features from "@/components/Features"
 import ComparisonTable from "@/components/ComparisonTable"
@@ -17,6 +18,7 @@ export default function HomePage() {
       <Navbar />
       <Hero />
       <TrustBar />
+      <AudienceSection />
       <HowItWorks />
       <Features />
       <ComparisonTable />
