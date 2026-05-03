@@ -183,17 +183,13 @@ def _load_events() -> list[dict]:
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
-@app.post("/api/v1/heartbeat")
-async def heartbeat(request: Request):
-    """
-    Called by the Pushkey desktop app to record liveness.
-    Body: {"license_key": "...", "platform": "Windows 11", "version": "1.0.3"}
-    Returns tier and status so the client can gate features.
-    """
-    body = await request.json()
+async def _handle_heartbeat(body: dict) -> dict:
+    """Shared logic for both /v1/heartbeat and /api/v1/heartbeat."""
+    import platform as _pl
     key = body.get("license_key", "").strip().upper()
-    platform = body.get("platform", "")
-    version = body.get("version", "")
+    # Accept platform from body, or auto-detect if missing
+    platform = body.get("platform", "") or f"{_pl.system()} {_pl.release()}"
+    version  = body.get("version", "")
 
     lic = _load_licenses()
     if key not in lic:
@@ -203,16 +199,20 @@ async def heartbeat(request: Request):
     if entry["status"] == "revoked":
         raise HTTPException(403, "License revoked")
 
-    # Update heartbeat + platform
     entry["last_heartbeat"] = datetime.utcnow().isoformat()
-    if platform:
-        entry["platform"] = platform
+    entry["platform"] = platform
     _save_licenses(lic)
 
-    # Log for analytics
     _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version})
 
-    return {"status": entry["status"], "tier": entry["tier"], "ok": True}
+    # Return shape compatible with both old token flow and new admin flow
+    return {"ok": True, "status": entry["status"], "tier": entry["tier"], "token": ""}
+
+
+@app.post("/v1/heartbeat")       # path desktop app calls
+@app.post("/api/v1/heartbeat")   # path admin API uses
+async def heartbeat(request: Request):
+    return await _handle_heartbeat(await request.json())
 
 
 # ── Admin helpers ────────────────────────────────────────────────
