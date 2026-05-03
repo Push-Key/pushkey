@@ -2113,6 +2113,57 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
     return ctk.CTkButton(parent, **kw)
 
 
+def _render_lifecycle_badge_pil(size: int, pct: float, status_color: str,
+                                cat_color: str, abbr: str,
+                                bg_color: str, ring_color: str):
+    """PIL-render a lifecycle badge at 4x supersample, downsampled with LANCZOS.
+
+    Outer arc shows rotation cycle %, inner disk is the category color
+    with the 2-3 letter abbreviation centered. All edges anti-aliased.
+    """
+    from PIL import Image as _PIL, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+    SCALE = 4
+    big = size * SCALE
+    pad = 2 * SCALE
+    img = _PIL.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = _ImageDraw.Draw(img)
+    # Outer track ring
+    d.ellipse([pad, pad, big - pad, big - pad],
+              outline=ring_color, width=2 * SCALE)
+    # Filled arc — pieslice with no fill, just outline portion
+    if pct > 0:
+        # PIL arc: 0deg at 3 o'clock, sweeps clockwise.
+        # We want start at 12 o'clock, so start = -90.
+        sweep = pct * 360
+        d.arc([pad, pad, big - pad, big - pad],
+              start=-90, end=-90 + sweep,
+              fill=status_color, width=4 * SCALE)
+    # Inner disk in category color
+    inner_pad = 9 * SCALE
+    d.ellipse([inner_pad, inner_pad, big - inner_pad, big - inner_pad],
+              fill=cat_color)
+    # Centered category abbreviation
+    try:
+        font = _ImageFont.truetype("seguibl.ttf", int(11 * SCALE * 1.1))
+    except Exception:
+        try:
+            font = _ImageFont.truetype("arialbd.ttf", int(11 * SCALE * 1.1))
+        except Exception:
+            font = _ImageFont.load_default()
+    # Pillow API split: textbbox for newer, textsize for older
+    try:
+        bbox = d.textbbox((0, 0), abbr, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tx = (big - tw) // 2 - bbox[0]
+        ty = (big - th) // 2 - bbox[1]
+    except Exception:
+        tw, th = d.textsize(abbr, font=font)
+        tx = (big - tw) // 2
+        ty = (big - th) // 2
+    d.text((tx, ty), abbr, fill="#FFFFFF", font=font)
+    return img.resize((size, size), _PIL.LANCZOS)
+
+
 # Resize debouncer — coalesces <Configure> floods during window drag/resize
 class _ResizeDebouncer:
     """Throttles redraws of registered Canvas widgets to fire once per 100ms.
@@ -4101,9 +4152,14 @@ class AppFrame(ctk.CTkFrame):
                          font=FONT_H3, text_color=C["text3"]).pack(pady=40)
             return
 
-        # Filter pills — let users narrow to just the keys that need attention
+        # Filter chip bar — segmented-control style. Each chip has a status
+        # dot, a label, and a count badge. Active chip lights up in its
+        # status color with white text; inactive chips have a thin border.
         filter_bar = ctk.CTkFrame(self._timeline_content, fg_color="transparent")
-        filter_bar.pack(fill="x", padx=14, pady=(10, 4))
+        filter_bar.pack(fill="x", padx=14, pady=(12, 6))
+
+        ctk.CTkLabel(filter_bar, text="FILTER", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(side="left", padx=(0, 10))
 
         counts = {
             "all":      len(real_keys),
@@ -4111,24 +4167,62 @@ class AppFrame(ctk.CTkFrame):
             "warning":  sum(1 for _, v in real_keys if health_status(v) == "warning"),
             "healthy":  sum(1 for _, v in real_keys if health_status(v) == "healthy"),
         }
-        pill_defs = [
-            ("all",      "All",      C["text2"]),
+        chip_defs = [
+            ("all",      "All",      C["accent"]),
             ("critical", "Critical", C["red"]),
             ("warning",  "Warning",  C["amber"]),
             ("healthy",  "Healthy",  C["green"]),
         ]
-        for fkey, flabel, fcol in pill_defs:
+        for fkey, flabel, fcol in chip_defs:
             active = self._lifecycle_filter.get() == fkey
-            pill = make_btn(
-                filter_bar,
-                f"{flabel}  {counts[fkey]}",
+            self._make_filter_chip(
+                filter_bar, flabel, counts[fkey], fcol, active,
                 lambda k=fkey: (self._lifecycle_filter.set(k),
                                 self._switch_timeline_subtab()),
-                fg_color=fcol if active else C["btn"],
-                text_color="#FFFFFF" if active else fcol,
-                width=100, height=28,
             )
-            pill.pack(side="left", padx=(0, 6))
+
+    def _make_filter_chip(self, parent, label, count, color, active, command):
+        """Segmented-control chip: status dot + label + count badge.
+
+        Active = solid fill in `color`, white text, dot in white.
+        Inactive = transparent bg, 1px border in `color`, text in color.
+        """
+        chip_bg = color if active else "transparent"
+        text_col = "#FFFFFF" if active else color
+        chip = ctk.CTkFrame(
+            parent, fg_color=chip_bg, corner_radius=14,
+            border_width=1 if not active else 0,
+            border_color=color, cursor="hand2",
+        )
+        chip.pack(side="left", padx=(0, 6))
+        chip.bind("<Button-1>", lambda e: command())
+
+        # Status dot
+        ctk.CTkLabel(chip, text="●", font=(_MONO_FONT, 11),
+                     text_color=text_col, fg_color="transparent",
+                     cursor="hand2"
+                     ).pack(side="left", padx=(10, 0), pady=4)
+        ctk.CTkLabel(chip, text=label,
+                     font=(_UI_FONT, 11, "bold"),
+                     text_color=text_col, fg_color="transparent",
+                     cursor="hand2"
+                     ).pack(side="left", padx=(4, 6))
+        # Count badge — solid pill with the status color (always readable).
+        # On active chip uses surface bg so it stands out against the
+        # already-color-filled chip.
+        cnt_bg = C["surface"] if active else color
+        cnt_fg = color if active else "#FFFFFF"
+        cnt = ctk.CTkLabel(
+            chip, text=str(count),
+            font=(_UI_FONT, 10, "bold"),
+            text_color=cnt_fg, fg_color=cnt_bg,
+            corner_radius=8, width=24,
+        )
+        cnt.pack(side="left", padx=(0, 8), pady=3)
+        # Forward clicks from inner labels to the command
+        for child in chip.winfo_children():
+            child.bind("<Button-1>", lambda e: command())
+        return chip
 
         # Apply filter
         active_filter = self._lifecycle_filter.get()
@@ -4296,9 +4390,11 @@ class AppFrame(ctk.CTkFrame):
 
         # ── Middle zone: visual timeline track ──
         track_frame = ctk.CTkFrame(outer, fg_color="transparent")
-        track_frame.pack(fill="x", padx=18, pady=(8, 6))
+        track_frame.pack(fill="x", padx=18, pady=(10, 8))
 
-        track_canvas = tk.Canvas(track_frame, height=42, bg=card_bg,
+        # Taller canvas so labels above + dates below the line have room
+        # without clipping the "CREATED" / "DUE" text.
+        track_canvas = tk.Canvas(track_frame, height=68, bg=card_bg,
                                  highlightthickness=0)
         track_canvas.pack(fill="x")
 
@@ -4372,31 +4468,21 @@ class AppFrame(ctk.CTkFrame):
 
     def _draw_lifecycle_badge(self, cv, size, pct, status_color,
                               cat_color, cat_name, bg):
-        """Circular badge: outer arc shows rotation cycle %, inner shows
-        category abbreviation in colored disk."""
-        import math
+        """Circular status+category badge — rendered with PIL at 4x and
+        downsampled with LANCZOS so the arc edges and text are smooth
+        instead of the pixelated tk Canvas defaults."""
         cv.delete("all")
-        cx, cy = size / 2, size / 2
-        # Outer ring track
-        pad = 2
-        cv.create_oval(pad, pad, size - pad, size - pad,
-                       outline=C["border"], width=2)
-        # Filled arc (cycle progress) — start at top, sweep clockwise
-        if pct > 0:
-            extent = -pct * 360  # negative = clockwise in tk
-            cv.create_arc(pad, pad, size - pad, size - pad,
-                          start=90, extent=extent,
-                          outline=status_color, width=4, style="arc")
-        # Inner disk in category color (lighter / tinted)
-        inner_r = size / 2 - 9
-        cv.create_oval(cx - inner_r, cy - inner_r,
-                       cx + inner_r, cy + inner_r,
-                       fill=cat_color, outline="")
-        # Category abbreviation (3 chars)
         abbr = self._cat_abbr(cat_name)
-        cv.create_text(cx, cy, text=abbr,
-                       font=(_UI_FONT, 11, "bold"),
-                       fill="#FFFFFF")
+        img = _render_lifecycle_badge_pil(size, pct, status_color,
+                                          cat_color, abbr, bg, C["border"])
+        # Stash on canvas so PIL doesn't garbage-collect the image
+        cv._badge_img = ctk.CTkImage(light_image=img, dark_image=img,
+                                     size=(size, size))
+        # Use the PIL image directly (CTkImage doesn't paint to a tk Canvas);
+        # convert to a tk PhotoImage via PIL.
+        from PIL import ImageTk as _ImageTk
+        cv._badge_tk = _ImageTk.PhotoImage(img)
+        cv.create_image(size // 2, size // 2, image=cv._badge_tk)
 
     def _cat_abbr(self, cat: str) -> str:
         """Short 2-3 letter abbreviation per category for the badge."""
@@ -4411,22 +4497,27 @@ class AppFrame(ctk.CTkFrame):
 
     def _draw_lifecycle_track(self, cv, W, created_dt, rotated_dt,
                               history_dts, days_left, status_color, bg):
-        """Horizontal timeline strip with dots at created / rotations / now / due."""
-        from datetime import datetime as _dt
-        import math
+        """Horizontal timeline strip with dots at created / rotations / now / due.
 
-        H = 42
-        y_line = 22  # main timeline y coord
-        margin = 12
+        Layout (top-to-bottom):
+          y=8       : milestone label band (CREATED / ROTATED)
+          y=34      : the timeline line itself (with dots)
+          y=56      : secondary label band (NOW / DUE)
+        Bigger fonts (9-10pt bold) and stems from labels to dots so the
+        names are unambiguous and never get clipped.
+        """
+        from datetime import datetime as _dt
+
+        H = 68
+        y_line = 34
+        y_top = 14
+        y_bot = 56
+        margin = 14
         track_w = W - 2 * margin
 
         now = _dt.now()
-        # Range: from earliest event to (now + max(30d, days_until))
         all_dts = [d for d in [created_dt, rotated_dt, *history_dts] if d]
-        if not all_dts:
-            t_start = now
-        else:
-            t_start = min(all_dts)
+        t_start = min(all_dts) if all_dts else now
         if days_left is not None and days_left > 0:
             t_end = now + timedelta(days=days_left + 5)
         else:
@@ -4440,14 +4531,17 @@ class AppFrame(ctk.CTkFrame):
                 return None
             return margin + (dt - t_start).total_seconds() / span_secs * track_w
 
-        # Past portion line (created -> now)
         x_now = _x(now)
         x_created = _x(created_dt) if created_dt else margin
+
+        # ── Track segments ──
+        # Past portion (created -> now): solid neutral line
         if x_created is not None and x_now is not None:
             cv.create_line(x_created, y_line, x_now, y_line,
-                           fill=C["border2"], width=2)
-
-        # Future portion line (now -> due)
+                           fill=C["border2"], width=3)
+        # Future portion (now -> due): colored dashed
+        x_due = None
+        future_color = C["text3"]
         if days_left is not None:
             x_due = _x(now + timedelta(days=max(0, days_left)))
             if x_due is not None and x_now is not None:
@@ -4455,50 +4549,66 @@ class AppFrame(ctk.CTkFrame):
                                else C["amber"] if days_left <= 7
                                else status_color)
                 cv.create_line(x_now, y_line, x_due, y_line,
-                               fill=future_color, width=2, dash=(3, 3))
-                # Due marker (vertical line)
-                cv.create_line(x_due, y_line - 8, x_due, y_line + 8,
-                               fill=future_color, width=2)
-                cv.create_text(x_due, y_line + 16, text="DUE",
-                               font=(_UI_FONT, 7, "bold"),
-                               fill=future_color)
+                               fill=future_color, width=2, dash=(4, 3))
 
-        # Created dot + label
+        # ── Helper for label + stem ──
+        def _label_top(x, text, color):
+            # short stem from line up toward label
+            cv.create_line(x, y_line - 7, x, y_top + 6,
+                           fill=color, width=1)
+            cv.create_text(x, y_top, text=text,
+                           font=(_UI_FONT, 9, "bold"),
+                           fill=color, anchor="center")
+
+        def _label_bot(x, text, color):
+            cv.create_line(x, y_line + 7, x, y_bot - 6,
+                           fill=color, width=1)
+            cv.create_text(x, y_bot, text=text,
+                           font=(_UI_FONT, 9, "bold"),
+                           fill=color, anchor="center")
+
+        # ── CREATED dot + top label ──
         if x_created is not None:
-            cv.create_oval(x_created - 5, y_line - 5,
-                           x_created + 5, y_line + 5,
-                           fill=bg, outline=C["text3"], width=2)
-            cv.create_text(x_created, y_line - 14, text="CREATED",
-                           font=(_UI_FONT, 7, "bold"),
-                           fill=C["text3"])
+            cv.create_oval(x_created - 6, y_line - 6,
+                           x_created + 6, y_line + 6,
+                           fill=bg, outline=C["text2"], width=2)
+            _label_top(x_created, "CREATED", C["text2"])
 
-        # Past rotations (history)
+        # ── Past rotations (smaller dots, no labels) ──
         for h_dt in history_dts:
             x_h = _x(h_dt)
             if x_h is not None:
                 cv.create_oval(x_h - 4, y_line - 4, x_h + 4, y_line + 4,
                                fill=C["text3"], outline="")
 
-        # Last rotation
+        # ── Last ROTATED dot + top label ──
         if rotated_dt is not None and (created_dt is None or rotated_dt > created_dt):
             x_r = _x(rotated_dt)
             if x_r is not None:
-                cv.create_oval(x_r - 6, y_line - 6, x_r + 6, y_line + 6,
-                               fill=status_color, outline="")
-                cv.create_text(x_r, y_line - 14, text="ROTATED",
-                               font=(_UI_FONT, 7, "bold"),
-                               fill=status_color)
+                cv.create_oval(x_r - 7, y_line - 7, x_r + 7, y_line + 7,
+                               fill=status_color, outline=bg, width=2)
+                # Avoid label collision with CREATED — only label if far enough
+                if x_created is None or abs(x_r - x_created) > 60:
+                    _label_top(x_r, "ROTATED", status_color)
 
-        # Now marker (cyan vertical line + dot)
+        # ── DUE marker + bottom label ──
+        if x_due is not None and days_left is not None:
+            cv.create_line(x_due, y_line - 9, x_due, y_line + 9,
+                           fill=future_color, width=3)
+            _label_bot(x_due, "DUE", future_color)
+
+        # ── NOW marker (cyan vertical) + bottom label ──
         if x_now is not None:
-            cv.create_line(x_now, 4, x_now, H - 4,
+            cv.create_line(x_now, 6, x_now, H - 6,
                            fill=C["accent"], width=1, dash=(2, 3))
-            cv.create_oval(x_now - 4, y_line - 4,
-                           x_now + 4, y_line + 4,
-                           fill=C["accent"], outline="")
-            cv.create_text(x_now, y_line + 16, text="NOW",
-                           font=(_UI_FONT, 7, "bold"),
-                           fill=C["accent"])
+            cv.create_oval(x_now - 5, y_line - 5,
+                           x_now + 5, y_line + 5,
+                           fill=C["accent"], outline=bg, width=2)
+            # Place NOW label below — but if it would collide with DUE, shift up
+            if x_due is None or abs(x_now - x_due) > 50:
+                _label_bot(x_now, "NOW", C["accent"])
+            else:
+                _label_top(x_now, "NOW", C["accent"])
 
     def _render_activity_tab(self):
         all_log = list(reversed(_log_decrypt_all()))  # newest first
