@@ -1622,9 +1622,12 @@ class LoginFrame(ctk.CTkFrame):
 
         # Detect vault format
         is_v3 = False
-        if VAULT_FILE.exists():
-            raw = VAULT_FILE.read_bytes()
-            is_v3 = raw.startswith(_V3_MAGIC)
+        try:
+            if VAULT_FILE.exists():
+                raw = VAULT_FILE.read_bytes()
+                is_v3 = raw.startswith(_V3_MAGIC)
+        except OSError:
+            pass  # unreadable vault → fall through to V2 path
 
         ctk.CTkLabel(win, text="Forgot Password",
                      font=FONT_H2, text_color=C["text"]
@@ -1726,7 +1729,7 @@ class LoginFrame(ctk.CTkFrame):
                     text_color=C["green"],
                 )
                 self.pw.delete(0, "end")
-            except ValueError as e:
+            except (ValueError, OSError) as e:
                 if "wrong_recovery_code" in str(e):
                     err_lbl.configure(text="Recovery key incorrect — check your written copy")
                 else:
