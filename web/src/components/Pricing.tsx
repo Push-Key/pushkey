@@ -10,11 +10,25 @@ interface Tier {
   desc: string
   cta: string
   ctaHref: string
+  ctaHrefAnnual?: string  // Optional separate Stripe link for annual billing
   highlight: boolean
   color: string
   badge?: string
   features: (string | null)[]
   extras?: string[]
+}
+
+// Stripe Payment Links — paste yours here after creating products in Stripe dashboard
+const STRIPE_LINKS = {
+  pro: {
+    monthly: process.env.NEXT_PUBLIC_STRIPE_PRO_MONTHLY || "/admin/login",
+    annual:  process.env.NEXT_PUBLIC_STRIPE_PRO_ANNUAL  || "/admin/login",
+  },
+  team: {
+    monthly: process.env.NEXT_PUBLIC_STRIPE_TEAM_MONTHLY || "/admin/login",
+    annual:  process.env.NEXT_PUBLIC_STRIPE_TEAM_ANNUAL  || "/admin/login",
+  },
+  lifetime: process.env.NEXT_PUBLIC_STRIPE_LIFETIME || "mailto:hello@push-key.com?subject=Lifetime Deal",
 }
 
 const TIERS: Tier[] = [
@@ -24,7 +38,7 @@ const TIERS: Tier[] = [
     price: { monthly: 0, annual: 0 },
     desc: "Personal use, side projects",
     cta: "Download Free",
-    ctaHref: "#",
+    ctaHref: "https://github.com/Push-Key/pushkey/releases",
     highlight: false,
     color: "#64748B",
     features: [
@@ -44,7 +58,8 @@ const TIERS: Tier[] = [
     price: { monthly: 19, annual: 14 },
     desc: "Power users & indie makers",
     cta: "Go Pro",
-    ctaHref: "#pricing",
+    ctaHref: STRIPE_LINKS.pro.monthly,
+    ctaHrefAnnual: STRIPE_LINKS.pro.annual,
     highlight: true,
     color: "#7C3AED",
     badge: "Most Popular",
@@ -66,7 +81,8 @@ const TIERS: Tier[] = [
     priceNote: "per 5 seats · $10/seat after",
     desc: "Dev teams that ship together",
     cta: "Start Team",
-    ctaHref: "#pricing",
+    ctaHref: STRIPE_LINKS.team.monthly,
+    ctaHrefAnnual: STRIPE_LINKS.team.annual,
     highlight: false,
     color: "#34D399",
     features: [
@@ -87,7 +103,7 @@ const TIERS: Tier[] = [
     priceNote: "one-time · limited to 500",
     desc: "Pay once, own forever",
     cta: "Get Lifetime Deal",
-    ctaHref: "mailto:hello@pushkey.dev?subject=Lifetime Deal",
+    ctaHref: STRIPE_LINKS.lifetime,
     highlight: false,
     color: "#FBBF24",
     badge: "Limited",
@@ -109,7 +125,7 @@ const TIERS: Tier[] = [
     priceNote: "from $499/mo",
     desc: "Compliance-heavy teams",
     cta: "Contact Sales",
-    ctaHref: "mailto:hello@pushkey.dev",
+    ctaHref: "mailto:hello@push-key.com",
     highlight: false,
     color: "#F59E0B",
     features: [
@@ -201,7 +217,12 @@ export default function Pricing() {
               </div>
 
               {/* CTA */}
-              <a href={tier.ctaHref}
+              {(() => {
+                const href = annual && tier.ctaHrefAnnual ? tier.ctaHrefAnnual : tier.ctaHref
+                return (
+              <a href={href}
+                target={href.startsWith("http") ? "_blank" : undefined}
+                rel={href.startsWith("http") ? "noopener noreferrer" : undefined}
                 className="block text-center text-sm font-semibold py-2.5 px-4 rounded-lg mb-5 transition-all"
                 style={{
                   background: tier.highlight ? "#7C3AED" : "rgba(255,255,255,0.06)",
@@ -212,6 +233,7 @@ export default function Pricing() {
                 onMouseLeave={e => { e.currentTarget.style.opacity = "1" }}>
                 {tier.cta}
               </a>
+              )})()}
 
               {/* Features */}
               <div className="space-y-2 flex-1">
@@ -248,7 +270,7 @@ export default function Pricing() {
               Off-grid hardware vault. Encrypted vault lives on the USB — unplug and keys vanish from memory. Includes Pro for 12 months.
             </p>
           </div>
-          <a href="mailto:hello@pushkey.dev?subject=Vault Key USB"
+          <a href="mailto:hello@push-key.com?subject=Vault Key USB"
             className="flex-shrink-0 text-xs font-semibold py-2 px-4 rounded-lg transition-all whitespace-nowrap"
             style={{ background: "rgba(99,102,241,0.12)", color: "#818CF8", border: "1px solid rgba(99,102,241,0.25)" }}
             onMouseEnter={e => { e.currentTarget.style.opacity = "0.8" }}
