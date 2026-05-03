@@ -1,3 +1,4 @@
+"use client"
 import { ShieldCheck, Code2 } from "lucide-react"
 
 export default function SecuritySection() {
