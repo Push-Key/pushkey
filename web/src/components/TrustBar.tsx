@@ -1,4 +1,4 @@
-import { Shield, Lock, GitBranch, Github, Clipboard, Wifi } from "lucide-react"
+import { Shield, Lock, GitBranch, Code2, Clipboard, Wifi } from "lucide-react"
 
 const TRUST = [
   { icon: Shield, label: "AES-256-GCM Encryption" },

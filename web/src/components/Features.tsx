@@ -1,7 +1,7 @@
 "use client"
 import {
   ShieldCheck, RefreshCw, FolderSync, Link2, GitBranch, Cloud,
-  Users, KeyRound, Lock, Github, Fingerprint, Eye
+  Users, KeyRound, Lock, Code2, Fingerprint, Eye
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -15,7 +15,7 @@ const FEATURES: { icon: LucideIcon; title: string; desc: string; accent: string 
   { icon: Users, title: "Team RBAC", desc: "Share vaults with your team. Role-based access control — admins set policies, devs get read-only access to their keys.", accent: "#F59E0B" },
   { icon: KeyRound, title: "TOTP MFA", desc: "Two-factor authentication on vault unlock. Works with any TOTP app (Authy, Google Authenticator, 1Password).", accent: "#F59E0B" },
   { icon: Lock, title: "Clipboard Auto-clear", desc: "Copied keys automatically cleared from clipboard after 30 seconds. Revealed keys auto-hide after 10 seconds.", accent: "#00DC82" },
-  { icon: Github, title: "Open Source Core", desc: "The crypto layer and vault are MIT licensed. Audit every line that touches your keys — no trust required.", accent: "#A78BFA" },
+  { icon: Code2, title: "Open Source Core", desc: "The crypto layer and vault are MIT licensed. Audit every line that touches your keys — no trust required.", accent: "#A78BFA" },
   { icon: Fingerprint, title: "Hardware MFA (Enterprise)", desc: "YubiKey and hardware security key support for vaults that need the highest level of authentication assurance.", accent: "#F59E0B" },
   { icon: Eye, title: "Encrypted Audit Log", desc: "Every vault access, key rotation, and team action is logged in an encrypted audit trail for compliance.", accent: "#F59E0B" },
 ]

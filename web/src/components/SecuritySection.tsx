@@ -1,4 +1,4 @@
-import { ShieldCheck, Github } from "lucide-react"
+import { ShieldCheck, Code2 } from "lucide-react"
 
 export default function SecuritySection() {
   return (
@@ -39,7 +39,7 @@ export default function SecuritySection() {
                           style={{ color: "#64748B" }}
                           onMouseEnter={e => { e.currentTarget.style.color = "#94A3B8" }}
                           onMouseLeave={e => { e.currentTarget.style.color = "#64748B" }}>
-                          <Github size={10} /> view on GitHub
+                          <Code2 size={10} /> view on GitHub
                         </a>
                       )}
                     </div>
