@@ -50,6 +50,17 @@ async function updateBadge() {
   }
 }
 
+// Respond to popup refresh requests
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.action === "poll") {
+    updateBadge().then(() => {
+      chrome.runtime.sendMessage({ action: "healthUpdated" }).catch(() => {});
+      sendResponse({ ok: true });
+    });
+    return true; // keep channel open for async response
+  }
+});
+
 // Poll on install / startup
 chrome.runtime.onInstalled.addListener(updateBadge);
 chrome.runtime.onStartup.addListener(updateBadge);
