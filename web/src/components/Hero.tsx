@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { ArrowRight, Download, Lock, RefreshCw, FolderSync, Github } from "lucide-react"
+import { ArrowRight, Download, Lock, RefreshCw, FolderSync, Code2 } from "lucide-react"
 
 const TERMINAL_LINES = [
   { text: "$ pushkey add OPENAI_API_KEY sk-proj-...", delay: 0, color: "#94A3B8" },
@@ -66,7 +66,7 @@ export default function Hero() {
                 style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", color: "#94A3B8" }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)"; e.currentTarget.style.color = "#F8FAFC" }}
                 onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)"; e.currentTarget.style.color = "#94A3B8" }}>
-                <Github size={11} />
+                <Code2 size={11} />
                 Open source — audit the vault
                 <ArrowRight size={10} />
               </a>
