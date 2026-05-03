@@ -1,17 +1,11 @@
 <div align="center">
 
-<img src="pushkey_logo.png" alt="Pushkey" width="120" />
-
-# 🔑 Pushkey
-
-**The encrypted API key manager built for developers.**
-
-*Secure vault · Smart rotation · Zero plaintext on disk*
+<img src="docs/banner.png" alt="Pushkey — Encrypted API key manager for developers" width="100%" />
 
 <br/>
 
 [![Version](https://img.shields.io/badge/version-2.1.0-00d9ff?style=for-the-badge&logo=github)](https://github.com/Push-Key/pushkey/releases)
-[![npm](https://img.shields.io/badge/npm-pushkey-cb3837?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/pushkey)
+[![npm](https://img.shields.io/badge/npm-%40pushkey%2Fcli-cb3837?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/@pushkey/cli)
 [![License](https://img.shields.io/badge/license-MIT-7c3aed?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3572A5?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Tests](https://img.shields.io/badge/tests-107%20passing-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
@@ -52,7 +46,7 @@ Most developers manage API keys in `.env` files, shell profiles, or their brain.
 
 **via npm** *(recommended — works everywhere Node is installed)*
 ```bash
-npm install -g pushkey
+npm install -g @pushkey/cli
 ```
 
 **via pip**
@@ -62,7 +56,7 @@ pip install pushkey
 
 **via npx** *(no install needed)*
 ```bash
-npx pushkey --help
+npx @pushkey/cli --help
 ```
 
 **from source**
