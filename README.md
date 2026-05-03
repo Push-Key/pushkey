@@ -10,7 +10,8 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-2.1.0-00d9ff?style=for-the-badge&logo=github)](https://github.com/ebothegreat/pushkey/releases)
+[![Version](https://img.shields.io/badge/version-2.1.0-00d9ff?style=for-the-badge&logo=github)](https://github.com/Push-Key/pushkey/releases)
+[![npm](https://img.shields.io/badge/npm-pushkey-cb3837?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/pushkey)
 [![License](https://img.shields.io/badge/license-MIT-7c3aed?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3572A5?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Tests](https://img.shields.io/badge/tests-107%20passing-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
@@ -47,21 +48,26 @@ Most developers manage API keys in `.env` files, shell profiles, or their brain.
 
 ## ⚡ Quick Start
 
-### Prerequisites
-
-- 🐍 Python 3.12+
-- 📦 pip
-
 ### Install
 
+**via npm** *(recommended — works everywhere Node is installed)*
+```bash
+npm install -g pushkey
+```
+
+**via pip**
 ```bash
 pip install pushkey
 ```
 
-Or from source:
-
+**via npx** *(no install needed)*
 ```bash
-git clone https://github.com/ebothegreat/pushkey.git
+npx pushkey --help
+```
+
+**from source**
+```bash
+git clone https://github.com/Push-Key/pushkey.git
 cd pushkey
 pip install -r requirements.txt
 ```
@@ -347,6 +353,69 @@ pytest --cov=. --cov-report=term-missing
 | `test_cli.py` | CLI commands — 26 tests |
 | `test_tiers.py` | License, tier gates, heartbeat — 23 tests |
 | `test_ui_helpers.py` | `_log_line_age_days` |
+
+---
+
+## 🔓 Open-Core Model
+
+Pushkey is **open-core** — the security-critical layer is fully open so you can audit exactly what protects your keys. The monetization layer is proprietary.
+
+| Component | Open Source | Why |
+|-----------|:-----------:|-----|
+| `pushkey_crypto.py` — AES-256-GCM, Argon2id | ✅ | Audit the thing protecting your secrets |
+| `pushkey_vault.py` — vault I/O | ✅ | Verify no plaintext ever touches disk |
+| `pushkey_cli.py` — full CLI | ✅ | Free forever, no feature limits |
+| `pushkey_providers.py` — 32+ providers | ✅ | Community can add new providers |
+| `providers.json` — pattern registry | ✅ | Community contributions welcome |
+| Desktop GUI | ❌ | Free tier (15 keys) → paid for full access |
+| Cloud sync backend | ❌ | Starter+ |
+| CI/CD push, Team RBAC, SSO | ❌ | Pro / Team / Enterprise |
+
+The CLI has **no key limit** and **no feature gates**. The GUI is where the tier system lives.
+
+---
+
+## 🧠 How the Crypto Works
+
+> Skip this if you just want to use Pushkey. Read this if you want to understand why it's safe to trust it with production secrets.
+
+### The core insight
+
+Most "encrypted" tools encrypt the data directly with a password-derived key. This means:
+- Changing your password requires re-encrypting all data
+- There's no way to add a second unlock path (recovery key) without a completely different design
+
+Pushkey uses **envelope encryption** — the same pattern AWS KMS, Age, and 1Password use:
+
+```
+Password  ──→  Argon2id  ──→  pw_key  ──→  encrypts ──→  vault_key (256-bit random)
+                                                               │
+Recovery  ──→  Argon2id  ──→  rec_key ──→  encrypts ──→  vault_key (same key)
+                                                               │
+                                                         encrypts body
+                                                               │
+                                                          vault JSON
+```
+
+The `vault_key` is random, generated once, never written to disk in plaintext. Both the password slot and the recovery slot are just two different encrypted copies of the same `vault_key`. This means:
+
+- **Changing your password** → re-encrypt one 32-byte slot. Body untouched.
+- **Adding a recovery key** → encrypt one extra 32-byte slot. Nothing else changes.
+- **Compromising one slot** → doesn't reveal the other slot (independent salts, independent Argon2id invocations)
+
+### Why Argon2id
+
+Argon2id won the Password Hashing Competition (2015). It's memory-hard — cracking requires both CPU time AND RAM, which makes GPU/ASIC attacks expensive:
+
+```
+time_cost   = 3      iterations
+memory_cost = 65536  KB = 64 MB per attempt
+parallelism = 4      threads
+
+→ ~300ms on a modern laptop per attempt
+→ A GPU farm that does 1B SHA256/sec does ~15K Argon2id/sec at these settings
+→ 8-char random password: ~200 years to crack at scale
+```
 
 ---
 

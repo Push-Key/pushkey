@@ -1,0 +1,35 @@
+{
+  "name": "pushkey",
+  "version": "2.1.0",
+  "description": "Encrypted API key manager for developers — AES-256-GCM vault, zero-knowledge sync",
+  "keywords": [
+    "api-keys",
+    "secrets",
+    "vault",
+    "encryption",
+    "dotenv",
+    "cli",
+    "developer-tools",
+    "security"
+  ],
+  "homepage": "https://pushkey.dev",
+  "bugs": "https://github.com/Push-Key/pushkey/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Push-Key/pushkey.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "pushkey": "./bin/pushkey"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}
