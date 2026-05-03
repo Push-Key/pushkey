@@ -2272,42 +2272,41 @@ class LoginFrame(ctk.CTkFrame):
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
         # ── Card with cyan accent strip on top ──
+        # The logo image already carries the wordmark + tagline so the card
+        # is leaner: logo block, password row, CTA. No redundant text.
         card = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=14,
                             border_width=1, border_color=C["border"])
-        card.pack(pady=20, padx=180, fill="x")
+        card.pack(pady=12, padx=200, fill="x")
 
         # Cyan accent stripe at the very top of the card
-        stripe = ctk.CTkFrame(card, fg_color=C["accent"], height=3, corner_radius=0)
-        stripe.pack(fill="x")
+        ctk.CTkFrame(card, fg_color=C["accent"], height=3, corner_radius=0
+                     ).pack(fill="x")
 
-        # ── Brand zone (logo + tagline only — wordmark removed per request) ──
-        brand_box = ctk.CTkFrame(card, fg_color="transparent")
-        brand_box.pack(pady=(28, 6), padx=32)
+        # ── Logo block (the PNG is the brand) ──
+        logo_box = ctk.CTkFrame(card, fg_color="transparent")
+        logo_box.pack(pady=(20, 6), padx=32)
 
-        # Logo placeholder — replaced in _load_login_logo with the real PNG.
-        # Bigger now that it's the only brand element.
-        self._logo_slot = ctk.CTkLabel(brand_box, text="⬡",
-                                       font=(_MONO_FONT, 72, "bold"),
+        # Placeholder — replaced in _load_login_logo with the real PNG (which
+        # already includes the PUSHKEY wordmark + offline-first tagline)
+        self._logo_slot = ctk.CTkLabel(logo_box, text="PUSHKEY",
+                                       font=(_UI_FONT, 32, "bold"),
                                        text_color=C["accent"])
-        self._logo_slot.pack(pady=(0, 8))
+        self._logo_slot.pack()
         self._logo_card = card
         self.after(0, self._load_login_logo)
 
-        tagline = ("Create a master password to get started"
-                   if self.is_new
-                   else "Enter your master password to unlock")
-        ctk.CTkLabel(brand_box, text=tagline, font=FONT_SM,
-                     text_color=C["text3"]).pack(pady=(2, 0))
-
-        # Visible divider
-        ctk.CTkFrame(card, fg_color=C["border"], height=1
-                     ).pack(fill="x", padx=32, pady=(20, 18))
+        # Single one-line action prompt under the logo
+        prompt = ("Create a master password to get started"
+                  if self.is_new
+                  else "Enter your master password to unlock")
+        ctk.CTkLabel(card, text=prompt, font=FONT_SM,
+                     text_color=C["text3"]).pack(pady=(0, 18))
 
         # ── Form ──
         form = ctk.CTkFrame(card, fg_color="transparent")
-        form.pack(padx=32, fill="x")
+        form.pack(padx=36, fill="x")
 
-        # Master password label row with lock icon
+        # Master password label with lock icon
         pw_lbl_row = ctk.CTkFrame(form, fg_color="transparent")
         pw_lbl_row.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(pw_lbl_row, text="", image=icon("lock", 12, C["text3"]),
@@ -2316,7 +2315,7 @@ class LoginFrame(ctk.CTkFrame):
                      font=(_UI_FONT, 9, "bold"),
                      text_color=C["text3"]).pack(side="left", padx=(4, 0))
 
-        # Password input + reveal toggle (eye icon button on the right)
+        # Password input + reveal toggle
         pw_row = ctk.CTkFrame(form, fg_color="transparent")
         pw_row.pack(fill="x")
         self.pw = ctk.CTkEntry(
@@ -2325,7 +2324,7 @@ class LoginFrame(ctk.CTkFrame):
             border_color=C["accent"], border_width=2,
             placeholder_text="Enter your password",
             placeholder_text_color=C["text3"],
-            corner_radius=8, height=42,
+            corner_radius=8, height=44,
         )
         self.pw.pack(side="left", fill="x", expand=True, ipady=2)
         self.pw.focus_set()
@@ -2336,7 +2335,7 @@ class LoginFrame(ctk.CTkFrame):
             command=self._toggle_reveal,
             fg_color=C["bg3"], hover_color=C["btn_hover"],
             border_width=2, border_color=C["accent"],
-            corner_radius=8, height=42, width=42,
+            corner_radius=8, height=44, width=44,
         )
         self._reveal_btn.pack(side="left", padx=(6, 0))
 
@@ -2351,7 +2350,6 @@ class LoginFrame(ctk.CTkFrame):
             self._strength_lbl.pack(anchor="w", pady=(6, 0))
             self.pw.bind("<KeyRelease>", lambda e: self._update_strength())
 
-            # Confirm row
             ctk.CTkLabel(form, text="CONFIRM PASSWORD",
                          font=(_UI_FONT, 9, "bold"),
                          text_color=C["text3"]
@@ -2362,12 +2360,12 @@ class LoginFrame(ctk.CTkFrame):
                 border_color=C["border2"], border_width=2,
                 placeholder_text="Re-enter password",
                 placeholder_text_color=C["text3"],
-                corner_radius=8, height=42,
+                corner_radius=8, height=44,
             )
             self.pw2.pack(fill="x", ipady=2)
             self.pw2.bind("<Return>", lambda e: self.unlock())
 
-        # Primary CTA — big with icon and arrow
+        # Primary CTA
         ctk.CTkButton(
             form,
             text="  " + ("Create Vault" if self.is_new else "Unlock Vault"),
@@ -2376,33 +2374,15 @@ class LoginFrame(ctk.CTkFrame):
             command=self.unlock,
             fg_color=C["accent"], hover_color=C["accent2"],
             text_color="#FFFFFF", font=(_UI_FONT, 13, "bold"),
-            corner_radius=8, height=44,
+            corner_radius=8, height=46,
         ).pack(fill="x", pady=(18, 0))
 
         self.err = ctk.CTkLabel(form, text="", font=FONT_XS, text_color=C["red"])
         self.err.pack(pady=(8, 0))
 
-        ctk.CTkFrame(card, fg_color="transparent", height=22).pack()
-
-        # ── Trust signals strip at bottom of card ──
-        trust = ctk.CTkFrame(card, fg_color=C["bg3"], corner_radius=0,
-                             height=42)
-        trust.pack(fill="x", side="bottom")
-        trust.pack_propagate(False)
-        trust_inner = ctk.CTkFrame(trust, fg_color="transparent")
-        trust_inner.pack(expand=True)
-
-        def _trust_chip(ico_name, text):
-            chip = ctk.CTkFrame(trust_inner, fg_color="transparent")
-            chip.pack(side="left", padx=14)
-            ctk.CTkLabel(chip, text="", image=icon(ico_name, 12, C["accent"]),
-                         width=14).pack(side="left")
-            ctk.CTkLabel(chip, text=text, font=(_UI_FONT, 9, "bold"),
-                         text_color=C["text3"]).pack(side="left", padx=(4, 0))
-
-        _trust_chip("shield", "AES-256")
-        _trust_chip("lock",   "ZERO-KNOWLEDGE")
-        _trust_chip("key",    "OFFLINE-FIRST")
+        # Trust chips removed — the logo's tagline ("Offline-first API key vault")
+        # already carries that signal; the chips were redundant.
+        ctk.CTkFrame(card, fg_color="transparent", height=24).pack()
 
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
@@ -2447,7 +2427,14 @@ class LoginFrame(ctk.CTkFrame):
         try:
             from PIL import Image as _PILImage
             pil = _PILImage.open(_logo_path).convert("RGBA")
-            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(150, 150))
+            # Logo PNG includes wordmark + tagline already, so scale wide
+            # rather than square. Keep the source aspect ratio so the
+            # rendered image isn't squashed.
+            w, h = pil.size
+            target_w = 280
+            target_h = int(h * target_w / w)
+            img = ctk.CTkImage(light_image=pil, dark_image=pil,
+                               size=(target_w, target_h))
             self._logo_slot.configure(image=img, text="")
             self._login_logo_img = img  # keep ref
         except Exception:
