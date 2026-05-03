@@ -56,6 +56,13 @@ export const adminApi = {
   renew: (s: string, key: string) =>
     call<void>(s, `/api/admin/licenses/${encodeURIComponent(key)}/renew`, { method: "POST" }),
 
+  analytics: (s: string) =>
+    call<{
+      daily_activations: { date: string; count: number }[]
+      daily_heartbeats:  { date: string; count: number }[]
+      event_totals: Record<string, number>
+    }>(s, "/api/admin/analytics"),
+
   async exportCsv(s: string): Promise<void> {
     const r = await fetch(`${API}/api/admin/export`, { headers: h(s) })
     if (!r.ok) throw new Error("Export failed")

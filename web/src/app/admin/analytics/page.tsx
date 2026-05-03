@@ -75,16 +75,27 @@ function DonutChart({ slices, size = 120 }: {
   )
 }
 
+interface AnalyticsData {
+  daily_activations: { date: string; count: number }[]
+  daily_heartbeats:  { date: string; count: number }[]
+  event_totals: Record<string, number>
+}
+
 export default function AnalyticsPage() {
   const { secret } = useAdmin()
   const [licenses, setLicenses] = useState<License[]>([])
   const [stats, setStats] = useState<AdminStats | null>(null)
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!secret) return
-    Promise.all([adminApi.licenses(secret), adminApi.stats(secret)])
-      .then(([lics, s]) => { setLicenses(lics); setStats(s) })
+    Promise.all([
+      adminApi.licenses(secret),
+      adminApi.stats(secret),
+      adminApi.analytics(secret),
+    ])
+      .then(([lics, s, a]) => { setLicenses(lics); setStats(s); setAnalytics(a) })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [secret])
@@ -123,6 +134,11 @@ export default function AnalyticsPage() {
   const rotationRate = total > 0
     ? Math.round((licenses.filter(l => l.status !== "active").length / total) * 100)
     : 0
+
+  // 30-day sparkline data
+  const actData = analytics?.daily_activations ?? []
+  const hbData  = analytics?.daily_heartbeats  ?? []
+  const totalHeartbeats = analytics?.event_totals?.heartbeat ?? 0
 
   if (loading) return <div className="p-8 text-[#94A3B8]">Loading analytics…</div>
 
@@ -184,9 +200,91 @@ export default function AnalyticsPage() {
         <p className="text-xs text-[#94A3B8] mb-4">Where clients are running Pushkey</p>
         {platformBarData.length > 0
           ? <BarChart data={platformBarData} colorFn={() => "#60A5FA"} />
-          : <p className="text-center text-[#94A3B8] py-10 text-sm">No platform data — platform is populated when a client first heartbeats</p>
+          : <p className="text-center text-[#94A3B8] py-10 text-sm">No platform data — populated when a client first heartbeats</p>
         }
       </div>
+
+      {/* 30-day trend charts */}
+      <div className="grid grid-cols-2 gap-6">
+        <TrendChart
+          label="Activations — Last 30 Days"
+          sub="New license keys generated per day"
+          data={actData}
+          color="#00DC82"
+        />
+        <TrendChart
+          label="Heartbeats — Last 30 Days"
+          sub={`Total ${totalHeartbeats.toLocaleString()} pings · client liveness checks`}
+          data={hbData}
+          color="#60A5FA"
+        />
+      </div>
+
+      {/* Event totals */}
+      {analytics && Object.keys(analytics.event_totals).length > 0 && (
+        <div className="bg-[#0D1B2A] border border-white/8 rounded-xl p-5">
+          <p className="text-sm font-semibold text-white mb-4">All-Time Event Totals</p>
+          <div className="flex flex-wrap gap-4">
+            {Object.entries(analytics.event_totals).map(([type, count]) => (
+              <div key={type} className="bg-[#060B14] rounded-lg px-4 py-3 min-w-[120px]">
+                <p className="text-[10px] uppercase tracking-widest text-[#94A3B8] capitalize">{type}</p>
+                <p className="text-2xl font-bold text-white mt-1">{count.toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Trend line chart (SVG sparkline) ─────────────────────────────
+function TrendChart({ label, sub, data, color }: {
+  label: string; sub: string
+  data: { date: string; count: number }[]
+  color: string
+}) {
+  const W = 500; const H = 80; const pad = 8
+  const max = Math.max(...data.map(d => d.count), 1)
+  const pts = data.map((d, i) => {
+    const x = pad + (i / (data.length - 1)) * (W - pad * 2)
+    const y = H - pad - (d.count / max) * (H - pad * 2)
+    return `${x},${y}`
+  }).join(" ")
+
+  const hasData = data.some(d => d.count > 0)
+
+  return (
+    <div className="bg-[#0D1B2A] border border-white/8 rounded-xl p-5">
+      <p className="text-sm font-semibold text-white mb-0.5">{label}</p>
+      <p className="text-xs text-[#94A3B8] mb-4">{sub}</p>
+      {hasData ? (
+        <>
+          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 80 }}>
+            <defs>
+              <linearGradient id={`grad-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+                <stop offset="100%" stopColor={color} stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            {/* Fill area */}
+            <polygon
+              points={`${pad},${H} ${pts} ${W - pad},${H}`}
+              fill={`url(#grad-${color.replace("#", "")})`}
+            />
+            {/* Line */}
+            <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+          </svg>
+          {/* X-axis labels: first, middle, last */}
+          <div className="flex justify-between mt-1">
+            <span className="text-[10px] text-[#94A3B8]">{data[0]?.date?.slice(5)}</span>
+            <span className="text-[10px] text-[#94A3B8]">{data[Math.floor(data.length / 2)]?.date?.slice(5)}</span>
+            <span className="text-[10px] text-[#94A3B8]">{data[data.length - 1]?.date?.slice(5)}</span>
+          </div>
+        </>
+      ) : (
+        <p className="text-center text-[#94A3B8] py-6 text-sm">No data yet — events will appear here as they occur</p>
+      )}
     </div>
   )
 }
