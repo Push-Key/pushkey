@@ -2966,9 +2966,14 @@ class AppFrame(ctk.CTkFrame):
         self.config["theme"] = new_mode
         save_config(self.config)
         if self.app is not None:
-            # In-place recolor — drastically faster than a full AppFrame rebuild.
-            # Updates root + sidebar chrome, then re-renders only the active tab.
-            self.master.after(0, self._apply_theme_inplace)
+            # Full rebuild on theme switch. The earlier in-place recolor
+            # only re-skinned the major chrome containers and left every
+            # nested CTkFrame/Label with its old palette — that's why the
+            # top bar stayed white in dark mode and white lines bled
+            # through. Rebuilding the AppFrame guarantees every widget
+            # picks up the new C palette consistently.
+            pw, vault = self.password, self.vault
+            self.master.after(0, lambda: self.app.reload_app(pw, vault))
         else:
             self._theme_btn.configure(text="☀" if new_mode == "dark" else "☾")
 
