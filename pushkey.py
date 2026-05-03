@@ -2434,6 +2434,90 @@ class LoginFrame(ctk.CTkFrame):
 # MAIN APP SCREEN
 # ═══════════════════════════════════════════════
 
+# Section help text — keyed by section name. Shown in popup when user
+# clicks the "?" badge in any section header.
+SECTION_HELP = {
+    "dashboard": (
+        "Dashboard",
+        "A real-time overview of your vault's health.\n\n"
+        "• Security Score — what fraction of your keys are healthy\n"
+        "• Total / Healthy / Need Rotation / Projects — current counts\n"
+        "• Rotation Rate — how many keys you've rotated in the last 30 days\n"
+        "• Forecast Heatmap — color intensity = rotations due that day\n"
+        "• Upcoming Rotations — next 5 keys due, with relative dates\n"
+        "• Action Needed — callouts for any critical or warning keys\n"
+        "• Recent Activity — last 8 vault events, color-tagged by type\n\n"
+        "Tip: every metric in red or amber is something you should act on now."
+    ),
+    "keys": (
+        "All Keys",
+        "Every secret in your vault, grouped by file or category.\n\n"
+        "• Click any row to open the full detail view (value, history, schedule)\n"
+        "• Search by name, provider, env, or category in the box above\n"
+        "• Filter by environment with the pill row (DEV / STAGING / PROD)\n"
+        "• Inline actions: Copy / Show / Rotate / Open / Del — no modal needed\n"
+        "• Health pill shows rotation status; click Rotate to refresh the value\n"
+        "• Bulk-select with the checkboxes for multi-delete\n\n"
+        "Tip: 'By File' vs 'By Category' grouping lives in the toolbar — switch "
+        "depending on whether you think in projects or in providers."
+    ),
+    "projects": (
+        "Projects",
+        "Link a folder on disk to keys in your vault.\n\n"
+        "Pushkey writes a .env file into the linked folder whenever you add "
+        "or rotate a matching key, so your code always has the latest values "
+        "without you copy-pasting.\n\n"
+        "• Browse → pick a folder → name auto-fills\n"
+        "• TARGET ENV filters which keys flow in (e.g. only PROD keys)\n"
+        "• ASSIGNED count shows how many keys flow into this project\n"
+        "• AUTO-MATCH AVAILABLE means Pushkey found candidates by name "
+        "but you haven't approved them yet — click Assign Keys\n"
+        "• Sync .env writes the file now; CI Sync pushes to GitHub/Vercel/Railway\n\n"
+        "Pushkey always adds .env to the project's .gitignore."
+    ),
+    "security": (
+        "Security",
+        "Scan your codebase and git history for exposed secrets.\n\n"
+        "• Code scan walks linked project folders for hard-coded keys\n"
+        "• Git scan looks at past commits for keys that were committed and "
+        "later removed — those are still leaked and need rotation\n"
+        "• Found keys are matched against your vault so you know which "
+        "credentials to rotate immediately\n"
+        "• Policies enforce rules per group (e.g. 'prod keys must rotate "
+        "every 30 days', 'no AI keys in browser-pushkey project')\n\n"
+        "Run a scan after pulling a new repo or before pushing — it takes "
+        "seconds and prevents the most common credential leaks."
+    ),
+    "cloud": (
+        "Cloud Sync",
+        "Mirror your vault across devices.\n\n"
+        "• Zero-knowledge — only AES-GCM ciphertext leaves your machine; "
+        "the server can't decrypt anything\n"
+        "• Auto-sync runs in the background every few minutes when online\n"
+        "• Conflict resolution lets you pick a side if two devices edit "
+        "the same key while offline\n"
+        "• Devices list shows everything signed into your account; revoke "
+        "any device that you no longer trust\n\n"
+        "If you're using Pushkey on a single machine you can ignore this "
+        "tab entirely — the local vault works fully offline."
+    ),
+    "timeline": (
+        "Timeline",
+        "The lifecycle of every key.\n\n"
+        "• Lifecycle — one card per key: created, last rotated, next due, "
+        "and a progress bar showing where you are in the cycle. Filter by "
+        "status (All / Critical / Warning / Healthy)\n"
+        "• Activity — paginated audit log of every vault event with "
+        "color-tagged categories. Filter by Rotations / Imports / Logins\n"
+        "• Forecast — stat strip + 90-day heatmap + grouped 'due' lists "
+        "(Overdue / This Week / This Month / Later)\n\n"
+        "Use Lifecycle to triage which keys to rotate first; use Activity "
+        "to investigate suspicious access; use Forecast to plan rotations "
+        "into your calendar."
+    ),
+}
+
+
 class AppFrame(ctk.CTkFrame):
     def __init__(self, master, password, vault, on_lock, app=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
@@ -2731,24 +2815,92 @@ class AppFrame(ctk.CTkFrame):
         # Re-run nav switch to recolor sidebar buttons + repaint active tab
         self._nav_switch(active)
 
+    def _help_btn(self, parent, key, side="left"):
+        """Add a small ? badge that pops a section help modal."""
+        btn = ctk.CTkButton(
+            parent, text="?", command=lambda k=key: self._show_help(k),
+            font=(_UI_FONT, 11, "bold"),
+            fg_color=C["accent_dim"], hover_color=C["accent"],
+            text_color=C["accent"], width=22, height=22,
+            corner_radius=11, border_width=1, border_color=C["accent"],
+        )
+        btn.pack(side=side, padx=(8, 4))
+        return btn
+
+    def _show_help(self, key: str):
+        title, body = SECTION_HELP.get(key, (key.title(), "No help available."))
+        win = ctk.CTkToplevel(self)
+        win.title(f"How to use — {title}")
+        win.geometry("520x440")
+        win.minsize(420, 320)
+        win.configure(fg_color=C["bg"])
+        win.transient(self)
+        win.grab_set()
+
+        # Header tinted accent_dim
+        hdr = ctk.CTkFrame(win, fg_color=C["accent_dim"], corner_radius=0,
+                           height=64)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        ctk.CTkFrame(hdr, fg_color=C["accent"], height=3).pack(fill="x")
+        row = ctk.CTkFrame(hdr, fg_color="transparent")
+        row.pack(fill="both", expand=True, padx=18)
+        ctk.CTkLabel(row, text="?", font=(_UI_FONT, 22, "bold"),
+                     text_color=C["accent"]).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(row, text=title, font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
+
+        # Bottom Close (pinned)
+        bot = ctk.CTkFrame(win, fg_color="transparent", height=56)
+        bot.pack(side="bottom", fill="x")
+        bot.pack_propagate(False)
+        ctk.CTkFrame(bot, fg_color=C["border"], height=1).pack(fill="x")
+        make_btn(bot, "Got it", win.destroy,
+                 fg_color=C["accent"], text_color="#FFFFFF",
+                 width=100, height=32).pack(pady=10)
+
+        # Body — scrollable so long help still reachable on small windows
+        body_box = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0)
+        body_box.pack(fill="both", expand=True)
+        ctk.CTkLabel(body_box, text=body, font=FONT_SM,
+                     text_color=C["text2"], anchor="nw",
+                     wraplength=460, justify="left"
+                     ).pack(fill="x", padx=20, pady=(14, 18))
+
     def _show_settings(self):
         win = ctk.CTkToplevel(self)
         win.title("Settings")
-        win.geometry("400x480")
+        win.geometry("440x560")
+        win.minsize(380, 400)
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
         win.lift()
 
+        # Header (pinned)
         ctk.CTkLabel(win, text="Settings", font=FONT_H2,
                      text_color=C["text"]).pack(anchor="w", padx=20, pady=(18, 12))
 
+        # Pinned bottom — close button stays in view
+        bottom = ctk.CTkFrame(win, fg_color="transparent", height=56)
+        bottom.pack(side="bottom", fill="x")
+        bottom.pack_propagate(False)
+        ctk.CTkFrame(bottom, fg_color=C["border"], height=1).pack(fill="x")
+        make_btn(bottom, "Close", win.destroy,
+                 fg_color=C["red_bg"], text_color=C["red"],
+                 width=100, height=32).pack(pady=10)
+
+        # Scrollable body — fills remaining space so all setting cards
+        # are reachable even on a short window.
+        body = ctk.CTkScrollableFrame(win, fg_color=C["bg2"], corner_radius=0)
+        body.pack(fill="both", expand=True)
+
         def section(label):
-            ctk.CTkLabel(win, text=label, font=FONT_XS,
+            ctk.CTkLabel(body, text=label, font=FONT_XS,
                          text_color=C["text3"]).pack(anchor="w", padx=20, pady=(10, 4))
 
         def row_btn(label, cmd, color=None, text_col=None):
-            make_btn(win, label, cmd,
+            make_btn(body, label, cmd,
                      fg_color=color or C["btn"],
                      text_color=text_col or C["text2"],
                      width=360, height=34,
@@ -2775,11 +2927,8 @@ class AppFrame(ctk.CTkFrame):
         section("DATA")
         row_btn("Update Providers Registry", self.do_update_providers)
 
-        ctk.CTkFrame(win, fg_color=C["border"], height=1).pack(
-            fill="x", padx=20, pady=(16, 10))
-        make_btn(win, "Close", win.destroy,
-                 fg_color=C["red_bg"], text_color=C["red"],
-                 width=100, height=32).pack(pady=4)
+        # tail spacer so last button isn't flush against the divider
+        ctk.CTkFrame(body, fg_color="transparent", height=12).pack()
 
     # ── License gate ─────────────────────────────────────────
     def _gate(self, feature: str, current_count: int = 0) -> bool:
@@ -3335,8 +3484,9 @@ class AppFrame(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0, height=44)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="☁️  CLOUD SYNC", font=("Consolas", 11, "bold"),
+        ctk.CTkLabel(hdr, text="CLOUD SYNC", font=(_UI_FONT, 13, "bold"),
                      text_color=C["text"]).pack(side="left", padx=16)
+        self._help_btn(hdr, "cloud")
         make_btn(hdr, "Sync Now", lambda: self._do_cloud_sync_now(),
                  fg_color=C["accent"], text_color="white").pack(side="right", padx=12, pady=8)
 
@@ -3905,6 +4055,7 @@ class AppFrame(ctk.CTkFrame):
         header.pack(fill="x", padx=20, pady=(16, 0))
         ctk.CTkLabel(header, text="Timeline", font=FONT_H2,
                      text_color=C["text"]).pack(side="left")
+        self._help_btn(header, "timeline")
 
         # Sub-tab bar
         sub_bar = ctk.CTkFrame(self.timeline_frame, fg_color="transparent")
@@ -4637,6 +4788,7 @@ class AppFrame(ctk.CTkFrame):
         hdr_row.pack(fill="x", pady=(0, 16))
         ctk.CTkLabel(hdr_row, text="Dashboard", font=FONT_H2,
                      text_color=C["text"]).pack(side="left")
+        self._help_btn(hdr_row, "dashboard")
         t = TIERS[current_tier()]
         tier_pill = ctk.CTkFrame(hdr_row, fg_color=C["accent_dim"], corner_radius=10)
         tier_pill.pack(side="right")
@@ -4827,7 +4979,19 @@ class AppFrame(ctk.CTkFrame):
                              fg_color="transparent", text_color=C["accent"], width=120).pack(pady=(4, 0))
 
         # ── Row 3: Recent Activity Feed ──
-        all_log = list(reversed(_log_decrypt_all()))  # newest first
+        # Filter out garbled/non-English log lines (decryption junk, partial
+        # writes, foreign-locale chars). Keep only lines whose body is
+        # printable ASCII so the feed never shows mojibake.
+        def _readable(line: str) -> bool:
+            m = re.match(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*(.*)", line)
+            body = m.group(1) if m else line
+            if not body.strip():
+                return False
+            # Reject if more than 5% of chars are non-ASCII / non-printable
+            bad = sum(1 for c in body if ord(c) > 126 or (ord(c) < 32 and c not in "\t\n"))
+            return bad / max(1, len(body)) < 0.05
+
+        all_log = [ln for ln in reversed(_log_decrypt_all()) if _readable(ln)]
         if all_log:
             feed_hdr = ctk.CTkFrame(pad, fg_color="transparent")
             feed_hdr.pack(fill="x", pady=(0, 4))
@@ -4997,6 +5161,7 @@ class AppFrame(ctk.CTkFrame):
 
         ctk.CTkLabel(header, text="All Keys", font=FONT_H2,
                      text_color=C["text"]).pack(side="left")
+        self._help_btn(header, "keys")
 
         right_btns = ctk.CTkFrame(header, fg_color="transparent")
         right_btns.pack(side="right")
@@ -5008,10 +5173,11 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["accent"], text_color=C["bg"], height=30).pack(side="left", padx=(6, 0))
 
         # ── Search bar ── (icon + label inside so the affordance is unambiguous)
+        # 2px stronger border so it's visible on both themes.
         search_wrap = ctk.CTkFrame(self.keys_frame, fg_color=C["bg3"],
-                                    corner_radius=8, border_width=1,
-                                    border_color=C["border"])
-        search_wrap.pack(fill="x", padx=20, pady=(12, 0))
+                                    corner_radius=8, border_width=2,
+                                    border_color=C["border2"])
+        search_wrap.pack(fill="x", padx=20, pady=(12, 4))
         ctk.CTkLabel(search_wrap, text="", image=icon("search", 16, C["text3"]),
                      fg_color="transparent", width=22).pack(side="left", padx=(8, 0))
         ctk.CTkEntry(
@@ -5173,19 +5339,18 @@ class AppFrame(ctk.CTkFrame):
         # in the modal — the row is for scanning + quick actions only.
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
-        # Hairline divider above each row except the first
-        if self.keys_scroll.winfo_children():
-            ctk.CTkFrame(self.keys_scroll, fg_color=C["border"], height=1
-                         ).pack(fill="x", padx=2)
-
-        row = ctk.CTkFrame(self.keys_scroll, fg_color="transparent",
-                           corner_radius=4, cursor="hand2")
-        row.pack(fill="x", padx=2)
+        # Each row keeps its own outline so it reads as a card. Hover still
+        # tints the bg for affordance — outline never disappears.
+        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
+                           corner_radius=6, border_width=1,
+                           border_color=C["border"], cursor="hand2")
+        row.pack(fill="x", padx=4, pady=2)
         row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-        # Hover effect — bg lights up under cursor
-        def _hover_in(e, r=row): r.configure(fg_color=C["bg3"])
-        def _hover_out(e, r=row): r.configure(fg_color="transparent")
+        def _hover_in(e, r=row):
+            r.configure(fg_color=C["bg3"], border_color=C["accent"])
+        def _hover_out(e, r=row):
+            r.configure(fg_color=C["surface"], border_color=C["border"])
         row.bind("<Enter>", _hover_in)
         row.bind("<Leave>", _hover_out)
 
@@ -6787,8 +6952,9 @@ class AppFrame(ctk.CTkFrame):
         hdr = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0, height=44)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="🔍  SECRET SCANNER", font=("Consolas", 11, "bold"),
+        ctk.CTkLabel(hdr, text="SECRET SCANNER", font=(_UI_FONT, 13, "bold"),
                      text_color=C["text"]).pack(side="left", padx=16)
+        self._help_btn(hdr, "security")
         if self._scan_ts:
             ctk.CTkLabel(hdr, text=f"Last scan: {self._scan_ts}",
                          font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=8)
@@ -6960,6 +7126,13 @@ class AppFrame(ctk.CTkFrame):
 
         pad = ctk.CTkFrame(scroll, fg_color="transparent")
         pad.pack(fill="x", padx=16, pady=12)
+
+        # Header
+        proj_hdr = ctk.CTkFrame(pad, fg_color="transparent")
+        proj_hdr.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(proj_hdr, text="Projects", font=FONT_H2,
+                     text_color=C["text"]).pack(side="left")
+        self._help_btn(proj_hdr, "projects")
 
         # Add project form
         form = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6)
