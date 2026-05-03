@@ -40,7 +40,7 @@ _V3_HEADER_SIZE = 200  # 4+32+32+12+48+12+48+12 = 200
 
 
 def generate_recovery_code() -> str:
-    """Returns PUSH-XXXX-XXXX-XXXX-XXXX (100 bits entropy, base32)."""
+    """Returns PUSH-XXXX-XXXX-XXXX-XXXX (80 bits entropy, base32)."""
     import base64 as _b64
     raw = secrets.token_bytes(13)
     b32 = _b64.b32encode(raw).decode().rstrip("=")[:20].upper()
@@ -86,6 +86,8 @@ def decrypt_data_v3(
 ) -> tuple:
     """Returns (plaintext, vault_key). Pass exactly one of password or recovery_code."""
     if not token.startswith(_V3_MAGIC):
+        raise ValueError("not_v3")
+    if len(token) < _V3_HEADER_SIZE:
         raise ValueError("not_v3")
 
     payload = token[len(_V3_MAGIC):]
