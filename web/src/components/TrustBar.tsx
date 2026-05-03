@@ -6,7 +6,7 @@ const TRUST = [
   { icon: Wifi, label: "Zero Network Access" },
   { icon: GitBranch, label: "Git History Scanner" },
   { icon: Clipboard, label: "Auto-clear Clipboard" },
-  { icon: Github, label: "Open Source Core" },
+  { icon: Code2, label: "Open Source Core" },
 ]
 
 export default function TrustBar() {
