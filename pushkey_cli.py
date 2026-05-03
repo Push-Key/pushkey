@@ -1,5 +1,5 @@
 """
-Pushkey CLI — standalone command-line interface.
+Pushkey CLI - standalone command-line interface.
 No tkinter dependency. Password via PUSHKEY_MASTER env var, --password arg, or prompt.
 """
 import argparse
@@ -294,7 +294,7 @@ def cmd_import(args, vault, password):
 def main():
     parser = argparse.ArgumentParser(
         prog="pushkey",
-        description="Pushkey — encrypted API key manager",
+        description="Pushkey - encrypted API key manager",
     )
     parser.add_argument("--password", "-p", help="Master password (or set PUSHKEY_MASTER)")
     sub = parser.add_subparsers(dest="command", required=True)
