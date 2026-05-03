@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.png" alt="Pushkey — Encrypted API key manager for developers" width="100%" />
+<img src="https://raw.githubusercontent.com/Push-Key/pushkey/main/docs/banner.png" alt="Pushkey — Encrypted API key manager for developers" width="100%" />
 
 <br/>
 
