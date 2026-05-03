@@ -1,3 +1,4 @@
+"use client"
 import { Shield, Lock, GitBranch, Code2, Clipboard, Wifi } from "lucide-react"
 
 const TRUST = [
