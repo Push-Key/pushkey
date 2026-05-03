@@ -161,6 +161,60 @@ async def health():
     return {"status": "ok", "service": "pushkey-cloud"}
 
 
+# ── Event log (append-only JSONL for analytics) ──────────────────
+EVENTS_FILE = DATA_DIR / "events.jsonl"
+
+def _log_event(event_type: str, data: dict) -> None:
+    entry = {"ts": datetime.utcnow().isoformat(), "type": event_type, **data}
+    with EVENTS_FILE.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def _load_events() -> list[dict]:
+    if not EVENTS_FILE.exists():
+        return []
+    lines = EVENTS_FILE.read_text().splitlines()
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+
+# ── Client-facing heartbeat ──────────────────────────────────────
+@app.post("/api/v1/heartbeat")
+async def heartbeat(request: Request):
+    """
+    Called by the Pushkey desktop app to record liveness.
+    Body: {"license_key": "...", "platform": "Windows 11", "version": "1.0.3"}
+    Returns tier and status so the client can gate features.
+    """
+    body = await request.json()
+    key = body.get("license_key", "").strip().upper()
+    platform = body.get("platform", "")
+    version = body.get("version", "")
+
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+
+    entry = lic[key]
+    if entry["status"] == "revoked":
+        raise HTTPException(403, "License revoked")
+
+    # Update heartbeat + platform
+    entry["last_heartbeat"] = datetime.utcnow().isoformat()
+    if platform:
+        entry["platform"] = platform
+    _save_licenses(lic)
+
+    # Log for analytics
+    _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version})
+
+    return {"status": entry["status"], "tier": entry["tier"], "ok": True}
+
+
 # ── Admin helpers ────────────────────────────────────────────────
 def _load_licenses() -> dict:
     if not LICENSES_FILE.exists():
@@ -233,6 +287,7 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     }
     lic[key] = entry
     _save_licenses(lic)
+    _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
     return entry
 
 
@@ -243,6 +298,7 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
         raise HTTPException(404, "License not found")
     lic[key]["status"] = "expired"
     _save_licenses(lic)
+    _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     return {"ok": True}
 
 
@@ -254,6 +310,7 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
     lic[key]["status"] = "revoked"
     lic[key]["last_heartbeat"] = None
     _save_licenses(lic)
+    _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     return {"ok": True}
 
 
@@ -264,7 +321,51 @@ async def admin_renew(key: str, _: None = Depends(_require_admin)):
         raise HTTPException(404, "License not found")
     lic[key]["status"] = "active"
     _save_licenses(lic)
+    _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     return {"ok": True}
+
+
+@app.get("/api/admin/analytics")
+async def admin_analytics(_: None = Depends(_require_admin)):
+    """
+    Returns 30-day time-series data for the analytics dashboard:
+    - daily_activations: [{date, count}] for last 30 days
+    - daily_heartbeats:  [{date, count}] for last 30 days
+    - event_totals: counts by event type
+    - tier_history: activations by tier for last 30 days
+    """
+    events = _load_events()
+    now = datetime.utcnow()
+
+    # Build 30-day date buckets
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
+    act_counts:  dict[str, int] = {d: 0 for d in days}
+    hb_counts:   dict[str, int] = {d: 0 for d in days}
+    tier_counts: dict[str, dict[str, int]] = {d: {} for d in days}
+    totals: dict[str, int] = {}
+
+    cutoff = (now - timedelta(days=30)).isoformat()
+    for ev in events:
+        ts = ev.get("ts", "")
+        if ts < cutoff:
+            continue
+        date = ts[:10]
+        etype = ev.get("type", "")
+        totals[etype] = totals.get(etype, 0) + 1
+        if date in act_counts:
+            if etype == "activated":
+                act_counts[date] += 1
+                tier = ev.get("tier", "unknown")
+                tier_counts[date][tier] = tier_counts[date].get(tier, 0) + 1
+            elif etype == "heartbeat":
+                hb_counts[date] += 1
+
+    return {
+        "daily_activations": [{"date": d, "count": act_counts[d]} for d in days],
+        "daily_heartbeats":  [{"date": d, "count": hb_counts[d]}  for d in days],
+        "tier_history":      [{"date": d, "tiers": tier_counts[d]} for d in days],
+        "event_totals":      totals,
+    }
 
 
 @app.get("/api/admin/export")
