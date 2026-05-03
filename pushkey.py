@@ -1732,9 +1732,9 @@ class LoginFrame(ctk.CTkFrame):
                 import threading
                 threading.Thread(target=maybe_heartbeat, daemon=True).start()
                 if mfa_is_enabled():
-                    self._show_mfa_prompt(pw, vault)
+                    self._show_mfa_prompt(pw, vault, _vault_key)
                 else:
-                    self.on_login(pw, vault)
+                    self.on_login(pw, vault, _vault_key)
             except ValueError as e:
                 self._failed_attempts = getattr(self, '_failed_attempts', 0) + 1
                 if self._failed_attempts >= 5:
@@ -1748,7 +1748,7 @@ class LoginFrame(ctk.CTkFrame):
                         self.err.configure(text=f"Wrong password ({5 - self._failed_attempts} attempts left)")
                 self.pw.delete(0, "end")
 
-    def _show_mfa_prompt(self, pw, vault):
+    def _show_mfa_prompt(self, pw, vault, vault_key=None):
         win = ctk.CTkToplevel(self)
         win.title("🔐 Two-Factor Authentication")
         win.geometry("380x260")
@@ -1777,7 +1777,7 @@ class LoginFrame(ctk.CTkFrame):
             code = code_var.get().strip().replace(" ", "")
             if mfa_verify(code):
                 win.destroy()
-                self.on_login(pw, vault)
+                self.on_login(pw, vault, vault_key)
             else:
                 err_lbl.configure(text="❌  Invalid code — try again")
                 code_var.set("")
@@ -1876,10 +1876,11 @@ SECTION_HELP = {
 
 
 class AppFrame(ctk.CTkFrame):
-    def __init__(self, master, password, vault, on_lock, app=None):
+    def __init__(self, master, password, vault, on_lock, app=None, vault_key=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
         self.password = password
         self.vault = vault
+        self.vault_key = vault_key
         self.on_lock = on_lock
         self.app = app
         self.config = load_config()
@@ -7546,9 +7547,9 @@ class PushkeyApp:
     def show_login(self):
         self.switch(LoginFrame, on_login=self.on_login)
 
-    def on_login(self, pw, vault):
+    def on_login(self, pw, vault, vault_key=None):
         write_health_sidecar(vault)
-        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
+        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self, vault_key=vault_key)
         self._start_clip_watcher(vault)
 
     def reload_app(self, pw, vault):
