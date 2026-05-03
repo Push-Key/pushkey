@@ -7416,98 +7416,148 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkLabel(pad, text="LINKED PROJECTS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(0, 6))
 
         for proj_name, proj_info in sorted(projects.items()):
-            proj_keys = proj_info.get("keys", [])
-            matched = self._auto_match_keys(proj_name)
-            has_keys = len(proj_keys) > 0
-            partial = not has_keys and len(matched) > 0
+            self._draw_project_card(pad, proj_name, proj_info)
 
-            if has_keys:
-                status_col, status_bg, status_lbl = C["green"], C["green_bg"], "ACTIVE"
-            elif partial:
-                status_col, status_bg, status_lbl = C["amber"], C["amber_bg"], "NEEDS ASSIGN"
-            else:
-                status_col, status_bg, status_lbl = C["red"], C["red_bg"], "EMPTY"
+    def _draw_project_card(self, parent, proj_name, proj_info):
+        """Linked-project card matching the lifecycle card visual language:
+        neon-edge wrapper with status-tinted bg, identity row + path,
+        icon-led stat strip with ALL relevant per-project info, then an
+        icon-labeled action row.
+        """
+        from datetime import datetime as _dt
+        from pathlib import Path as _Path
 
-            # Card with colored left accent matching status
-            outer = ctk.CTkFrame(pad, fg_color=status_col, corner_radius=8)
-            outer.pack(fill="x", pady=5)
-            card = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7)
-            card.pack(fill="both", expand=True, padx=(4, 0))
+        proj_keys = proj_info.get("keys", [])
+        matched = self._auto_match_keys(proj_name)
+        has_keys = len(proj_keys) > 0
+        partial = not has_keys and len(matched) > 0
+        path_str = proj_info.get("path", "")
+        added_iso = proj_info.get("added")
+        target_env = proj_info.get("target_env", "all")
 
-            # Header row
-            head = ctk.CTkFrame(card, fg_color="transparent")
-            head.pack(fill="x", padx=14, pady=(12, 4))
+        # Status
+        if has_keys:
+            status_col, status_bg, status_lbl = C["green"], C["green_bg"], "ACTIVE"
+        elif partial:
+            status_col, status_bg, status_lbl = C["amber"], C["amber_bg"], "NEEDS ASSIGN"
+        else:
+            status_col, status_bg, status_lbl = C["red"], C["red_bg"], "EMPTY"
 
-            ctk.CTkLabel(head, text="", image=icon("folder", 16, status_col),
-                         width=20).pack(side="left")
-            ctk.CTkLabel(head, text=proj_name, font=(_UI_FONT, 14, "bold"),
-                         text_color=C["text"]).pack(side="left", padx=(2, 8))
-            tenv = proj_info.get("target_env", "all")
-            if tenv != "all":
-                env_pill = ctk.CTkFrame(head, fg_color=C.get(f"{tenv}_bg", C["bg3"]),
-                                        corner_radius=8, border_width=1,
-                                        border_color=ENV_COLORS.get(tenv, C["text3"]))
-                env_pill.pack(side="left")
-                ctk.CTkLabel(env_pill, text=tenv.upper(),
-                             font=(_UI_FONT, 9, "bold"),
-                             text_color=ENV_COLORS.get(tenv, C["text3"])).pack(padx=6, pady=2)
+        # Derived state
+        path_obj = _Path(path_str) if path_str else None
+        path_exists = path_obj.exists() if path_obj else False
+        env_file = path_obj / ".env" if path_obj else None
+        env_exists = env_file.exists() if env_file else False
+        env_size = env_file.stat().st_size if env_exists else 0
+        added_dt = _parse_iso(added_iso)
+        added_days = (_dt.now() - added_dt).days if added_dt else None
 
-            # Status pill (right)
-            sp = ctk.CTkFrame(head, fg_color=status_bg, corner_radius=10,
-                              border_width=1, border_color=status_col)
-            sp.pack(side="right")
-            ctk.CTkLabel(sp, text=status_lbl, font=(_UI_FONT, 9, "bold"),
-                         text_color=status_col).pack(padx=8, pady=2)
+        # ── Card wrapper ──
+        card = ctk.CTkFrame(parent, fg_color=status_bg, corner_radius=10,
+                            border_width=2, border_color=status_col)
+        card.pack(fill="x", pady=6)
 
-            # Path row with mono font
-            ctk.CTkLabel(card, text=proj_info.get("path", ""),
-                         font=FONT_MONO_SM, text_color=C["text3"],
-                         anchor="w").pack(anchor="w", padx=14)
+        # ── Identity row: folder icon + name + env pill + status pill ──
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(14, 4))
 
-            # Stats row — counts in big numbers, like dashboard cards
-            stats = ctk.CTkFrame(card, fg_color="transparent")
-            stats.pack(fill="x", padx=14, pady=(8, 4))
+        ctk.CTkLabel(head, text="", image=icon("folder", 18, status_col),
+                     width=22).pack(side="left")
+        ctk.CTkLabel(head, text=proj_name, font=(_UI_FONT, 15, "bold"),
+                     text_color=C["text"]).pack(side="left", padx=(4, 10))
 
-            def _stat(parent, count, label, col):
-                box = ctk.CTkFrame(parent, fg_color="transparent")
-                box.pack(side="left", padx=(0, 18))
-                ctk.CTkLabel(box, text=str(count), font=(_UI_FONT, 18, "bold"),
-                             text_color=col).pack(anchor="w")
-                ctk.CTkLabel(box, text=label, font=(_UI_FONT, 8, "bold"),
-                             text_color=C["text3"]).pack(anchor="w")
+        if target_env != "all":
+            env_col = ENV_COLORS.get(target_env, C["text3"])
+            env_pill = ctk.CTkFrame(head, fg_color=C.get(f"{target_env}_bg", C["bg3"]),
+                                    corner_radius=8, border_width=1,
+                                    border_color=env_col)
+            env_pill.pack(side="left")
+            ctk.CTkLabel(env_pill, text=target_env.upper(),
+                         font=(_UI_FONT, 9, "bold"),
+                         text_color=env_col).pack(padx=6, pady=2)
 
-            _stat(stats, len(proj_keys), "ASSIGNED",
-                  status_col if has_keys else C["text3"])
-            if not has_keys and matched:
-                _stat(stats, len(matched), "AUTO-MATCH AVAILABLE", C["amber"])
+        # Status pill on the right
+        sp = ctk.CTkFrame(head, fg_color=status_col, corner_radius=10)
+        sp.pack(side="right")
+        ctk.CTkLabel(sp, text=status_lbl, font=(_UI_FONT, 9, "bold"),
+                     text_color="#FFFFFF").pack(padx=10, pady=2)
 
-            # Action button row — with lucide icons
-            btn_f = ctk.CTkFrame(card, fg_color="transparent")
-            btn_f.pack(fill="x", padx=12, pady=(4, 12))
+        # ── Path row (mono, with broken-link indicator if missing) ──
+        path_row = ctk.CTkFrame(card, fg_color="transparent")
+        path_row.pack(fill="x", padx=16, pady=(0, 4))
+        path_color = C["text2"] if path_exists else C["red"]
+        path_marker = "" if path_exists else "  ⚠  PATH MISSING"
+        ctk.CTkLabel(path_row, text=path_str + path_marker,
+                     font=FONT_MONO_SM, text_color=path_color,
+                     anchor="w").pack(anchor="w")
 
-            def _act(parent, ico, label, cmd, fg, tc):
-                b = ctk.CTkButton(
-                    parent, text=label, image=icon(ico, 14, tc),
-                    compound="left", command=cmd,
-                    fg_color=fg, text_color=tc, hover_color=C["btn_hover"],
-                    font=FONT_BTN, corner_radius=6, height=30,
-                    border_width=1, border_color=C["border"],
-                )
-                b.pack(side="left", padx=(0, 4))
-                return b
+        # ── Stat strip (icon + value) ──
+        # Surfaces ALL relevant per-project state at a glance:
+        # key counts, .env file status, age, target env.
+        stats = ctk.CTkFrame(card, fg_color="transparent")
+        stats.pack(fill="x", padx=14, pady=(8, 6))
 
-            _act(btn_f, "refresh", "Sync .env",
-                 lambda p=proj_name: self.sync_project(p),
-                 C["accent"], "#FFFFFF")
-            _act(btn_f, "folder", "CI Sync",
-                 lambda p=proj_name: self.ci_sync_project(p),
-                 C["btn"], C["accent"])
-            _act(btn_f, "key", "Assign Keys",
-                 lambda p=proj_name: self.assign_keys_to_project(p),
-                 C["btn"], C["text2"])
-            _act(btn_f, "trash", "Remove",
-                 lambda p=proj_name: self.remove_project(p),
-                 C["red_bg"], C["red"])
+        def _stat(ico_name, value, color):
+            grp = ctk.CTkFrame(stats, fg_color="transparent")
+            grp.pack(side="left", padx=(0, 18))
+            ctk.CTkLabel(grp, text="", image=icon(ico_name, 14, color),
+                         width=16).pack(side="left")
+            ctk.CTkLabel(grp, text=str(value),
+                         font=(_UI_FONT, 11, "bold"),
+                         text_color=color).pack(side="left", padx=(4, 0))
+
+        _stat("key",
+              f"{len(proj_keys)} key{'s' if len(proj_keys) != 1 else ''} assigned",
+              status_col if has_keys else C["text3"])
+        if matched and not has_keys:
+            _stat("plus", f"{len(matched)} auto-match available", C["amber"])
+        if env_exists:
+            kb = max(1, env_size // 1024)
+            _stat("check", f".env present ({kb}KB)", C["green"])
+        elif path_exists:
+            _stat("x", ".env not written yet", C["amber"])
+        if added_days is not None:
+            age_str = ("today" if added_days == 0 else
+                       "yesterday" if added_days == 1 else
+                       f"{added_days}d ago" if added_days < 30 else
+                       f"{added_days // 30}mo ago" if added_days < 365 else
+                       f"{added_days // 365}y ago")
+            _stat("clock", f"linked {age_str}", C["text2"])
+
+        # ── Action button row ──
+        btn_f = ctk.CTkFrame(card, fg_color="transparent")
+        btn_f.pack(fill="x", padx=14, pady=(4, 14))
+
+        def _act(ico, label, cmd, fg, tc, border=False):
+            ctk.CTkButton(
+                btn_f, text="  " + label, image=icon(ico, 14, tc),
+                compound="left", command=cmd,
+                fg_color=fg, text_color=tc, hover_color=C["btn_hover"],
+                font=FONT_BTN, corner_radius=6, height=30,
+                border_width=1 if border else 0,
+                border_color=tc if border else C["border"],
+            ).pack(side="left", padx=(0, 6))
+
+        _act("refresh", "Sync .env",
+             lambda p=proj_name: self.sync_project(p),
+             C["accent"], "#FFFFFF")
+        _act("folder", "CI Sync",
+             lambda p=proj_name: self.ci_sync_project(p),
+             C["btn"], C["accent"], border=True)
+        _act("key", "Assign Keys",
+             lambda p=proj_name: self.assign_keys_to_project(p),
+             C["btn"], C["text2"], border=True)
+
+        # Push Remove to the right
+        ctk.CTkButton(
+            btn_f, text="  Remove", image=icon("trash", 14, C["red"]),
+            compound="left",
+            command=lambda p=proj_name: self.remove_project(p),
+            fg_color=C["red_bg"], text_color=C["red"],
+            hover_color=C["btn_hover"],
+            font=FONT_BTN, corner_radius=6, height=30,
+            border_width=1, border_color=C["red"],
+        ).pack(side="right")
 
     def browse_folder(self):
         onedrive_desktop = Path.home() / "OneDrive" / "Desktop"
