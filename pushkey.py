@@ -83,10 +83,12 @@ from pushkey_shared import (
 from pushkey_crypto import (
     AESGCM, Fernet, InvalidToken,
     hash_secret_raw, Argon2Type, _ARGON2_AVAILABLE,
-    _try_load_argon2, _V2_MAGIC, _V2T_MAGIC,
+    _try_load_argon2, _V2_MAGIC, _V2T_MAGIC, _V3_MAGIC,
     get_or_create_salt, derive_key,
+    generate_recovery_code,
     _aes_encrypt, _aes_decrypt, _legacy_fernet_decrypt,
     encrypt_data, decrypt_data, team_encrypt, team_decrypt,
+    encrypt_data_v3, decrypt_data_v3, rekey_vault, add_recovery_key,
     _migrate_vault, _serialize_vault, _deserialize_vault,
     _LOG_KEY_CACHE, _log_key, _log_encrypt, _log_decrypt_all,
     _log_line_age_days, _migrate_plaintext_log, log_event,
@@ -1718,9 +1720,7 @@ class LoginFrame(ctk.CTkFrame):
             if pw != self.pw2.get().strip():
                 self.err.configure(text="Passwords don't match")
                 return
-            ensure_vault_dir()
-            save_vault({}, pw)
-            self.on_login(pw, {})
+            RecoverySetupDialog(self, pw, self.on_login)
         else:
             try:
                 vault, _vault_key = load_vault(pw)
@@ -1873,6 +1873,93 @@ SECTION_HELP = {
         "into your calendar."
     ),
 }
+
+
+class RecoverySetupDialog(ctk.CTkToplevel):
+    """Modal shown during new vault creation to display and confirm the recovery code."""
+
+    def __init__(self, master, password, on_confirmed):
+        super().__init__(master)
+        self.title("Set Up Recovery Key")
+        self.geometry("500x380")
+        self.configure(fg_color=C["bg2"])
+        self.transient(master)
+        self.grab_set()
+        self.resizable(False, False)
+
+        self._password = password
+        self._on_confirmed = on_confirmed
+        self._code = generate_recovery_code()
+        self._confirmed = tk.BooleanVar(value=False)
+
+        ctk.CTkFrame(self, fg_color=C["accent"], height=3).pack(fill="x")
+
+        ctk.CTkLabel(self, text="Save Your Recovery Key",
+                     font=(_UI_FONT, 17, "bold"),
+                     text_color=C["text"]).pack(pady=(20, 4), padx=24, anchor="w")
+        ctk.CTkLabel(
+            self,
+            text=(
+                "If you ever forget your master password, this recovery key\n"
+                "lets you set a new one without losing your vault data.\n"
+                "Write it down and keep it somewhere safe."
+            ),
+            font=FONT_SM, text_color=C["text2"],
+            anchor="w", justify="left",
+        ).pack(padx=24, anchor="w")
+
+        code_box = ctk.CTkFrame(self, fg_color=C["bg3"], corner_radius=8,
+                                border_width=1, border_color=C["accent"])
+        code_box.pack(padx=24, pady=(16, 0), fill="x")
+        inner = ctk.CTkFrame(code_box, fg_color="transparent")
+        inner.pack(padx=12, pady=12, fill="x")
+        code_lbl = ctk.CTkLabel(inner, text=self._code,
+                                font=("Consolas", 16, "bold"),
+                                text_color=C["accent"])
+        code_lbl.pack(side="left", expand=True)
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(self._code)
+            copy_btn.configure(text="Copied!")
+            self.after(1500, lambda: copy_btn.configure(text="Copy"))
+
+        copy_btn = make_btn(inner, "Copy", _copy, width=70, height=28)
+        copy_btn.pack(side="right")
+
+        chk_row = ctk.CTkFrame(self, fg_color="transparent")
+        chk_row.pack(padx=24, pady=(16, 0), anchor="w")
+        ctk.CTkCheckBox(
+            chk_row,
+            text="I've written this down somewhere safe",
+            variable=self._confirmed,
+            command=self._toggle_confirm,
+            font=FONT_SM, text_color=C["text"],
+            fg_color=C["accent"], hover_color=C["accent2"],
+        ).pack(side="left")
+
+        self._confirm_btn = make_btn(
+            self, "Create Vault", self._submit,
+            fg_color=C["accent"], text_color="#FFFFFF",
+            width=160, height=38,
+        )
+        self._confirm_btn.pack(pady=(20, 0))
+        self._confirm_btn.configure(state="disabled")
+
+        ctk.CTkFrame(self, fg_color="transparent", height=16).pack()
+
+    def _toggle_confirm(self):
+        if self._confirmed.get():
+            self._confirm_btn.configure(state="normal")
+        else:
+            self._confirm_btn.configure(state="disabled")
+
+    def _submit(self):
+        ensure_vault_dir()
+        save_vault({}, self._password, recovery_code=self._code)
+        _, vault_key = load_vault(self._password)
+        self.destroy()
+        self._on_confirmed(self._password, {}, vault_key)
 
 
 class AppFrame(ctk.CTkFrame):
