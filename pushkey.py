@@ -2268,10 +2268,10 @@ class LoginFrame(ctk.CTkFrame):
         self.is_new = not VAULT_FILE.exists()
         self._reveal_state = False
 
-        # ── Page chrome: top spacer for vertical centering, footer pinned ──
-        # Footer (sits on top of bottom edge) — vault path + version line
-        footer = ctk.CTkFrame(self, fg_color="transparent", height=40)
-        footer.pack(side="bottom", fill="x", pady=(0, 14))
+        # ── Page chrome: pinned footer + flex spacers for true centering ──
+        # Compact footer (vault location) at the very bottom
+        footer = ctk.CTkFrame(self, fg_color="transparent", height=24)
+        footer.pack(side="bottom", fill="x", pady=(0, 8))
         footer.pack_propagate(False)
         try:
             vault_disp = "~" + str(VAULT_FILE).replace(str(Path.home()), "")
@@ -2282,44 +2282,44 @@ class LoginFrame(ctk.CTkFrame):
             font=(_UI_FONT, 9), text_color=C["text3"]
         ).pack()
 
-        # Top spacer to center the card vertically
+        # Top spacer
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
-        # ── Sign-in card ──
-        card = ctk.CTkFrame(self, fg_color=C["surface"], corner_radius=16,
+        # ── Sign-in card (sized to fit 600px window height comfortably) ──
+        card = ctk.CTkFrame(self, fg_color=C["surface"], corner_radius=14,
                             border_width=1, border_color=C["border"])
         card.pack(padx=240, fill="x")
 
-        # Cyan accent stripe — single visual anchor at the top of the card
+        # Top accent stripe
         ctk.CTkFrame(card, fg_color=C["accent"], height=3, corner_radius=0
                      ).pack(fill="x")
 
-        # ── Logo (the PNG already carries wordmark + tagline) ──
+        # ── Logo (compact: 90px tall so the whole card fits without scrolling) ──
         logo_box = ctk.CTkFrame(card, fg_color="transparent")
-        logo_box.pack(pady=(36, 8))
+        logo_box.pack(pady=(18, 4))
         self._logo_slot = ctk.CTkLabel(
             logo_box, text="PUSHKEY",
-            font=(_UI_FONT, 28, "bold"), text_color=C["accent"]
+            font=(_UI_FONT, 22, "bold"), text_color=C["accent"]
         )
         self._logo_slot.pack()
         self._logo_card = card
         self.after(0, self._load_login_logo)
 
-        # ── Welcome heading + subtitle ──
+        # ── Heading + subtitle (tight) ──
         if self.is_new:
             heading, subtitle = "Create your vault", "Set a master password to begin"
         else:
             heading, subtitle = "Welcome back", "Unlock your vault to continue"
-        ctk.CTkLabel(card, text=heading, font=(_UI_FONT, 22, "bold"),
-                     text_color=C["text"]).pack(pady=(8, 4))
+        ctk.CTkLabel(card, text=heading, font=(_UI_FONT, 18, "bold"),
+                     text_color=C["text"]).pack(pady=(4, 2))
         ctk.CTkLabel(card, text=subtitle, font=FONT_SM,
-                     text_color=C["text3"]).pack(pady=(0, 26))
+                     text_color=C["text3"]).pack(pady=(0, 14))
 
         # ── Form ──
         form = ctk.CTkFrame(card, fg_color="transparent")
-        form.pack(padx=44, fill="x")
+        form.pack(padx=36, fill="x")
 
-        # Password field block
+        # Password field
         self._pw_label_row(form, "MASTER PASSWORD")
         self.pw, self._reveal_btn = self._pw_input_with_eye(
             form, placeholder="Enter your password"
@@ -2328,18 +2328,16 @@ class LoginFrame(ctk.CTkFrame):
         self.pw.focus_set()
 
         if self.is_new:
-            # Strength meter (live)
             self._strength_var = tk.StringVar(value="")
             self._strength_lbl = ctk.CTkLabel(
                 form, textvariable=self._strength_var,
                 font=(_UI_FONT, 9, "bold"),
                 text_color=C["text3"], anchor="w",
             )
-            self._strength_lbl.pack(anchor="w", pady=(8, 0))
+            self._strength_lbl.pack(anchor="w", pady=(4, 0))
             self.pw.bind("<KeyRelease>", lambda e: self._update_strength())
 
-            # Confirm field
-            ctk.CTkFrame(form, fg_color="transparent", height=14).pack()
+            ctk.CTkFrame(form, fg_color="transparent", height=8).pack()
             self._pw_label_row(form, "CONFIRM PASSWORD")
             self.pw2 = ctk.CTkEntry(
                 form, show="●", font=FONT_MONO,
@@ -2347,37 +2345,38 @@ class LoginFrame(ctk.CTkFrame):
                 placeholder_text="Re-enter your password",
                 placeholder_text_color=C["text3"],
                 border_color=C["border2"], border_width=1,
-                corner_radius=10, height=46,
+                corner_radius=10, height=40,
             )
-            self.pw2.pack(fill="x", ipady=2)
+            self.pw2.pack(fill="x", ipady=1)
             self.pw2.bind("<Return>", lambda e: self.unlock())
 
-        # ── CTA button ──
+        # CTA
         ctk.CTkButton(
             form,
             text="Create Vault" if self.is_new else "Unlock Vault",
             command=self.unlock,
             fg_color=C["accent"], hover_color=C["accent2"],
             text_color="#FFFFFF",
-            font=(_UI_FONT, 14, "bold"),
-            corner_radius=10, height=48,
-        ).pack(fill="x", pady=(22, 0))
+            font=(_UI_FONT, 13, "bold"),
+            corner_radius=10, height=42,
+        ).pack(fill="x", pady=(14, 0))
 
-        # Inline error/status line
+        # Inline error / status
         self.err = ctk.CTkLabel(form, text="", font=FONT_XS,
                                 text_color=C["red"])
-        self.err.pack(pady=(10, 0))
+        self.err.pack(pady=(6, 0))
 
-        # ── Secondary action / safety note ──
+        # Secondary action / safety note
         if self.is_new:
             note = ctk.CTkFrame(form, fg_color=C["amber_bg"],
                                 corner_radius=8, border_width=1,
                                 border_color=C["amber"])
-            note.pack(fill="x", pady=(14, 0))
+            note.pack(fill="x", pady=(8, 0))
             note_inner = ctk.CTkFrame(note, fg_color="transparent")
-            note_inner.pack(padx=10, pady=8)
-            ctk.CTkLabel(note_inner, text="", image=icon("shield", 14, C["amber"]),
-                         width=18).pack(side="left")
+            note_inner.pack(padx=10, pady=6)
+            ctk.CTkLabel(note_inner, text="",
+                         image=icon("shield", 12, C["amber"]),
+                         width=16).pack(side="left")
             ctk.CTkLabel(
                 note_inner,
                 text="This password cannot be recovered. Store it safely.",
@@ -2386,7 +2385,7 @@ class LoginFrame(ctk.CTkFrame):
             ).pack(side="left", padx=(4, 0))
         else:
             link_row = ctk.CTkFrame(form, fg_color="transparent")
-            link_row.pack(pady=(16, 0))
+            link_row.pack(pady=(10, 0))
             ctk.CTkLabel(link_row, text="Forgot password?",
                          font=FONT_XS, text_color=C["text3"]
                          ).pack(side="left", padx=(0, 4))
@@ -2398,10 +2397,10 @@ class LoginFrame(ctk.CTkFrame):
             link.pack(side="left")
             link.bind("<Button-1>", lambda e: self._show_restore_hint())
 
-        # Bottom padding inside card
-        ctk.CTkFrame(card, fg_color="transparent", height=32).pack()
+        # Card bottom padding (compact)
+        ctk.CTkFrame(card, fg_color="transparent", height=18).pack()
 
-        # Bottom spacer to share centering equally with top
+        # Bottom spacer (mirrors top spacer for vertical centering)
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
     # ── helpers ──────────────────────────────────────────────
@@ -2510,10 +2509,11 @@ class LoginFrame(ctk.CTkFrame):
         try:
             from PIL import Image as _PILImage
             pil = _PILImage.open(_logo_path).convert("RGBA")
-            # Logo PNG includes wordmark + tagline. Scale to a target height
-            # (140px) keeping aspect ratio so the rendered image isn't squashed.
+            # Logo includes wordmark + tagline; keep aspect ratio. Compact
+            # at 90px tall so the whole card fits within a 600px window
+            # without forcing the user to resize.
             w, h = pil.size
-            target_h = 140
+            target_h = 90
             target_w = int(w * target_h / h)
             img = ctk.CTkImage(light_image=pil, dark_image=pil,
                                size=(target_w, target_h))
