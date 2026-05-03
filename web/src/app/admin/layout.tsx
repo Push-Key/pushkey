@@ -110,7 +110,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
   const [secret, setSecret] = useState<string | null>(null)
 
   useEffect(() => {
-    const s = sessionStorage.getItem("pk_admin_secret")
+    const s = localStorage.getItem("pk_admin_secret")
     if (!s && pathname !== "/admin/login") {
       router.replace("/admin/login")
     } else {

@@ -1,7 +1,7 @@
 "use client"
 import {
   ShieldCheck, RefreshCw, FolderSync, Link2, GitBranch, Cloud,
-  Users, KeyRound, Lock, Code2, Fingerprint, Eye
+  Users, KeyRound, Lock, Code2, Fingerprint, Eye, Terminal
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -18,6 +18,7 @@ const FEATURES: { icon: LucideIcon; title: string; desc: string; accent: string 
   { icon: Code2, title: "Open Source Core", desc: "The crypto layer and vault are MIT licensed. Audit every line that touches your keys — no trust required.", accent: "#A78BFA" },
   { icon: Fingerprint, title: "Hardware MFA (Enterprise)", desc: "YubiKey and hardware security key support for vaults that need the highest level of authentication assurance.", accent: "#F59E0B" },
   { icon: Eye, title: "Encrypted Audit Log", desc: "Every vault access, key rotation, and team action is logged in an encrypted audit trail for compliance.", accent: "#F59E0B" },
+  { icon: Terminal, title: "Full-featured CLI", desc: "pushkey-cli ships alongside the GUI — scriptable, pipeable, CI-ready. Add, rotate, inject, and export keys from any terminal or pipeline.", accent: "#00DC82" },
 ]
 
 export default function Features() {

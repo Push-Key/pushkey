@@ -1,6 +1,7 @@
 "use client"
 import { useState } from "react"
 import { Check, Minus, Zap } from "lucide-react"
+import WaitlistDialog from "./WaitlistDialog"
 
 interface Tier {
   key: string
@@ -144,6 +145,7 @@ const TIERS: Tier[] = [
 
 export default function Pricing() {
   const [annual, setAnnual] = useState(false)
+  const [waitlistOpen, setWaitlistOpen] = useState(false)
 
   return (
     <section id="pricing" className="py-24" style={{ background: "rgba(13,27,42,0.2)" }}>
@@ -270,13 +272,13 @@ export default function Pricing() {
               Off-grid hardware vault. Encrypted vault lives on the USB — unplug and keys vanish from memory. Includes Pro for 12 months.
             </p>
           </div>
-          <a href="mailto:hello@push-key.com?subject=Vault Key USB"
-            className="flex-shrink-0 text-xs font-semibold py-2 px-4 rounded-lg transition-all whitespace-nowrap"
+          <button onClick={() => setWaitlistOpen(true)}
+            className="flex-shrink-0 text-xs font-semibold py-2 px-4 rounded-lg transition-all whitespace-nowrap cursor-pointer"
             style={{ background: "rgba(99,102,241,0.12)", color: "#818CF8", border: "1px solid rgba(99,102,241,0.25)" }}
             onMouseEnter={e => { e.currentTarget.style.opacity = "0.8" }}
             onMouseLeave={e => { e.currentTarget.style.opacity = "1" }}>
             Join Waitlist
-          </a>
+          </button>
         </div>
 
         {/* Footnote */}
@@ -284,6 +286,14 @@ export default function Pricing() {
           All plans include local-first encryption. No keys are stored in our cloud — ever. Enterprise audit logs are end-to-end encrypted.
         </p>
       </div>
+
+      <WaitlistDialog
+        open={waitlistOpen}
+        onClose={() => setWaitlistOpen(false)}
+        source="vault-key-usb"
+        title="Vault Key USB Waitlist"
+        subtitle="Off-grid hardware vault. We'll email you when it's ready to ship."
+      />
     </section>
   )
 }
