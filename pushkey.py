@@ -38,6 +38,27 @@ import webbrowser
 import re
 from datetime import datetime, timedelta
 import atexit
+import threading
+
+try:
+    import pystray
+    from PIL import Image as _PilImage
+    _PYSTRAY_AVAILABLE = True
+except ImportError:
+    _PYSTRAY_AVAILABLE = False
+
+# Compiled once at module level — clipboard key detector patterns
+_CLIP_KEY_RE = re.compile(
+    r'(?:sk-[A-Za-z0-9\-_]{20,})'          # OpenAI/Anthropic
+    r'|(?:ghp_[A-Za-z0-9]{36})'             # GitHub PAT
+    r'|(?:pk_live_[A-Za-z0-9]{24,})'        # Stripe publishable
+    r'|(?:sk_live_[A-Za-z0-9]{24,})'        # Stripe secret
+    r'|(?:AKIA[A-Z0-9]{16})'                # AWS key ID
+    r'|(?:AIza[A-Za-z0-9\-_]{35})'          # Google API
+    r'|(?:xoxb-[0-9\-A-Za-z]{50,})'         # Slack bot token
+    r'|(?:SG\.[A-Za-z0-9\-_]{22,})'         # SendGrid
+    r'|(?:[a-z0-9]{32,})',                   # Generic long hex/alnum (fallback)
+)
 
 # ═══════════════════════════════════════════════
 # CTK APPEARANCE
@@ -1702,7 +1723,7 @@ class LoginFrame(ctk.CTkFrame):
             self.on_login(pw, {})
         else:
             try:
-                vault = load_vault(pw)
+                vault, _vault_key = load_vault(pw)
                 if vault is None:
                     raise ValueError("wrong_password")
                 self._failed_attempts = 0
@@ -2054,7 +2075,7 @@ class AppFrame(ctk.CTkFrame):
             delay += 250
 
     def save(self):
-        save_vault(self.vault, self.password)
+        save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
         save_config(self.config)
         write_health_sidecar(self.vault)
 
@@ -2211,7 +2232,7 @@ class AppFrame(ctk.CTkFrame):
     def _show_settings(self):
         win = ctk.CTkToplevel(self)
         win.title("Settings")
-        win.geometry("440x560")
+        win.geometry("440x640")
         win.minsize(380, 400)
         win.configure(fg_color=C["bg2"])
         win.transient(self)
@@ -2267,6 +2288,33 @@ class AppFrame(ctk.CTkFrame):
 
         section("DATA")
         row_btn("Update Providers Registry", self.do_update_providers)
+
+        # ── BEHAVIOUR toggles ──────────────────────────────────────────────
+        section("BEHAVIOUR")
+
+        def _toggle_row(label, cfg_key, default=True):
+            """Render a labelled CTkSwitch that reads/writes config.json."""
+            cfg_now = self.config.get(cfg_key, default)
+            var = tk.BooleanVar(value=bool(cfg_now))
+
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=2)
+            ctk.CTkLabel(row, text=label, font=FONT_XS,
+                         text_color=C["text2"]).pack(side="left")
+
+            def _on_toggle():
+                self.config[cfg_key] = var.get()
+                save_config(self.config)
+
+            ctk.CTkSwitch(row, text="", variable=var, command=_on_toggle,
+                          width=44, height=22,
+                          progress_color=C["accent"],
+                          button_color=C["text"],
+                          button_hover_color=C["text2"],
+                          ).pack(side="right")
+
+        _toggle_row("Minimize to tray on close", "tray_on_close", default=True)
+        _toggle_row("Clipboard key detector", "clipboard_watcher", default=True)
 
         # tail spacer so last button isn't flush against the divider
         ctk.CTkFrame(body, fg_color="transparent", height=12).pack()
@@ -5798,7 +5846,7 @@ class AppFrame(ctk.CTkFrame):
                 err.configure(text="New passwords don't match")
                 return
             self.password = new_pw
-            save_vault(self.vault, self.password)
+            save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
             win.destroy()
             messagebox.showinfo("Done", "Master password changed. Vault re-encrypted.")
 
@@ -6626,6 +6674,7 @@ class AppFrame(ctk.CTkFrame):
         r2b = ctk.CTkFrame(form, fg_color="transparent")
         r2b.pack(fill="x", padx=12, pady=(0, 12))
         make_btn(r2b, "+ Link Project", self.add_project, fg_color=C["green_bg"], text_color=C["green"], width=110).pack(side="left")
+        make_btn(r2b, "Import from .env", self._import_env_file, fg_color=C["btn"], text_color=C["accent"], width=140).pack(side="left", padx=(8, 0))
 
         # Project list
         projects = self.config.get("projects", {})
@@ -7130,6 +7179,113 @@ class AppFrame(ctk.CTkFrame):
             self.save()
             self.render_projects()
 
+    def _import_env_file(self):
+        filepath = filedialog.askopenfilename(
+            title="Select .env file",
+            filetypes=[(".env files", ".env"), ("All files", "*.*")],
+        )
+        if not filepath:
+            return
+
+        pairs = []
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    result = _parse_env_line(raw)
+                    if result:
+                        pairs.append(result)
+        except Exception as e:
+            messagebox.showerror("Read Error", f"Could not read file:\n{e}")
+            return
+
+        if not pairs:
+            messagebox.showinfo("Nothing found", "No key=value pairs found in that file.")
+            return
+
+        self._do_env_import(filepath, pairs)
+
+    def _do_env_import(self, filepath, pairs):
+        from os.path import basename as _bn
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(f"Import from .env — {len(pairs)} keys found")
+        dlg.geometry("560x480")
+        dlg.configure(fg_color=C["bg"])
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text=f"Found {len(pairs)} keys in {_bn(filepath)}",
+                     font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        ctk.CTkLabel(dlg, text="Uncheck keys you don't want to import. Already-vaulted keys are skipped.",
+                     font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 8))
+
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color=C["surface"], corner_radius=6)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        check_vars = []
+        for key, value in pairs:
+            already = key in self.vault
+            prov_info = detect_provider(key, value)
+            prov_name = prov_info.get("name", "Unknown") if prov_info else "Unknown"
+            preview = (value[:8] + "...") if len(value) > 8 else value
+
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            var = ctk.BooleanVar(value=not already)
+            check_vars.append((var, key, value))
+
+            ctk.CTkCheckBox(row, text="", variable=var, width=24,
+                            fg_color=C["accent"], hover_color=C["btn_hover"],
+                            state="disabled" if already else "normal").pack(side="left")
+
+            ctk.CTkLabel(row, text=key, font=FONT_MONO_SM, text_color=C["text"],
+                         anchor="w", width=200).pack(side="left", padx=(4, 6))
+            ctk.CTkLabel(row, text=prov_name, font=FONT_XS,
+                         text_color=C["accent"]).pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(row, text=preview, font=FONT_MONO_SM,
+                         text_color=C["text2"]).pack(side="left", padx=(0, 6))
+            if already:
+                ctk.CTkLabel(row, text="Already in vault", font=FONT_XS,
+                             text_color=C["text3"]).pack(side="left")
+
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _do_import():
+            from datetime import datetime as _dt
+            filename = _bn(filepath)
+            added = 0
+            for var, key, value in check_vars:
+                if not var.get() or key in self.vault:
+                    continue
+                prov_info = detect_provider(key, value)
+                prov_name = prov_info.get("name", "Unknown") if prov_info else "Unknown"
+                self.vault[key] = {
+                    "value": value,
+                    "created": _dt.now().isoformat(),
+                    "rotated": None,
+                    "provider": prov_name,
+                    "env": "production",
+                    "projects": [],
+                    "notes": f"Imported from {filename}",
+                    "source": "env_import",
+                }
+                added += 1
+
+            if added:
+                save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+                log_event(f"imported {added} keys from {filename}")
+                dlg.destroy()
+                self.render_keys()
+                messagebox.showinfo("Imported", f"Imported {added} key{'s' if added != 1 else ''}")
+            else:
+                messagebox.showinfo("Nothing imported", "No new keys were selected.")
+
+        make_btn(btn_row, "Import Selected", _do_import,
+                 fg_color=C["accent"], text_color="white", width=130).pack(side="left")
+        make_btn(btn_row, "Cancel", dlg.destroy,
+                 fg_color=C["btn"], text_color=C["text2"], width=80).pack(side="left", padx=(8, 0))
+
 
 # ═══════════════════════════════════════════════
 # APP
@@ -7169,6 +7325,10 @@ class PushkeyApp:
         self.root._resize_debouncer = self.resize_debouncer  # accessible from frames
 
         self.frame = None
+        self._tray_icon = None          # pystray.Icon instance when minimised
+        self._last_clip: str = ""       # last clipboard value seen by watcher
+        self._clip_ignore: set = set()  # session-level values to never re-toast
+        self._clip_watcher_running = False
         atexit.register(self._on_exit)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.show_login()
@@ -7179,8 +7339,203 @@ class PushkeyApp:
         except: pass
 
     def _on_close(self):
-        self._on_exit()
-        self.root.destroy()
+        # Check config for tray_on_close; default ON if vault/config available
+        cfg = {}
+        if CONFIG_FILE.exists():
+            try:
+                raw = CONFIG_FILE.read_bytes()
+                if raw.lstrip()[:1] == b"{":
+                    cfg = json.loads(raw)
+            except Exception:
+                pass
+        if cfg.get("tray_on_close", True) and _PYSTRAY_AVAILABLE:
+            self.root.withdraw()
+            if self._tray_icon is None:
+                self._start_tray()
+        else:
+            self._on_exit()
+            if self._tray_icon is not None:
+                try:
+                    self._tray_icon.stop()
+                except Exception:
+                    pass
+                self._tray_icon = None
+            self.root.destroy()
+
+    # ── System tray (Task #17) ──────────────────────────────────────────────
+
+    def _start_tray(self):
+        """Spawn pystray icon in a daemon thread. Only called when _PYSTRAY_AVAILABLE."""
+        if not _PYSTRAY_AVAILABLE:
+            return
+        try:
+            ico_path = _asset_dir() / "pushkey.ico"
+            if ico_path.exists():
+                tray_img = _PilImage.open(str(ico_path)).resize((64, 64))
+            else:
+                tray_img = _PilImage.new("RGB", (64, 64), color=(30, 144, 255))
+        except Exception:
+            tray_img = _PilImage.new("RGB", (64, 64), color=(30, 144, 255))
+
+        def _restore(_icon=None, _item=None):
+            self.root.after(0, self._restore_from_tray)
+
+        def _tray_add(_icon=None, _item=None):
+            self.root.after(0, self._tray_quick_add)
+
+        def _tray_lock(_icon=None, _item=None):
+            def _do():
+                if isinstance(self.frame, AppFrame):
+                    self._restore_from_tray()
+                    self.frame.lock()
+            self.root.after(0, _do)
+
+        def _quit(_icon=None, _item=None):
+            def _do():
+                self._clip_watcher_running = False
+                if self._tray_icon is not None:
+                    try:
+                        self._tray_icon.stop()
+                    except Exception:
+                        pass
+                    self._tray_icon = None
+                self._on_exit()
+                self.root.destroy()
+            self.root.after(0, _do)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Open Pushkey", _restore, default=True),
+            pystray.MenuItem("Add Key...", _tray_add),
+            pystray.MenuItem("Lock Vault", _tray_lock),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", _quit),
+        )
+        icon = pystray.Icon("Pushkey", tray_img, "Pushkey", menu)
+        self._tray_icon = icon
+        t = threading.Thread(target=icon.run, daemon=True)
+        t.start()
+
+    def _restore_from_tray(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_quick_add(self):
+        """Restore window and open add-key dialog."""
+        self._restore_from_tray()
+        if isinstance(self.frame, AppFrame):
+            self.frame._show_add_key_modal()
+
+    # ── Clipboard watcher (Task #10) ────────────────────────────────────────
+
+    def _start_clip_watcher(self, vault):
+        """Start background clipboard polling thread if the setting is ON."""
+        cfg = {}
+        if CONFIG_FILE.exists():
+            try:
+                raw = CONFIG_FILE.read_bytes()
+                if raw.lstrip()[:1] == b"{":
+                    cfg = json.loads(raw)
+            except Exception:
+                pass
+        if not cfg.get("clipboard_watcher", True):
+            return
+        if self._clip_watcher_running:
+            return
+        self._vault_ref = vault
+        self._clip_watcher_running = True
+        t = threading.Thread(target=self._clip_poll_loop, daemon=True)
+        t.start()
+
+    def _clip_poll_loop(self):
+        """Daemon thread: polls clipboard every 600 ms."""
+        while self._clip_watcher_running:
+            time.sleep(0.6)
+            try:
+                if not isinstance(self.frame, AppFrame):
+                    continue
+                try:
+                    text = self.root.clipboard_get()
+                except tk.TclError:
+                    continue
+                if not text or text == self._last_clip:
+                    continue
+                self._last_clip = text
+                if text in self._clip_ignore:
+                    continue
+                m = _CLIP_KEY_RE.search(text)
+                if m:
+                    matched = m.group(0)
+                    if matched in self._clip_ignore:
+                        continue
+                    self.root.after(0, lambda v=matched: self._show_clip_toast(v))
+            except Exception:
+                pass
+
+    def _show_clip_toast(self, value: str):
+        """Non-blocking CTkToplevel toast for a detected API key."""
+        if value in self._clip_ignore:
+            return
+        try:
+            prov = detect_provider(name="", value=value)
+            prov_name = prov.get("name", "Unknown provider") if prov else "Unknown provider"
+        except Exception:
+            prov_name = "Unknown provider"
+        preview = value[:8] + "..." if len(value) > 8 else value
+
+        toast = ctk.CTkToplevel(self.root)
+        toast.title("API Key Detected")
+        toast.geometry("360x160")
+        toast.configure(fg_color=C["bg2"])
+        toast.resizable(False, False)
+        toast.lift()
+        toast.attributes("-topmost", True)
+
+        ctk.CTkLabel(toast, text="API Key Detected",
+                     font=("Segoe UI", 13, "bold"),
+                     text_color=C["text"]).pack(anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(toast, text=f"{prov_name}  ·  {preview}",
+                     font=("Segoe UI", 11),
+                     text_color=C["text2"]).pack(anchor="w", padx=16, pady=(0, 10))
+
+        btn_row = ctk.CTkFrame(toast, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 12))
+
+        _auto_id = [None]
+
+        def _close_toast():
+            try:
+                if _auto_id[0]:
+                    self.root.after_cancel(_auto_id[0])
+                    _auto_id[0] = None
+                toast.destroy()
+            except Exception:
+                pass
+
+        def _save():
+            _close_toast()
+            if isinstance(self.frame, AppFrame):
+                self.frame._show_add_key_modal()
+                try:
+                    self.frame.add_value.delete(0, "end")
+                    self.frame.add_value.insert(0, value)
+                except Exception:
+                    pass
+
+        def _ignore():
+            self._clip_ignore.add(value)
+            _close_toast()
+
+        ctk.CTkButton(btn_row, text="Save to Pushkey", command=_save,
+                      width=140, height=30,
+                      fg_color=C["accent"], text_color=C["bg"]).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Ignore", command=_ignore,
+                      width=80, height=30,
+                      fg_color=C["btn"], text_color=C["text2"]).pack(side="left")
+
+        _auto_id[0] = self.root.after(15000, _close_toast)
+
+    # ───────────────────────────────────────────────────────────────────────
 
     def switch(self, cls, **kw):
         if self.frame:
@@ -7194,6 +7549,7 @@ class PushkeyApp:
     def on_login(self, pw, vault):
         write_health_sidecar(vault)
         self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
+        self._start_clip_watcher(vault)
 
     def reload_app(self, pw, vault):
         self.root.configure(fg_color=C["bg"])
@@ -7239,7 +7595,7 @@ def _cli_main(args):
 
     ensure_vault_dir()
     try:
-        vault = load_vault(pw)
+        vault, _vault_key = load_vault(pw)
     except ValueError as e:
         print(f"Error: {e}")
         raise SystemExit(1)
@@ -7305,7 +7661,7 @@ def _cli_main(args):
         info["value"] = new_val
         info["rotated"] = now
         info["rotation_count"] = info.get("rotation_count", 0) + 1
-        save_vault(vault, pw)
+        save_vault(vault, pw, vault_key=_vault_key)
         print(f"OK  {ns.key} rotated")
 
 

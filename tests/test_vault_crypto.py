@@ -13,10 +13,11 @@ def test_save_and_load_vault_roundtrip(tmp_path: Path, monkeypatch):
     vault = {"OPENAI_API_KEY": {"value": "sk-test", "created": "2026-01-01T00:00:00"}}
     pushkey.save_vault(vault, "password123")
 
-    loaded = pushkey.load_vault("password123")
+    loaded, _ = pushkey.load_vault("password123")
     assert loaded == vault
 
-    assert pushkey.load_vault("wrong-password") is None
+    bad, _ = pushkey.load_vault("wrong-password")
+    assert bad is None
 
 
 import pytest
@@ -161,4 +162,56 @@ def test_recovery_code_normalization(tmp_path, monkeypatch):
     messy = code.lower().replace("-", " ")
     plaintext, _ = decrypt_data_v3(token, recovery_code=messy)
     assert plaintext == "data"
+
+
+# ── load_vault / save_vault tuple contract ────────────────────────────────────
+
+from pushkey_vault import load_vault, save_vault
+
+
+def test_load_vault_v2_returns_none_key(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+
+    save_vault({"MY_KEY": {"value": "abc"}}, "pw")
+    vault, vault_key = load_vault("pw")
+    assert vault["MY_KEY"]["value"] == "abc"
+    assert vault_key is None  # V2 vault → no key
+
+
+def test_load_vault_v3_returns_vault_key(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+
+    code = generate_recovery_code()
+    save_vault({"MY_KEY": {"value": "abc"}}, "pw", recovery_code=code)
+    vault, vault_key = load_vault("pw")
+    assert vault["MY_KEY"]["value"] == "abc"
+    assert len(vault_key) == 32
+
+
+def test_save_vault_v3_preserves_vault_key(tmp_path, monkeypatch):
+    """Re-saving a V3 vault must use the same vault_key so recovery code still works."""
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+
+    code = generate_recovery_code()
+    save_vault({"A": {"value": "1"}}, "pw", recovery_code=code)
+
+    vault, vault_key = load_vault("pw")
+    vault["B"] = {"value": "2"}
+    save_vault(vault, "pw", vault_key=vault_key)
+
+    # Recovery code must still unlock the updated vault
+    raw = (_s.VAULT_FILE).read_bytes()
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=code)
+    import json
+    data = json.loads(plaintext)
+    assert data["keys"]["B"]["value"] == "2"
 

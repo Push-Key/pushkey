@@ -32,7 +32,7 @@ def test_encrypt_special_characters(tmp_path, monkeypatch):
     }
 
     pushkey.save_vault(vault, password)
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
 
     # Verify all special keys were encrypted and decrypted correctly
     for name, value in special_keys.items():
@@ -61,7 +61,7 @@ def test_very_long_api_key(tmp_path, monkeypatch):
     }
 
     pushkey.save_vault(vault, password)
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
 
     assert loaded["LONG_KEY"]["current"] == long_key
 
@@ -93,7 +93,7 @@ def test_master_password_with_special_chars(tmp_path, monkeypatch):
 
     for pwd in special_passwords:
         pushkey.save_vault(test_vault, pwd)
-        loaded = pushkey.load_vault(pwd)
+        loaded, _ = pushkey.load_vault(pwd)
         assert "TEST_KEY" in loaded
         assert loaded["TEST_KEY"]["current"] == "test-value"
 
@@ -121,7 +121,7 @@ def test_base64_like_value(tmp_path, monkeypatch):
     }
 
     pushkey.save_vault(vault, password)
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
 
     assert loaded["BINARY_LIKE"]["current"] == binary_like
 
@@ -152,7 +152,7 @@ def test_sql_injection_like_value(tmp_path, monkeypatch):
     }
 
     pushkey.save_vault(vault, password)
-    loaded = pushkey.load_vault(password)
+    loaded, _ = pushkey.load_vault(password)
 
     # Verify dangerous strings are preserved exactly (not interpreted)
     for name, value in sql_like_keys.items():
