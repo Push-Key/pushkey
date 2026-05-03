@@ -1885,6 +1885,7 @@ class RecoverySetupDialog(ctk.CTkToplevel):
         self.configure(fg_color=C["bg2"])
         self.transient(master)
         self.grab_set()
+        self.lift()
         self.resizable(False, False)
 
         self._password = password
@@ -1946,6 +1947,8 @@ class RecoverySetupDialog(ctk.CTkToplevel):
         self._confirm_btn.pack(pady=(20, 0))
         self._confirm_btn.configure(state="disabled")
 
+        self._err_lbl = ctk.CTkLabel(self, text="", font=FONT_XS, text_color=C["red"])
+        self._err_lbl.pack()
         ctk.CTkFrame(self, fg_color="transparent", height=16).pack()
 
     def _toggle_confirm(self):
@@ -1957,7 +1960,11 @@ class RecoverySetupDialog(ctk.CTkToplevel):
     def _submit(self):
         ensure_vault_dir()
         save_vault({}, self._password, recovery_code=self._code)
-        _, vault_key = load_vault(self._password)
+        vault, vault_key = load_vault(self._password)
+        if vault is None or vault_key is None:
+            if hasattr(self, '_err_lbl'):
+                self._err_lbl.configure(text="Failed to initialize vault — please try again")
+            return
         self.destroy()
         self._on_confirmed(self._password, {}, vault_key)
 
