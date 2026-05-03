@@ -2280,21 +2280,18 @@ class LoginFrame(ctk.CTkFrame):
         stripe = ctk.CTkFrame(card, fg_color=C["accent"], height=3, corner_radius=0)
         stripe.pack(fill="x")
 
-        # ── Brand zone (logo + wordmark + tagline) ──
+        # ── Brand zone (logo + tagline only — wordmark removed per request) ──
         brand_box = ctk.CTkFrame(card, fg_color="transparent")
         brand_box.pack(pady=(28, 6), padx=32)
 
-        # Logo placeholder — replaced in _load_login_logo with the real PNG
+        # Logo placeholder — replaced in _load_login_logo with the real PNG.
+        # Bigger now that it's the only brand element.
         self._logo_slot = ctk.CTkLabel(brand_box, text="⬡",
-                                       font=(_MONO_FONT, 36, "bold"),
+                                       font=(_MONO_FONT, 72, "bold"),
                                        text_color=C["accent"])
-        self._logo_slot.pack(pady=(0, 4))
+        self._logo_slot.pack(pady=(0, 8))
         self._logo_card = card
         self.after(0, self._load_login_logo)
-
-        ctk.CTkLabel(brand_box, text="Pushkey",
-                     font=(_UI_FONT, 28, "bold"),
-                     text_color=C["text"]).pack()
 
         tagline = ("Create a master password to get started"
                    if self.is_new
@@ -2450,7 +2447,7 @@ class LoginFrame(ctk.CTkFrame):
         try:
             from PIL import Image as _PILImage
             pil = _PILImage.open(_logo_path).convert("RGBA")
-            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(80, 80))
+            img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(150, 150))
             self._logo_slot.configure(image=img, text="")
             self._login_logo_img = img  # keep ref
         except Exception:
