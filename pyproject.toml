@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pushkey"
+version = "2.1.0"
+description = "Encrypted Key Manager with Direct .env Injection"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Author", email = "author@example.com"}]
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=41.0.0",
+    "graphifyy @ git+https://github.com/safishamsi/graphify.git#egg=graphifyy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+]
+
+[project.scripts]
+pushkey = "pushkey_cli:main"
+pushkey-gui = "pushkey:main"
+
+[tool.setuptools]
+py-modules = ["pushkey", "pushkey_cli", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers"]
+
+[tool.pytest.ini_options]
+tmp_path_retention_policy = "none"
+addopts = "--basetemp=.pytest_tmp"
