@@ -1,4 +1,4 @@
-import { ShieldCheck } from "lucide-react"
+import { ShieldCheck, Github } from "lucide-react"
 
 export default function SecuritySection() {
   return (
@@ -25,7 +25,7 @@ export default function SecuritySection() {
                 {[
                   { title: "AES-256-GCM encryption", desc: "Authenticated encryption — encrypted AND tamper-evident." },
                   { title: "Argon2id KDF", desc: "200,000 iterations. GPU brute-force is not economically viable." },
-                  { title: "Zero network access", desc: "PushKey never calls home. No telemetry. No sync servers. Your keys stay on your disk." },
+                  { title: "Open source crypto layer", desc: "The vault is MIT licensed on GitHub. Read every line that touches your keys before you trust it.", link: "https://github.com/ebothegreat/pushkey" },
                   { title: "chmod 600 vault files", desc: "Vault files are owner-read-only. Other users on the same machine can't read them." },
                 ].map(item => (
                   <div key={item.title} className="flex items-start gap-3">
@@ -33,6 +33,15 @@ export default function SecuritySection() {
                     <div>
                       <span className="text-sm font-semibold">{item.title}</span>
                       <span className="text-sm" style={{ color: "#94A3B8" }}> — {item.desc}</span>
+                      {"link" in item && (
+                        <a href={item.link} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 ml-2 text-xs transition-all"
+                          style={{ color: "#64748B" }}
+                          onMouseEnter={e => { e.currentTarget.style.color = "#94A3B8" }}
+                          onMouseLeave={e => { e.currentTarget.style.color = "#64748B" }}>
+                          <Github size={10} /> view on GitHub
+                        </a>
+                      )}
                     </div>
                   </div>
                 ))}

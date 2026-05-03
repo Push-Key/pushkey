@@ -1,4 +1,4 @@
-import { Shield, Lock, GitBranch, Eye, Clipboard, Wifi } from "lucide-react"
+import { Shield, Lock, GitBranch, Github, Clipboard, Wifi } from "lucide-react"
 
 const TRUST = [
   { icon: Shield, label: "AES-256-GCM Encryption" },
@@ -6,7 +6,7 @@ const TRUST = [
   { icon: Wifi, label: "Zero Network Access" },
   { icon: GitBranch, label: "Git History Scanner" },
   { icon: Clipboard, label: "Auto-clear Clipboard" },
-  { icon: Eye, label: "Auto-hide Revealed Keys" },
+  { icon: Github, label: "Open Source Core" },
 ]
 
 export default function TrustBar() {
