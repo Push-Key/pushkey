@@ -4193,9 +4193,13 @@ class AppFrame(ctk.CTkFrame):
             self._draw_lifecycle_card(container, name, info, _ago)
 
     def _draw_lifecycle_card(self, parent, name, info, ago_fn):
-        """Compact 2-line lifecycle card: cleaner than the milestone-grid
-        version, with stronger visual hierarchy (status accent, bold name,
-        single big metric for days-until-due, inline progress bar)."""
+        """Tight 2-line lifecycle card with icon-led stat row.
+
+        Visual: status-color border + faint status-tinted bg. Top row carries
+        identity + the big due metric + an icon Rotate button. Bottom row is
+        a thin progress bar followed by an inline icon-stat strip
+        (clock = age, folder = projects, refresh = rotations).
+        """
         status = health_status(info)
         status_color = health_color(status)
         provider = info.get("provider") or "—"
@@ -4203,73 +4207,71 @@ class AppFrame(ctk.CTkFrame):
         cat_col = CAT_COLORS.get(cat, C["text3"])
         schedule = info.get("rotation_schedule")
         days_left = days_until_rotation(info)
-        rotated_dt = info.get("rotated")
+        rotated_dt = _parse_iso(info.get("rotated"))
+        created_dt = _parse_iso(info.get("created"))
         env = info.get("env", "all")
+        rotation_count = info.get("rotation_count", 0)
+        # Project count — how many linked projects reference this key name
+        proj_count = sum(
+            1 for p in self.config.get("projects", {}).values()
+            if name in (p.get("keys") or [])
+        )
+        # Age in days
+        age_days = (datetime.now() - created_dt).days if created_dt else None
 
-        # Status-tinted background so the whole card glows softly with state
+        # Faint status tint on bg so card has a soft glow without being heavy
         card_bg = (C["red_bg"] if status == "critical"
                    else C["amber_bg"] if status == "warning"
                    else C["green_bg"] if status == "healthy"
                    else C["surface"])
 
-        # Outer wrapper: thick status border + tinted bg
         card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=8,
                             border_width=2, border_color=status_color,
                             cursor="hand2")
-        card.pack(fill="x", padx=14, pady=5)
+        card.pack(fill="x", padx=14, pady=4)
         card.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill="x", padx=14, pady=10)
+        body.pack(fill="x", padx=12, pady=7)
         body.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
 
-        # ── Right side first (so its width is honored) ──
-        # Big days-until-due metric — the headline of every card
+        # ── TOP ROW ──
+        top = ctk.CTkFrame(body, fg_color="transparent")
+        top.pack(fill="x")
+
+        # RIGHT cluster (packed first): days metric + rotate icon button
         if days_left is None:
-            big_txt, sub_txt, big_col = "—", "no schedule", C["text3"]
+            big_txt, big_col = "—", C["text3"]
         elif days_left < 0:
-            big_txt, sub_txt, big_col = f"{abs(int(days_left))}d", "OVERDUE", C["red"]
+            big_txt, big_col = f"-{abs(int(days_left))}d", C["red"]
         elif days_left == 0:
-            big_txt, sub_txt, big_col = "TODAY", "DUE", C["amber"]
+            big_txt, big_col = "TODAY", C["amber"]
         elif days_left <= 7:
-            big_txt, sub_txt, big_col = f"{int(days_left)}d", "DUE IN", C["amber"]
+            big_txt, big_col = f"{int(days_left)}d", C["amber"]
         else:
-            big_txt, sub_txt, big_col = f"{int(days_left)}d", "DUE IN", status_color
+            big_txt, big_col = f"{int(days_left)}d", status_color
 
-        right = ctk.CTkFrame(body, fg_color="transparent", width=110)
-        right.pack(side="right", padx=(12, 0))
-        right.pack_propagate(False)
-
-        ctk.CTkLabel(right, text=sub_txt, font=(_UI_FONT, 9, "bold"),
-                     text_color=big_col, anchor="e").pack(anchor="e")
-        ctk.CTkLabel(right, text=big_txt,
-                     font=(_UI_FONT, 24 if big_txt != "TODAY" else 18, "bold"),
-                     text_color=big_col, anchor="e").pack(anchor="e")
-
-        # Inline Rotate button under the metric (icon-led)
+        # Compact Rotate icon button (icon-only, square)
         ctk.CTkButton(
-            right, text="  Rotate", image=icon("refresh", 12, "#FFFFFF"),
-            compound="left",
+            top, text="", image=icon("refresh", 14, "#FFFFFF"),
             command=lambda n=name: (self.rotate_key(n),
                                     self._invalidate_tabs("dashboard", "keys", "timeline")),
             fg_color=status_color, hover_color=C["btn_hover"],
-            text_color="#FFFFFF", font=(_UI_FONT, 10, "bold"),
-            corner_radius=6, height=24, width=92,
-        ).pack(anchor="e", pady=(6, 0))
+            corner_radius=6, height=26, width=30,
+        ).pack(side="right", padx=(8, 0))
 
-        # ── Left side: identity + cycle bar ──
-        left = ctk.CTkFrame(body, fg_color="transparent")
-        left.pack(side="left", fill="both", expand=True)
+        # Big metric
+        ctk.CTkLabel(top, text=big_txt,
+                     font=(_UI_FONT, 18 if big_txt != "TODAY" else 14, "bold"),
+                     text_color=big_col, anchor="e"
+                     ).pack(side="right")
 
-        # Row 1: category dot + name + meta
-        identity = ctk.CTkFrame(left, fg_color="transparent")
-        identity.pack(fill="x", anchor="w")
-
-        ctk.CTkLabel(identity, text="●", font=(_MONO_FONT, 13),
-                     text_color=cat_col, width=16
+        # LEFT: category dot + name + meta
+        ctk.CTkLabel(top, text="●", font=(_MONO_FONT, 13),
+                     text_color=cat_col, width=14
                      ).pack(side="left", padx=(0, 2))
-        name_lbl = ctk.CTkLabel(identity, text=name,
-                                font=(_MONO_FONT, 14, "bold"),
+        name_lbl = ctk.CTkLabel(top, text=name,
+                                font=(_MONO_FONT, 13, "bold"),
                                 text_color=C["text"], cursor="hand2", anchor="w")
         name_lbl.pack(side="left")
         name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
@@ -4277,23 +4279,20 @@ class AppFrame(ctk.CTkFrame):
         meta = f"{provider}  ·  {cat}"
         if env != "all":
             meta += f"  ·  {env.upper()}"
-        ctk.CTkLabel(identity, text=f"   {meta}", font=FONT_XS,
+        ctk.CTkLabel(top, text=f"   {meta}", font=FONT_XS,
                      text_color=C["text3"]).pack(side="left")
 
-        # Row 2: cycle progress bar + supporting text (inline)
+        # ── BOTTOM ROW: progress bar + icon stats ──
+        bot = ctk.CTkFrame(body, fg_color="transparent")
+        bot.pack(fill="x", pady=(6, 0))
+
+        # Cycle bar (if scheduled)
         if schedule and isinstance(schedule, (int, float)) and days_left is not None:
             used = max(0, schedule - days_left)
             pct = max(0.02, min(1.0, used / schedule))
-        else:
-            used, pct = 0, 0
-
-        sub_row = ctk.CTkFrame(left, fg_color="transparent")
-        sub_row.pack(fill="x", anchor="w", pady=(8, 0))
-
-        if schedule and days_left is not None:
-            bar_wrap = ctk.CTkFrame(sub_row, fg_color=C["bg3"], height=8,
-                                    corner_radius=4)
-            bar_wrap.pack(side="left", fill="x", expand=True, pady=(2, 0))
+            bar_wrap = ctk.CTkFrame(bot, fg_color=C["bg3"], height=6,
+                                    corner_radius=3, width=140)
+            bar_wrap.pack(side="left", padx=(0, 8))
             bar_wrap.pack_propagate(False)
 
             def _fill(bw=bar_wrap, p=pct, c=status_color, _t=[0]):
@@ -4302,25 +4301,48 @@ class AppFrame(ctk.CTkFrame):
                 bw.update_idletasks()
                 w = bw.winfo_width()
                 if w > 10:
-                    ctk.CTkFrame(bw, fg_color=c, height=8, corner_radius=4,
+                    ctk.CTkFrame(bw, fg_color=c, height=6, corner_radius=3,
                                  width=int(p * w)).place(x=0, y=0, relheight=1)
                 elif _t[0] < 10:
                     _t[0] += 1
                     bw.after(50, _fill)
             bar_wrap.after(50, _fill)
-
-            ctk.CTkLabel(
-                sub_row,
-                text=f"  {used}/{int(schedule)}d cycle  ·  rotated {ago_fn(_parse_iso(rotated_dt)) or 'never'}",
-                font=FONT_XS, text_color=C["text3"], anchor="w",
-            ).pack(side="left", padx=(8, 0))
+            ctk.CTkLabel(bot, text=f"{used}/{int(schedule)}d",
+                         font=(_UI_FONT, 9, "bold"),
+                         text_color=status_color
+                         ).pack(side="left", padx=(0, 14))
         else:
-            # No schedule — show a hint instead of an empty bar
-            ctk.CTkLabel(
-                sub_row,
-                text=f"No rotation schedule  ·  last rotated {ago_fn(_parse_iso(rotated_dt)) or 'never'}",
-                font=FONT_XS, text_color=C["text3"], anchor="w",
-            ).pack(side="left")
+            ctk.CTkLabel(bot, text="no schedule",
+                         font=(_UI_FONT, 9, "italic"),
+                         text_color=C["text3"]
+                         ).pack(side="left", padx=(0, 14))
+
+        # Inline icon stats — clock (age) · refresh (rotation count)
+        # · folder (projects) · eye (recent reveal — only if any history)
+        def _stat(parent_fr, ico_name, value, color):
+            grp = ctk.CTkFrame(parent_fr, fg_color="transparent")
+            grp.pack(side="left", padx=(0, 12))
+            ctk.CTkLabel(grp, text="", image=icon(ico_name, 12, color),
+                         width=14).pack(side="left")
+            ctk.CTkLabel(grp, text=str(value),
+                         font=(_UI_FONT, 10, "bold"),
+                         text_color=color).pack(side="left", padx=(2, 0))
+
+        if age_days is not None:
+            _stat(bot, "clock",
+                  f"{age_days}d old" if age_days < 365 else f"{age_days // 365}y old",
+                  C["text2"])
+        _stat(bot, "refresh",
+              f"{rotation_count}× rotated" if rotation_count else "never rotated",
+              C["text2"] if rotation_count else C["text3"])
+        if proj_count > 0:
+            _stat(bot, "folder",
+                  f"{proj_count} project{'s' if proj_count != 1 else ''}",
+                  C["accent"])
+        if rotated_dt is not None:
+            _stat(bot, "activity",
+                  f"last {ago_fn(rotated_dt)}",
+                  C["text2"])
 
     def _make_filter_chip(self, parent, label, count, color, active, command):
         """Segmented-control chip: status dot + label + count badge.
