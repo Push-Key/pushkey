@@ -40,14 +40,6 @@ function Sidebar() {
     )
   }
 
-  const dimItem = (icon: ReactNode, label: string) => (
-    <div className="flex items-center gap-3 px-3 py-2 text-sm text-[#94A3B8]/40 cursor-not-allowed select-none">
-      {icon}
-      <span>{label}</span>
-      <span className="ml-auto text-[10px] bg-white/5 text-white/20 px-1.5 py-0.5 rounded">Soon</span>
-    </div>
-  )
-
   return (
     <aside className="w-[220px] shrink-0 bg-[#0D1B2A] border-r border-white/8 flex flex-col h-screen sticky top-0">
       {/* Logo */}
@@ -81,11 +73,11 @@ function Sidebar() {
         {navItem("/admin/generate", <KeyRound size={15} />, "Generate Key")}
 
         <div className="pt-4">
-          <p className="text-[9px] tracking-widest uppercase text-[#94A3B8]/30 px-3 pb-2">Coming Soon</p>
-          {dimItem(<BarChart2 size={15} />, "Analytics")}
-          {dimItem(<GitBranch size={15} />, "GitHub Hub")}
-          {dimItem(<Headphones size={15} />, "Support")}
-          {dimItem(<Users size={15} />, "Community")}
+          <p className="text-[9px] tracking-widest uppercase text-[#94A3B8]/50 px-3 pb-2">Tools</p>
+          {navItem("/admin/analytics", <BarChart2 size={15} />, "Analytics")}
+          {navItem("/admin/github", <GitBranch size={15} />, "GitHub Hub")}
+          {navItem("/admin/support", <Headphones size={15} />, "Support")}
+          {navItem("/admin/community", <Users size={15} />, "Community")}
         </div>
       </nav>
     </aside>
