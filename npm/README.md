@@ -5,13 +5,13 @@ This is the npm distribution package for the [Pushkey CLI](https://github.com/Pu
 ## Install
 
 ```bash
-npm install -g pushkey
+npm install -g @pushkey/cli
 ```
 
 or for one-off use:
 
 ```bash
-npx pushkey list
+npx @pushkey/cli list
 ```
 
 ## What it does

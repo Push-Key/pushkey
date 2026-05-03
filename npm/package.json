@@ -1,5 +1,5 @@
 {
-  "name": "pushkey",
+  "name": "@pushkey/cli",
   "version": "2.1.0",
   "description": "Encrypted API key manager for developers — AES-256-GCM vault, zero-knowledge sync",
   "keywords": [
