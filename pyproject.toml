@@ -21,10 +21,11 @@ dev = [
 ]
 
 [project.scripts]
-pushkey = "pushkey:main"
+pushkey = "pushkey_cli:main"
+pushkey-gui = "pushkey:main"
 
 [tool.setuptools]
-py-modules = ["pushkey"]
+py-modules = ["pushkey", "pushkey_cli", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers"]
 
 [tool.pytest.ini_options]
 tmp_path_retention_policy = "none"
