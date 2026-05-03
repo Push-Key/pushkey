@@ -63,6 +63,7 @@ function Sidebar() {
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         <p className="text-[9px] tracking-widest uppercase text-[#94A3B8]/50 px-3 pb-2">Operations</p>
         {navItem("/admin/licenses", <LayoutGrid size={15} />, "Licenses", stats?.total_active)}
+        {navItem("/admin/contacts", <Users size={15} />, "Contacts")}
         {navItem(
           "/admin/revoked",
           <XCircle size={15} />,
