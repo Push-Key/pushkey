@@ -25,6 +25,7 @@ try:
     from fastapi import FastAPI, HTTPException, Depends, Request, Header
     from fastapi.responses import JSONResponse, Response
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    from fastapi.middleware.cors import CORSMiddleware
     from passlib.context import CryptContext
     from jose import jwt, JWTError
 except ImportError:
@@ -46,6 +47,18 @@ VAULTS_DIR.mkdir(exist_ok=True)
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", os.environ.get("ADMIN_ORIGIN", "")],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Admin config ─────────────────────────────────────────────────
+LICENSES_FILE = DATA_DIR / "licenses.json"
+ADMIN_SECRET  = os.environ.get("PUSHKEY_ADMIN_SECRET", "dev-change-me")
+TIER_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
 
 
 # ── User store (flat JSON, fine for <1000 users) ─────────────────
@@ -146,6 +159,128 @@ async def vault_meta(email: str = Depends(_current_user)):
 @app.get("/api/v1/health")
 async def health():
     return {"status": "ok", "service": "pushkey-cloud"}
+
+
+# ── Admin helpers ────────────────────────────────────────────────
+def _load_licenses() -> dict:
+    if not LICENSES_FILE.exists():
+        return {}
+    return json.loads(LICENSES_FILE.read_text())
+
+def _save_licenses(data: dict) -> None:
+    LICENSES_FILE.write_text(json.dumps(data, indent=2))
+
+def _require_admin(x_admin_secret: str = Header(default="")):
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(403, "Forbidden")
+
+def _gen_key(tier: str) -> str:
+    import secrets as _sec, string as _s
+    chars = _s.ascii_uppercase + _s.digits
+    prefix = TIER_PREFIXES.get(tier, "FREE")
+    seg1 = "".join(_sec.choice(chars) for _ in range(8))
+    seg2 = "".join(_sec.choice(chars) for _ in range(16))
+    seg3 = "".join(_sec.choice(chars) for _ in range(4))
+    return f"{prefix}-{seg1}-{seg2}-{seg3}"
+
+
+# ── Admin endpoints ──────────────────────────────────────────────
+@app.get("/api/admin/stats")
+async def admin_stats(_: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week  = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)).isoformat()
+    yesterday = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)).isoformat()
+    active     = [v for v in lic.values() if v["status"] == "active"]
+    new_today  = sum(1 for v in lic.values() if v.get("activated", "") >= today)
+    yesterday_new = sum(1 for v in lic.values() if yesterday <= v.get("activated", "") < today)
+    return {
+        "total":        len(lic),
+        "total_active": len(active),
+        "new_today":    new_today,
+        "pro_team":     sum(1 for v in active if v["tier"] in ("pro", "team")),
+        "revoked":      sum(1 for v in lic.values() if v["status"] == "revoked"),
+        "week_delta":   sum(1 for v in lic.values() if v.get("activated", "") >= week),
+        "today_delta":  new_today - yesterday_new,
+    }
+
+
+@app.get("/api/admin/licenses")
+async def admin_list_licenses(_: None = Depends(_require_admin)):
+    return list(_load_licenses().values())
+
+
+@app.post("/api/admin/licenses/generate")
+async def admin_generate(request: Request, _: None = Depends(_require_admin)):
+    body = await request.json()
+    tier = body.get("tier", "free").lower()
+    if tier not in TIER_PREFIXES:
+        raise HTTPException(400, f"tier must be one of: {list(TIER_PREFIXES)}")
+    lic = _load_licenses()
+    key = _gen_key(tier)
+    while key in lic:
+        key = _gen_key(tier)
+    entry = {
+        "key":            key,
+        "tier":           tier,
+        "email":          body.get("email", ""),
+        "platform":       body.get("platform", ""),
+        "activated":      datetime.utcnow().isoformat(),
+        "last_heartbeat": None,
+        "status":         "active",
+        "notes":          body.get("notes", ""),
+    }
+    lic[key] = entry
+    _save_licenses(lic)
+    return entry
+
+
+@app.post("/api/admin/licenses/{key}/expire")
+async def admin_expire(key: str, _: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+    lic[key]["status"] = "expired"
+    _save_licenses(lic)
+    return {"ok": True}
+
+
+@app.post("/api/admin/licenses/{key}/revoke")
+async def admin_revoke(key: str, _: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+    lic[key]["status"] = "revoked"
+    lic[key]["last_heartbeat"] = None
+    _save_licenses(lic)
+    return {"ok": True}
+
+
+@app.post("/api/admin/licenses/{key}/renew")
+async def admin_renew(key: str, _: None = Depends(_require_admin)):
+    lic = _load_licenses()
+    if key not in lic:
+        raise HTTPException(404, "License not found")
+    lic[key]["status"] = "active"
+    _save_licenses(lic)
+    return {"ok": True}
+
+
+@app.get("/api/admin/export")
+async def admin_export(_: None = Depends(_require_admin)):
+    import csv, io
+    lic = _load_licenses()
+    out = io.StringIO()
+    fields = ["key", "tier", "email", "platform", "activated", "last_heartbeat", "status", "notes"]
+    w = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(lic.values())
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=licenses.csv"},
+    )
 
 
 if __name__ == "__main__":
