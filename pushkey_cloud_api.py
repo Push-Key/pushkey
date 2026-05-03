@@ -467,14 +467,12 @@ async def admin_contacts(_: None = Depends(_require_admin)):
             contact["latest_activity"] = act
 
     today = datetime.utcnow().date().isoformat()
-    result = sorted(
-        by_email.values(),
-        key=lambda c: (
-            0 if (c["follow_up_date"] and c["follow_up_date"] <= today) else 1,
-            c["latest_activity"],
-        ),
-    )
-    return result
+    contacts_list = list(by_email.values())
+    # Sort by latest_activity descending first (most recent on top within a group)
+    contacts_list.sort(key=lambda c: c["latest_activity"], reverse=True)
+    # Then stable-sort by overdue flag ascending (overdue=0 floats to top)
+    contacts_list.sort(key=lambda c: 0 if (c["follow_up_date"] and c["follow_up_date"] <= today) else 1)
+    return contacts_list
 
 
 @app.patch("/api/admin/contacts/{email}")
