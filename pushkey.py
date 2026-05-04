@@ -2304,6 +2304,10 @@ class AppFrame(ctk.CTkFrame):
     }
 
     def _nav_switch(self, key: str):
+        if key != "keys":
+            self._expanded_key = None
+            self._rotate_pending = False
+            self._rotate_result = None
         self._active_nav.set(key)
         for k, btn in self._nav_btns.items():
             ico_name = self._nav_icons.get(k)
@@ -4926,6 +4930,9 @@ class AppFrame(ctk.CTkFrame):
     def _on_search_change(self, *_):
         if self._search_debounce_id:
             self.after_cancel(self._search_debounce_id)
+        self._expanded_key = None
+        self._rotate_pending = False
+        self._rotate_result = None
         self._search_debounce_id = self.after(200, self._render_key_rows)
 
     def _render_key_rows(self):
@@ -5001,6 +5008,9 @@ class AppFrame(ctk.CTkFrame):
     def _toggle_group_by(self):
         self._group_by = "category" if self._group_by == "file" else "file"
         self._collapsed_groups.clear()
+        self._expanded_key = None
+        self._rotate_pending = False
+        self._rotate_result = None
         self._render_key_rows()
 
     def _toggle_group(self, group_key):
