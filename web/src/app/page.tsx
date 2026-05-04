@@ -19,10 +19,10 @@ export default function HomePage() {
       <Navbar />
       <Hero />
       <TrustBar />
+      <AISection />
       <AudienceSection />
       <HowItWorks />
       <Features />
-      <AISection />
       <ComparisonTable />
       <SecuritySection />
       <Pricing />
