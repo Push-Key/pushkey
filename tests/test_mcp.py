@@ -185,3 +185,58 @@ def test_add_key_duplicate_rejected(tmp_path, monkeypatch):
     result = mcp_mod.add_key("EXISTING", "new-value")
     assert result["success"] is False
     assert "already exists" in result["error"]
+
+
+def test_inject_env_writes_file(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    vault_dir = tmp_path / "vault_dir"
+    vault_dir.mkdir()
+    monkeypatch.setattr(_s, "VAULT_DIR", vault_dir)
+    monkeypatch.setattr(_s, "VAULT_FILE", vault_dir / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", vault_dir / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", vault_dir / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    vault = {
+        "OPENAI_KEY": {"value": "sk-abc", "created": "2024-01-01", "rotated": "2024-01-01",
+                       "provider": "OpenAI", "env": "dev", "projects": [], "notes": ""},
+    }
+    save_vault(vault, "pw")
+
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.inject_env(str(project_dir), keys=["OPENAI_KEY"])
+    assert result["success"] is True
+    env_file = project_dir / ".env"
+    assert env_file.exists()
+    content = env_file.read_text()
+    assert "OPENAI_KEY=sk-abc" in content
+
+
+def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    vault_dir = tmp_path / "vault_dir"
+    vault_dir.mkdir()
+    monkeypatch.setattr(_s, "VAULT_DIR", vault_dir)
+    monkeypatch.setattr(_s, "VAULT_FILE", vault_dir / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", vault_dir / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", vault_dir / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    save_vault({"K": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                      "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    mcp_mod.inject_env(str(project_dir), keys=["K"])
+    gitignore = project_dir / ".gitignore"
+    assert gitignore.exists()
+    assert ".env" in gitignore.read_text()
