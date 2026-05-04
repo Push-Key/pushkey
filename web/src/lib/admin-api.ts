@@ -171,6 +171,18 @@ export const adminApi = {
       body: JSON.stringify({ action, keys }),
     }),
 
+  async downloadBackup(s: string): Promise<void> {
+    const r = await fetch(`${API}/api/admin/backup`, { headers: h(s) })
+    if (!r.ok) throw new Error("Backup failed")
+    const blob = await r.blob()
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement("a")
+    a.href = url
+    a.download = `pushkey-backup-${new Date().toISOString().slice(0, 10)}.tar.gz`
+    a.click()
+    URL.revokeObjectURL(url)
+  },
+
   testEmail: (s: string, to: string) =>
     call<{ sent: boolean; reason?: string; to?: string }>(s, "/api/admin/settings/test-email", {
       method: "POST",
@@ -204,14 +216,19 @@ export const adminApi = {
       { method: "POST" }
     ),
 
-  async exportCsv(s: string): Promise<void> {
-    const r = await fetch(`${API}/api/admin/export`, { headers: h(s) })
+  async exportCsv(s: string, filters?: { tier?: string; status?: string; search?: string }): Promise<void> {
+    const params = new URLSearchParams()
+    if (filters?.tier && filters.tier !== "All")     params.set("tier",   filters.tier)
+    if (filters?.status && filters.status !== "All") params.set("status", filters.status)
+    if (filters?.search)                              params.set("search", filters.search)
+    const qs  = params.toString() ? `?${params}` : ""
+    const r   = await fetch(`${API}/api/admin/export${qs}`, { headers: h(s) })
     if (!r.ok) throw new Error("Export failed")
     const blob = await r.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement("a")
     a.href = url
-    a.download = "licenses.csv"
+    a.download = qs ? "licenses-filtered.csv" : "licenses.csv"
     a.click()
     URL.revokeObjectURL(url)
   },

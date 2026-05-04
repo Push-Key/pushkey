@@ -19,7 +19,21 @@ import os
 import secrets
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+
+# Load .env if present
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+def _utcnow() -> datetime:
+    """Replacement for deprecated datetime.utcnow() — returns naive UTC datetime."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 try:
     from fastapi import FastAPI, HTTPException, Depends, Request, Header
@@ -73,7 +87,7 @@ def _save_users(users: dict) -> None:
 
 # ── JWT helpers ──────────────────────────────────────────────────
 def _create_token(email: str) -> str:
-    exp = datetime.utcnow() + timedelta(hours=TOKEN_TTL)
+    exp = _utcnow() + timedelta(hours=TOKEN_TTL)
     return jwt.encode({"sub": email, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
 
 def _decode_token(token: str) -> str:
@@ -98,7 +112,7 @@ async def register(request: Request):
     users = _load_users()
     if email in users:
         raise HTTPException(409, "email already registered")
-    users[email] = {"hash": pwd_ctx.hash(pw), "created": datetime.utcnow().isoformat()}
+    users[email] = {"hash": pwd_ctx.hash(pw), "created": _utcnow().isoformat()}
     _save_users(users)
     return {"token": _create_token(email)}
 
@@ -112,6 +126,85 @@ async def login(request: Request):
     if not user or not pwd_ctx.verify(pw, user["hash"]):
         raise HTTPException(401, "Invalid credentials")
     return {"token": _create_token(email)}
+
+
+# ── Password reset ───────────────────────────────────────────────
+RESET_TOKEN_TTL_MIN = 30  # token expires after 30 min
+
+@app.post("/api/v1/auth/request-reset")
+async def auth_request_reset(request: Request):
+    """Send password reset email with one-time token. Always returns success to prevent enumeration."""
+    body  = await request.json()
+    email = body.get("email", "").strip().lower()
+    if not email:
+        raise HTTPException(400, "email required")
+
+    users = _load_users()
+    if email in users:
+        # Generate token, store hash, expiry
+        token = secrets.token_urlsafe(32)
+        users[email]["reset_token_hash"] = hashlib.sha256(token.encode()).hexdigest()
+        users[email]["reset_expires"]    = (_utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat()
+        _save_users(users)
+
+        # Send email if SMTP configured
+        if SMTP_HOST and FROM_EMAIL:
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                reset_link = f"{APP_URL}/reset?token={token}&email={email}"
+                text = f"""You requested a password reset for your Pushkey cloud sync account.
+
+Click the link below within {RESET_TOKEN_TTL_MIN} minutes to set a new password:
+
+{reset_link}
+
+If you didn't request this, ignore this email — your password won't change.
+"""
+                m = MIMEText(text, "plain")
+                m["Subject"] = "Reset your Pushkey password"
+                m["From"]    = FROM_EMAIL
+                m["To"]      = email
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+                    s.starttls()
+                    s.login(SMTP_USER, SMTP_PASS)
+                    s.sendmail(FROM_EMAIL, [email], m.as_string())
+            except Exception:
+                pass
+
+    return {"ok": True, "message": "If that email is registered, a reset link has been sent."}
+
+
+@app.post("/api/v1/auth/confirm-reset")
+async def auth_confirm_reset(request: Request):
+    """Verify reset token and set new password."""
+    body     = await request.json()
+    email    = body.get("email", "").strip().lower()
+    token    = body.get("token", "")
+    new_pw   = body.get("password", "")
+
+    if not email or not token or not new_pw:
+        raise HTTPException(400, "email, token, and password required")
+    if len(new_pw) < 8:
+        raise HTTPException(400, "password must be at least 8 chars")
+
+    users = _load_users()
+    user  = users.get(email)
+    if not user or "reset_token_hash" not in user or "reset_expires" not in user:
+        raise HTTPException(401, "Invalid or expired reset token")
+
+    expected_hash = hashlib.sha256(token.encode()).hexdigest()
+    if expected_hash != user["reset_token_hash"]:
+        raise HTTPException(401, "Invalid or expired reset token")
+
+    if user["reset_expires"] < _utcnow().isoformat():
+        raise HTTPException(401, "Reset token expired — request a new one")
+
+    user["hash"] = pwd_ctx.hash(new_pw)
+    user.pop("reset_token_hash", None)
+    user.pop("reset_expires", None)
+    _save_users(users)
+    return {"ok": True, "token": _create_token(email)}
 
 
 # ── Vault blob endpoints (zero-knowledge) ────────────────────────
@@ -130,7 +223,7 @@ async def put_vault(request: Request, email: str = Depends(_current_user)):
     vpath = _vault_path(email)
     vpath.write_bytes(blob)
     tag = _etag(blob)
-    return {"etag": tag, "size": len(blob), "updated": datetime.utcnow().isoformat()}
+    return {"etag": tag, "size": len(blob), "updated": _utcnow().isoformat()}
 
 @app.get("/api/v1/vault")
 async def get_vault(
@@ -166,7 +259,7 @@ EVENTS_FILE = DATA_DIR / "events.jsonl"
 AUDIT_FILE  = DATA_DIR / "audit.jsonl"
 
 def _log_event(event_type: str, data: dict) -> None:
-    entry = {"ts": datetime.utcnow().isoformat(), "type": event_type, **data}
+    entry = {"ts": _utcnow().isoformat(), "type": event_type, **data}
     with EVENTS_FILE.open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -185,7 +278,7 @@ def _load_events() -> list[dict]:
 def _log_audit(action: str, target: str, details: dict | None = None) -> None:
     """Record admin action for compliance audit trail."""
     entry = {
-        "ts":      datetime.utcnow().isoformat(),
+        "ts":      _utcnow().isoformat(),
         "action":  action,
         "target":  target,
         "details": details or {},
@@ -207,10 +300,38 @@ def _load_audit() -> list[dict]:
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
+# Simple in-memory token bucket: max RATE_LIMIT_MAX heartbeats per RATE_LIMIT_WINDOW_SEC per license_key
+RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
+RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
+_HEARTBEAT_HITS: dict[str, list[float]] = {}
+
+def _check_rate_limit(key: str) -> bool:
+    """Returns True if request allowed, False if rate-limited."""
+    now = time.time()
+    hits = _HEARTBEAT_HITS.get(key, [])
+    # Drop hits outside window
+    hits = [h for h in hits if now - h < RATE_LIMIT_WINDOW_SEC]
+    if len(hits) >= RATE_LIMIT_MAX:
+        _HEARTBEAT_HITS[key] = hits
+        return False
+    hits.append(now)
+    _HEARTBEAT_HITS[key] = hits
+    # Periodic cleanup to avoid unbounded growth
+    if len(_HEARTBEAT_HITS) > 10000:
+        cutoff = now - RATE_LIMIT_WINDOW_SEC
+        _HEARTBEAT_HITS.clear()  # nuke and rebuild lazily
+    return True
+
+
 async def _handle_heartbeat(body: dict) -> dict:
     """Shared logic for both /v1/heartbeat and /api/v1/heartbeat."""
     import platform as _pl
     key = body.get("license_key", "").strip().upper()
+    if not key:
+        raise HTTPException(400, "license_key required")
+    if not _check_rate_limit(key):
+        raise HTTPException(429, f"Too many heartbeats — limit is {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW_SEC}s")
+
     # Accept platform from body, or auto-detect if missing
     platform = body.get("platform", "") or f"{_pl.system()} {_pl.release()}"
     version  = body.get("version", "")
@@ -223,7 +344,7 @@ async def _handle_heartbeat(body: dict) -> dict:
     if entry["status"] == "revoked":
         raise HTTPException(403, "License revoked")
 
-    entry["last_heartbeat"] = datetime.utcnow().isoformat()
+    entry["last_heartbeat"] = _utcnow().isoformat()
     entry["platform"] = platform
     _save_licenses(lic)
 
@@ -310,7 +431,7 @@ Questions? Reply to this email.
 
 def _auto_expire(lic: dict) -> bool:
     """Set status=expired for any record past its expires_at. Returns True if any changed."""
-    now = datetime.utcnow().isoformat()
+    now = _utcnow().isoformat()
     changed = False
     for entry in lic.values():
         if (
@@ -328,7 +449,7 @@ def _auto_expire(lic: dict) -> bool:
 @app.get("/api/admin/stats")
 async def admin_stats(_: None = Depends(_require_admin)):
     lic = _load_licenses()
-    now = datetime.utcnow()
+    now = _utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     week  = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)).isoformat()
     yesterday = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)).isoformat()
@@ -369,7 +490,7 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
         "tier":           tier,
         "email":          body.get("email", ""),
         "platform":       body.get("platform", ""),
-        "activated":      datetime.utcnow().isoformat(),
+        "activated":      _utcnow().isoformat(),
         "last_heartbeat": None,
         "status":         "active",
         "notes":          body.get("notes", ""),
@@ -409,7 +530,7 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
 
     expires_at = None
     if trial_days is not None:
-        expires_at = (datetime.utcnow() + timedelta(days=trial_days)).isoformat()
+        expires_at = (_utcnow() + timedelta(days=trial_days)).isoformat()
 
     lic = _load_licenses()
     key = _gen_key(tier)
@@ -424,7 +545,7 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
         "company":        company,
         "source":         source,
         "platform":       "",
-        "activated":      datetime.utcnow().isoformat(),
+        "activated":      _utcnow().isoformat(),
         "last_heartbeat": None,
         "status":         "active",
         "notes":          notes,
@@ -494,7 +615,7 @@ async def admin_contacts(_: None = Depends(_require_admin)):
         if act and act > contact["latest_activity"]:
             contact["latest_activity"] = act
 
-    today = datetime.utcnow().date().isoformat()
+    today = _utcnow().date().isoformat()
     contacts_list = list(by_email.values())
     # Sort by latest_activity descending first (most recent on top within a group)
     contacts_list.sort(key=lambda c: c["latest_activity"], reverse=True)
@@ -588,7 +709,7 @@ async def admin_analytics(_: None = Depends(_require_admin)):
     - tier_history: activations by tier for last 30 days
     """
     events = _load_events()
-    now = datetime.utcnow()
+    now = _utcnow()
 
     # Build 30-day date buckets
     days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
@@ -622,18 +743,65 @@ async def admin_analytics(_: None = Depends(_require_admin)):
 
 
 @app.get("/api/admin/export")
-async def admin_export(_: None = Depends(_require_admin)):
+async def admin_export(
+    request: Request,
+    tier:   str = "",
+    status: str = "",
+    search: str = "",
+    _: None = Depends(_require_admin),
+):
+    """Export licenses CSV with optional filters: ?tier=&status=&search="""
     import csv, io
-    lic = _load_licenses()
+    lic_values = list(_load_licenses().values())
+
+    if tier:
+        t = tier.lower()
+        if t == "ent": t = "enterprise"
+        lic_values = [v for v in lic_values if v.get("tier") == t]
+    if status:
+        lic_values = [v for v in lic_values if v.get("status") == status.lower()]
+    if search:
+        q = search.lower()
+        lic_values = [v for v in lic_values if any(
+            q in str(v.get(f, "")).lower()
+            for f in ("key", "email", "name", "company", "platform", "tier", "status")
+        )]
+
     out = io.StringIO()
-    fields = ["key", "tier", "email", "platform", "activated", "last_heartbeat", "status", "notes"]
+    fields = [
+        "key", "tier", "email", "name", "company", "platform",
+        "activated", "expires_at", "last_heartbeat", "status",
+        "stage", "source", "follow_up_date", "notes",
+    ]
     w = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
     w.writeheader()
-    w.writerows(lic.values())
+    w.writerows(lic_values)
+
+    suffix = "all" if not (tier or status or search) else "filtered"
     return Response(
         content=out.getvalue(),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=licenses.csv"},
+        headers={"Content-Disposition": f"attachment; filename=licenses-{suffix}.csv"},
+    )
+
+
+@app.get("/api/admin/backup")
+async def admin_backup(_: None = Depends(_require_admin)):
+    """Returns tar.gz of all data files (licenses, tickets, audit log, events, users — NOT vault blobs)."""
+    import tarfile, io
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for fname in ("licenses.json", "tickets.json", "audit.jsonl", "events.jsonl", "users.json"):
+            fpath = DATA_DIR / fname
+            if fpath.exists():
+                tar.add(fpath, arcname=fname)
+    buf.seek(0)
+    _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())})
+    timestamp = _utcnow().strftime("%Y-%m-%d-%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f"attachment; filename=pushkey-backup-{timestamp}.tar.gz"},
     )
 
 
@@ -669,8 +837,8 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
         "message":    msg,
         "priority":   pri,
         "status":     "open",
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "created_at": _utcnow().isoformat(),
+        "updated_at": _utcnow().isoformat(),
         "replies":    [],
     }
     tickets.append(ticket)
@@ -714,10 +882,10 @@ async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depend
         target["status"] = body["status"]
     if "reply" in body and body["reply"].strip():
         target["replies"].append({
-            "ts":   datetime.utcnow().isoformat(),
+            "ts":   _utcnow().isoformat(),
             "body": body["reply"].strip(),
         })
-    target["updated_at"] = datetime.utcnow().isoformat()
+    target["updated_at"] = _utcnow().isoformat()
     _save_tickets(tickets)
     _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body})
     return target
@@ -743,7 +911,7 @@ async def portal_lookup(request: Request):
     # Auto-expire if past expiry
     if (entry.get("expires_at")
             and entry["status"] == "active"
-            and entry["expires_at"] < datetime.utcnow().isoformat()):
+            and entry["expires_at"] < _utcnow().isoformat()):
         entry["status"] = "expired"
         _save_licenses(lic)
 
@@ -782,8 +950,8 @@ async def portal_request_renewal(request: Request):
         "message":    message or f"Customer requested renewal for {key[:12]}…",
         "priority":   "medium",
         "status":     "open",
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "created_at": _utcnow().isoformat(),
+        "updated_at": _utcnow().isoformat(),
         "replies":    [],
         "type":       "renewal_request",
         "license_key": key,

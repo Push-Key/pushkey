@@ -321,3 +321,112 @@ def test_csv_export(client):
     assert r.status_code == 200
     assert "text/csv" in r.headers["content-type"]
     assert "ex@x.com" in r.text
+
+
+def test_csv_export_filtered_by_tier(client):
+    _make_key(client, tier="free", email="free@x.com")
+    _make_key(client, tier="pro", email="pro@x.com")
+    r = client.get("/api/admin/export?tier=pro", headers=ADMIN)
+    assert "pro@x.com" in r.text
+    assert "free@x.com" not in r.text
+    assert "filtered" in r.headers["content-disposition"]
+
+
+def test_csv_export_filtered_by_status(client):
+    k = _make_key(client, email="active@x.com")
+    _make_key(client, email="other@x.com")
+    client.post(f"/api/admin/licenses/{k}/revoke", headers=ADMIN)
+    r = client.get("/api/admin/export?status=revoked", headers=ADMIN)
+    assert "active@x.com" in r.text
+    assert "other@x.com" not in r.text
+
+
+# ── Rate limiting ────────────────────────────────────────────────
+def test_heartbeat_rate_limit(client, monkeypatch):
+    """Default limit is 10 per 60s — 11th hit should 429."""
+    key = _make_key(client)
+    for _ in range(10):
+        r = client.post("/v1/heartbeat", json={"license_key": key})
+        assert r.status_code == 200
+    r = client.post("/v1/heartbeat", json={"license_key": key})
+    assert r.status_code == 429
+
+
+def test_heartbeat_requires_license_key(client):
+    r = client.post("/v1/heartbeat", json={})
+    assert r.status_code == 400
+
+
+# ── Password reset ───────────────────────────────────────────────
+def test_request_reset_always_returns_ok(client):
+    """Should not leak whether email exists (anti-enumeration)."""
+    r = client.post("/api/v1/auth/request-reset", json={"email": "nobody@x.com"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_password_reset_full_flow(client, app_module):
+    # Register user
+    client.post("/api/v1/auth/register",
+                json={"email": "u@x.com", "password": "oldpass123"})
+
+    # Request reset
+    r = client.post("/api/v1/auth/request-reset", json={"email": "u@x.com"})
+    assert r.status_code == 200
+
+    # Read token from users.json (simulates clicking email link)
+    users = app_module._load_users()
+    token_hash = users["u@x.com"]["reset_token_hash"]
+    assert token_hash is not None
+
+    # Confirm with bad token
+    r = client.post("/api/v1/auth/confirm-reset", json={
+        "email": "u@x.com", "token": "wrong", "password": "newpass123",
+    })
+    assert r.status_code == 401
+
+    # We can't get the real token (only hash is stored), but we can
+    # forge one by manually injecting a known hash:
+    import hashlib
+    test_token = "test-token-123"
+    users["u@x.com"]["reset_token_hash"] = hashlib.sha256(test_token.encode()).hexdigest()
+    app_module._save_users(users)
+
+    # Confirm with correct token
+    r = client.post("/api/v1/auth/confirm-reset", json={
+        "email": "u@x.com", "token": test_token, "password": "newpass123",
+    })
+    assert r.status_code == 200
+    assert "token" in r.json()
+
+    # Old password no longer works
+    r = client.post("/api/v1/auth/login",
+                    json={"email": "u@x.com", "password": "oldpass123"})
+    assert r.status_code == 401
+
+    # New password works
+    r = client.post("/api/v1/auth/login",
+                    json={"email": "u@x.com", "password": "newpass123"})
+    assert r.status_code == 200
+
+
+def test_confirm_reset_requires_password_length(client):
+    client.post("/api/v1/auth/register",
+                json={"email": "u@x.com", "password": "oldpass123"})
+    r = client.post("/api/v1/auth/confirm-reset", json={
+        "email": "u@x.com", "token": "x", "password": "short",
+    })
+    assert r.status_code == 400
+
+
+# ── Backup ───────────────────────────────────────────────────────
+def test_backup_returns_tarball(client):
+    _make_key(client, email="x@y.com")
+    r = client.get("/api/admin/backup", headers=ADMIN)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/gzip"
+    # Body should be a valid tar.gz
+    import tarfile, io
+    with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as t:
+        names = t.getnames()
+        assert "licenses.json" in names
