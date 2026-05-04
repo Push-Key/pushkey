@@ -4995,6 +4995,8 @@ class AppFrame(ctk.CTkFrame):
             if not collapsed:
                 for name, info in items:
                     self._render_single_key(name, info)
+                    if name == self._expanded_key:
+                        self._render_expand_panel(name, info)
 
     def _toggle_group_by(self):
         self._group_by = "category" if self._group_by == "file" else "file"
