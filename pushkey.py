@@ -5045,24 +5045,42 @@ class AppFrame(ctk.CTkFrame):
         # in the modal — the row is for scanning + quick actions only.
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
-        # Each row keeps its own outline so it reads as a card. Hover still
-        # tints the bg for affordance — outline never disappears.
-        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
-                           corner_radius=6, border_width=1,
-                           border_color=C["border"], cursor="hand2")
-        row.pack(fill="x", padx=4, pady=2)
-        row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        is_expanded = (name == self._expanded_key)
 
-        def _hover_in(e, r=row):
-            r.configure(fg_color=C["bg3"], border_color=C["accent"])
-        def _hover_out(e, r=row):
-            r.configure(fg_color=C["surface"], border_color=C["border"])
+        row = ctk.CTkFrame(
+            self.keys_scroll,
+            fg_color=C["surface"],
+            corner_radius=6 if not is_expanded else 0,
+            border_width=1,
+            border_color=C["accent"] if is_expanded else C["border"],
+            cursor="hand2",
+        )
+        row.pack(fill="x", padx=4, pady=(2, 0 if is_expanded else 2))
+        row.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
+
+        def _hover_in(e, r=row, exp=is_expanded):
+            r.configure(fg_color=C["bg3"])
+            if not exp:
+                r.configure(border_color=C["accent"])
+        def _hover_out(e, r=row, exp=is_expanded):
+            r.configure(fg_color=C["surface"])
+            if not exp:
+                r.configure(border_color=C["border"])
         row.bind("<Enter>", _hover_in)
         row.bind("<Leave>", _hover_out)
 
         inner = ctk.CTkFrame(row, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=4)
-        inner.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        inner.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
+
+        # Chevron
+        ctk.CTkLabel(
+            inner,
+            text="▼" if is_expanded else "▶",
+            font=(_UI_FONT, 10),
+            text_color=C["accent"] if is_expanded else C["text3"],
+            width=14,
+        ).pack(side="left", padx=(0, 4))
 
         # ── LEFT: checkbox + category dot + name ──
         sel_var = ctk.BooleanVar(value=False)
@@ -5140,7 +5158,7 @@ class AppFrame(ctk.CTkFrame):
         name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11),
                                 text_color=C["text"], anchor="w", cursor="hand2")
         name_lbl.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        name_lbl.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
 
     def _select_all_keys(self):
         for var in self._bulk_select_vars.values():
