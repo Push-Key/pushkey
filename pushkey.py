@@ -5306,13 +5306,92 @@ class AppFrame(ctk.CTkFrame):
         self._invalidate_tabs("dashboard", "keys", "timeline")
 
     def _show_rotate_subpanel(self, name: str):
-        pass  # replaced in Task 5
-
-    def _render_rotate_subpanel(self, parent_frame, name: str):
-        pass  # replaced in Task 5
+        self._rotate_pending = True
+        self._rotate_result = None
+        self._render_key_rows()
 
     def _dismiss_rotate_result(self):
-        pass  # replaced in Task 5
+        self._rotate_pending = False
+        self._rotate_result = None
+        self._render_key_rows()
+
+    def _render_rotate_subpanel(self, parent_frame, name: str):
+        if self._rotate_result is not None:
+            # ── Result strip ──
+            strip = ctk.CTkFrame(parent_frame, fg_color=C["green_bg"],
+                                 corner_radius=0, border_width=0)
+            strip.pack(fill="x", padx=0, pady=(1, 0))
+
+            row = ctk.CTkFrame(strip, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=7)
+
+            ctk.CTkLabel(row, text="✓  Rotated", font=(_UI_FONT, 11, "bold"),
+                         text_color=C["green"]).pack(side="left", padx=(0, 10))
+
+            new_masked = "●" * min(len(self._rotate_result), 24)
+            val_box = ctk.CTkFrame(row, fg_color=C["bg3"], corner_radius=4,
+                                   border_width=1, border_color=C["border"])
+            val_box.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(val_box, text=new_masked, font=(_MONO_FONT, 11),
+                         text_color=C["accent"]).pack(side="left", padx=8, pady=3)
+
+            copy_result_btn = make_btn(row, "⎘ Copy", lambda: None,
+                                       fg_color=C["btn"], text_color=C["green"],
+                                       width=60, height=24, border=False)
+            result_val = self._rotate_result
+            copy_result_btn.configure(
+                command=lambda v=result_val, b=copy_result_btn: self.copy_key(v, flash_widget=b))
+            copy_result_btn.pack(side="left", padx=(6, 0))
+
+            make_btn(row, "✕", self._dismiss_rotate_result,
+                     fg_color="transparent", text_color=C["text3"],
+                     width=24, height=24, border=False).pack(side="right")
+
+            self.after(8000, self._dismiss_rotate_result)
+            return
+
+        # ── Input strip ──
+        strip = ctk.CTkFrame(parent_frame, fg_color=C["amber_bg"],
+                             corner_radius=0, border_width=0)
+        strip.pack(fill="x", padx=0, pady=(1, 0))
+
+        ctk.CTkLabel(strip, text="↻  ROTATE KEY", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["amber"]).pack(anchor="w", padx=14, pady=(7, 2))
+
+        inp_var = tk.StringVar()
+        inp = ctk.CTkEntry(strip, textvariable=inp_var,
+                           font=(_MONO_FONT, 11),
+                           fg_color=C["bg3"], text_color=C["text"],
+                           border_color=C["amber"],
+                           placeholder_text="Paste new key value...")
+        inp.pack(fill="x", padx=14, pady=(0, 4))
+        inp.focus_set()
+
+        btn_row = ctk.CTkFrame(strip, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(0, 8))
+
+        def _confirm(n=name):
+            new_val = inp_var.get().strip()
+            if not new_val:
+                return
+            self._apply_rotation(n, new_val)
+            self._rotate_pending = False
+            self._rotate_result = new_val
+            self._render_key_rows()
+
+        def _cancel():
+            self._rotate_pending = False
+            self._rotate_result = None
+            self._render_key_rows()
+
+        make_btn(btn_row, "Confirm Rotate", _confirm,
+                 fg_color=C["amber_bg"], text_color=C["amber"],
+                 border=True, width=120, height=26).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Cancel", _cancel,
+                 fg_color="transparent", text_color=C["text3"],
+                 border=True, width=70, height=26).pack(side="left")
+        ctk.CTkLabel(btn_row, text="Old value backed up to history",
+                     font=(_UI_FONT, 9), text_color=C["text3"]).pack(side="right")
 
     def _select_all_keys(self):
         for var in self._bulk_select_vars.values():
