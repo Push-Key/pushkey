@@ -147,3 +147,41 @@ def test_get_key_not_found(tmp_path, monkeypatch):
     mcp_mod._unlock("pw")
     result = mcp_mod.get_key("MISSING_KEY")
     assert "error" in result
+
+
+def test_add_key_persists(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault, load_vault
+    save_vault({}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.add_key("NEW_KEY", "new-value", provider="OpenAI", env="dev")
+    assert result["success"] is True
+
+    vault, _ = load_vault("pw")
+    assert "NEW_KEY" in vault
+    assert vault["NEW_KEY"]["value"] == "new-value"
+
+
+def test_add_key_duplicate_rejected(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    save_vault({"EXISTING": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                              "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.add_key("EXISTING", "new-value")
+    assert result["success"] is False
+    assert "already exists" in result["error"]
