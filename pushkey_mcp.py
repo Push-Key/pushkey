@@ -173,6 +173,41 @@ def inject_env(project_path: str, keys: list[str] = None) -> dict:
     return {"success": True, "injected": new_lines, "skipped_existing": list(existing_keys & set(keys))}
 
 
+@mcp.tool()
+def check_health(rotation_threshold_days: int = 90) -> dict:
+    """Report vault health: total keys, stale keys (not rotated within threshold), keys missing provider."""
+    err = _require_unlock()
+    if err:
+        return err
+    from datetime import datetime
+    vault = _SESSION["vault"]
+    now = datetime.now()
+    stale, healthy, unknown_provider = [], [], []
+    for name, meta in vault.items():
+        rotated_str = meta.get("rotated") or meta.get("created", "")
+        try:
+            rotated = datetime.fromisoformat(rotated_str)
+            age_days = (now - rotated).days
+        except (ValueError, TypeError):
+            age_days = 9999
+        entry = {"name": name, "provider": meta.get("provider", "Unknown"),
+                 "env": meta.get("env", "all"), "age_days": age_days}
+        if age_days >= rotation_threshold_days:
+            stale.append(entry)
+        else:
+            healthy.append(entry)
+        if meta.get("provider", "Unknown") in ("Unknown", "", None):
+            unknown_provider.append(name)
+    return {
+        "total": len(vault),
+        "stale_count": len(stale),
+        "healthy_count": len(healthy),
+        "stale_keys": stale,
+        "unknown_provider_keys": unknown_provider,
+        "rotation_threshold_days": rotation_threshold_days,
+    }
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
