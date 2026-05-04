@@ -6031,11 +6031,18 @@ class AppFrame(ctk.CTkFrame):
             self.after(10000, lambda: (self.revealed.discard(name), self._render_key_rows()))
         self._render_key_rows()
 
-    def copy_key(self, value):
+    def copy_key(self, value, flash_widget=None):
         self.clipboard_clear()
         self.clipboard_append(value)
         job_id = self.after(30000, self.clipboard_clear)
         self._clipboard_jobs.append(job_id)
+        if flash_widget:
+            try:
+                flash_widget.configure(text="✓  Copied", text_color=C["green"])
+                self.after(1500, lambda: flash_widget.configure(
+                    text="⎘  Copy Value", text_color=C["accent"]))
+            except Exception:
+                pass
 
     def _rbac_check(self, name: str, action: str) -> bool:
         """Returns True if action allowed. action: 'can_rotate' | 'can_delete' | 'can_read'"""
