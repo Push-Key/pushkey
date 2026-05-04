@@ -43,7 +43,7 @@ export default function HowItWorks() {
         </div>
 
         <div className="grid lg:grid-cols-3 gap-8">
-          {STEPS.map((step) => {
+          {STEPS.map((step, i) => {
             const Icon = step.icon
             return (
               <div key={step.number} className="rounded-xl p-6 relative gradient-border"
@@ -61,7 +61,7 @@ export default function HowItWorks() {
                     <p className="text-sm leading-relaxed" style={{ color: "#94A3B8" }}>{step.description}</p>
                   </div>
                 </div>
-                <pre className="mt-4 p-4 rounded-lg text-xs font-mono leading-6 overflow-x-auto"
+                <pre className={`mt-4 p-4 rounded-lg text-xs font-mono leading-6${i > 0 ? " overflow-x-auto" : ""}`}
                   style={{ background: "#060B14", color: "#00DC82", border: "1px solid rgba(0,220,130,0.15)" }}>
                   {step.code}
                 </pre>
