@@ -1,0 +1,53 @@
+---
+title: Cloud API
+description: Zero-knowledge sync backend for Pro+ users. Self-hostable via FastAPI.
+---
+
+The PushKey cloud API is a zero-knowledge sync backend — it stores only AES-GCM ciphertext. The server cannot decrypt your vault.
+
+## Run it
+
+```bash
+# self-hosted
+uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
+```
+
+Or deploy to Railway / Render using the included `Procfile`.
+
+## Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/vault/push` | Upload encrypted vault blob |
+| `GET` | `/vault/pull` | Download latest blob |
+| `GET` | `/vault/status` | Sync metadata (no ciphertext) |
+| `POST` | `/license/heartbeat` | Refresh license token |
+| `GET` | `/license/verify` | Validate license key |
+
+## Authentication
+
+All requests carry a Bearer token from your license key, refreshed every 24h by the desktop app:
+
+```
+Authorization: Bearer <license-token>
+```
+
+For self-hosted deployments, set `PUSHKEY_API_SECRET` in your environment.
+
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `PUSHKEY_API_SECRET` | Shared secret for self-hosted auth |
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Optional — rate limiting and session cache |
+
+## Admin dashboard
+
+A Next.js admin dashboard (`web/`) provides license management, analytics, audit logs, and user CRM. Deploy to Vercel:
+
+```bash
+cd web && vercel deploy
+```
+
+Set `NEXT_PUBLIC_ADMIN_API_URL` to your API base URL.

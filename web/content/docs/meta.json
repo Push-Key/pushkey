@@ -1,0 +1,16 @@
+{
+  "title": "PushKey",
+  "pages": [
+    "index",
+    "getting-started",
+    "cli",
+    "mcp",
+    "agents",
+    "api",
+    "env-injection",
+    "vault",
+    "integrations",
+    "tiers",
+    "security"
+  ]
+}

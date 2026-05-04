@@ -1,0 +1,51 @@
+---
+title: Getting Started
+description: Install PushKey, create your vault, and add your first key.
+---
+
+## Install
+
+Download the latest release or install via pip:
+
+```bash
+pip install pushkey
+# or download Pushkey.exe / pushkey-cli.exe from the releases page
+```
+
+## First launch
+
+Run the GUI and create your vault with a master password. Your password is never stored — it derives the AES-256-GCM encryption key via Argon2id.
+
+```bash
+python pushkey.py
+```
+
+Or use the CLI directly — no GUI required:
+
+```bash
+pushkey --help
+```
+
+## Add your first key
+
+```bash
+pushkey add OPENAI_API_KEY sk-...
+```
+
+## Inject into a project
+
+Assign the key to a project, then inject:
+
+```bash
+pushkey assign OPENAI_API_KEY /path/to/project
+pushkey inject /path/to/project
+# → writes OPENAI_API_KEY=sk-... to /path/to/project/.env
+# → adds .env to .gitignore automatically
+```
+
+## Verify
+
+```bash
+pushkey list          # shows all key names (no values)
+pushkey get OPENAI_API_KEY   # prints decrypted value
+```

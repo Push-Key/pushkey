@@ -1,0 +1,33 @@
+---
+title: Tiers & Licensing
+description: Free, Starter, Pro, Team, and Enterprise plans.
+---
+
+## Plans
+
+| Feature | Free | Starter | Pro | Team | Enterprise |
+|---------|------|---------|-----|------|------------|
+| Local vault | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Unlimited keys | ✓ | ✓ | ✓ | ✓ | ✓ |
+| CLI + GUI | ✓ | ✓ | ✓ | ✓ | ✓ |
+| MCP server | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cloud sync | — | 1 device | 5 devices | 20 devices | Unlimited |
+| Team export | — | — | ✓ | ✓ | ✓ |
+| SSO / SAML | — | — | — | — | ✓ |
+| Priority support | — | — | — | ✓ | ✓ |
+
+## How licensing works
+
+The license file lives at `~/.pushkey/.license` (AES-GCM encrypted). The desktop app refreshes the token every 24h via a heartbeat call.
+
+**Offline grace period:** 10 days. After 10 days without a heartbeat, the tier downgrades to Free until the next successful refresh.
+
+## Check your tier
+
+```bash
+pushkey license
+```
+
+## Purchase / manage
+
+Visit [push-key.com/#pricing](https://push-key.com/#pricing) or email [billing@push-key.com](mailto:billing@push-key.com).
