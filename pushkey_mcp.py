@@ -8,9 +8,13 @@ Usage:
 from mcp.server.fastmcp import FastMCP
 
 import pushkey_vault as _vault
+from datetime import datetime
+from pathlib import Path
 
 mcp = FastMCP("pushkey")
 
+# Not thread-safe — designed for single-user stdio transport.
+# SSE mode with concurrent requests can race on _SESSION mutations.
 _SESSION: dict = {}  # keys: vault, vault_key, password
 
 
@@ -106,8 +110,7 @@ def add_key(
     err = _require_unlock()
     if err:
         return err
-    from datetime import datetime
-    import pushkey_providers as _prov
+    import pushkey_providers as _prov  # deferred: triggers network fetch on first import
     vault = _SESSION["vault"]
     if name in vault and not overwrite:
         return {"success": False, "error": f"key '{name}' already exists; pass overwrite=True to replace"}
@@ -136,9 +139,8 @@ def inject_env(project_path: str, keys: list[str] = None) -> dict:
     err = _require_unlock()
     if err:
         return err
-    from pathlib import Path
     vault = _SESSION["vault"]
-    project = Path(project_path)
+    project = Path(project_path).resolve()
     if not project.is_dir():
         return {"success": False, "error": f"directory not found: {project_path}"}
 
@@ -179,7 +181,6 @@ def check_health(rotation_threshold_days: int = 90) -> dict:
     err = _require_unlock()
     if err:
         return err
-    from datetime import datetime
     vault = _SESSION["vault"]
     now = datetime.now()
     stale, healthy, unknown_provider = [], [], []
@@ -214,7 +215,6 @@ def rotate_key(name: str, new_value: str) -> dict:
     err = _require_unlock()
     if err:
         return err
-    from datetime import datetime
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
