@@ -27,7 +27,7 @@ def _common_flags(root):
 
 
 def build_gui(root):
-    cmd = [sys.executable, "-m", "PyInstaller", "--onedir", "--windowed", "--name", "Pushkey"]
+    cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--windowed", "--name", "Pushkey"]
     cmd += _common_flags(root)
 
     icon_path = root / "pushkey.ico"
