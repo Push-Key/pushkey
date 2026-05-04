@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { CheckCircle, AlertCircle, Settings as SettingsIcon, Mail, Shield, Database, Send, Copy, Check } from "lucide-react"
+import { CheckCircle, AlertCircle, Settings as SettingsIcon, Mail, Shield, Database, Send, Copy, Check, Download } from "lucide-react"
 import { adminApi, type AdminSettings } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
@@ -181,6 +181,17 @@ export default function SettingsPage() {
             <StatusRow ok={true} label="Total licenses"    value={settings.license_count.toLocaleString()} />
             <StatusRow ok={true} label="Event log entries" value={settings.event_count.toLocaleString()} />
           </div>
+        </Section>
+
+        {/* Backup */}
+        <Section icon={<Download size={16} />} title="Backup" desc="Download all data files (licenses, tickets, audit log, events, users) as tar.gz.">
+          <button
+            onClick={() => adminApi.downloadBackup(secret).catch(() => {})}
+            className="bg-[#00DC82] text-[#060B14] font-semibold text-sm px-4 py-2 rounded-lg hover:bg-[#00DC82]/90 transition-colors flex items-center gap-2"
+          >
+            <Download size={14} /> Download Backup
+          </button>
+          <p className="text-xs text-[#94A3B8] mt-3">Excludes encrypted vault blobs (those are zero-knowledge per-user). Schedule this via cron for automated backups.</p>
         </Section>
       </div>
     </div>

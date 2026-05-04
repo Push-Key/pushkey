@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react"
 import {
   Users, Mail, Plus, X, Send, Copy, Check, Edit3, AlertCircle, Clock,
+  ChevronLeft, ChevronRight,
 } from "lucide-react"
 import {
   adminApi, maskKey, fmtDateOrDash, isOverdue, isExpiringSoon,
@@ -514,6 +515,7 @@ function ContactCard({ contact, onEdit, onIssue, onRefresh }: {
 
 // ── Filter tabs ──────────────────────────────────────────────────
 const FILTERS = ["All", "Trial", "Active", "Converted", "Churned", "Cold", "Overdue", "Expiring"] as const
+const PAGE_SIZE = 10
 
 export default function ContactsPage() {
   const { secret } = useAdmin()
@@ -521,6 +523,7 @@ export default function ContactsPage() {
   const [loading, setLoading]   = useState(true)
   const [search, setSearch]     = useState("")
   const [filter, setFilter]     = useState<typeof FILTERS[number]>("All")
+  const [page, setPage]         = useState(1)
   const [issuing, setIssuing]   = useState<{ open: boolean; email?: string }>({ open: false })
   const [editing, setEditing]   = useState<Contact | null>(null)
 
@@ -594,7 +597,7 @@ export default function ContactsPage() {
           <div className="relative">
             <input
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={e => { setSearch(e.target.value); setPage(1) }}
               placeholder="Search email, name, company…"
               className="bg-[#0D1B2A] border border-white/8 rounded-lg px-3 py-2 text-sm text-white placeholder-[#475569] outline-none focus:border-white/20 w-64 transition-colors"
             />
@@ -626,7 +629,7 @@ export default function ContactsPage() {
           return (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => { setFilter(f); setPage(1) }}
               className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
                 filter === f ? "bg-white/10 text-white" : "text-[#94A3B8] hover:text-white hover:bg-white/5"
               }`}
@@ -637,28 +640,73 @@ export default function ContactsPage() {
         })}
       </div>
 
-      {/* Cards */}
-      {loading ? (
-        <div className="flex items-center justify-center h-40 text-[#94A3B8] text-sm">Loading…</div>
-      ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-60 text-[#94A3B8] bg-[#0D1B2A] border border-white/8 rounded-xl">
-          <Users size={32} className="mb-3 opacity-30" />
-          <p className="text-sm">No contacts found</p>
-          <p className="text-xs text-[#475569] mt-1">Issue a license key with an email to create your first contact</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {filtered.map(c => (
-            <ContactCard
-              key={c.email}
-              contact={c}
-              onEdit={setEditing}
-              onIssue={(email) => setIssuing({ open: true, email })}
-              onRefresh={load}
-            />
-          ))}
-        </div>
-      )}
+      {/* Pagination math */}
+      {(() => {
+        const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+        const safePage   = Math.min(page, totalPages)
+        const pageData   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+        const pageNums = (() => {
+          if (totalPages <= 5) return Array.from({ length: totalPages }, (_, i) => i + 1)
+          const start = Math.max(1, Math.min(safePage - 2, totalPages - 4))
+          return Array.from({ length: 5 }, (_, i) => start + i)
+        })()
+
+        if (loading) {
+          return <div className="flex items-center justify-center h-40 text-[#94A3B8] text-sm">Loading…</div>
+        }
+        if (filtered.length === 0) {
+          return (
+            <div className="flex flex-col items-center justify-center h-60 text-[#94A3B8] bg-[#0D1B2A] border border-white/8 rounded-xl">
+              <Users size={32} className="mb-3 opacity-30" />
+              <p className="text-sm">No contacts found</p>
+              <p className="text-xs text-[#475569] mt-1">Issue a license key with an email to create your first contact</p>
+            </div>
+          )
+        }
+        return (
+          <>
+            <div className="space-y-3">
+              {pageData.map(c => (
+                <ContactCard
+                  key={c.email}
+                  contact={c}
+                  onEdit={setEditing}
+                  onIssue={(email) => setIssuing({ open: true, email })}
+                  onRefresh={load}
+                />
+              ))}
+            </div>
+
+            {/* Pagination footer */}
+            <div className="mt-5 flex items-center justify-between bg-[#0D1B2A] border border-white/8 rounded-xl px-5 py-3">
+              <p className="text-xs text-[#94A3B8]">
+                Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
+              </p>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={safePage === 1}
+                  className="w-7 h-7 flex items-center justify-center rounded text-xs text-[#94A3B8] hover:text-white hover:bg-white/8 disabled:opacity-30 transition-colors"
+                ><ChevronLeft size={14} /></button>
+                {pageNums[0] > 1 && <span className="text-[#94A3B8] text-xs px-1">…</span>}
+                {pageNums.map(n => (
+                  <button
+                    key={n}
+                    onClick={() => setPage(n)}
+                    className={`w-7 h-7 flex items-center justify-center rounded text-xs transition-colors ${safePage === n ? "bg-white/15 text-white" : "text-[#94A3B8] hover:text-white hover:bg-white/8"}`}
+                  >{n}</button>
+                ))}
+                {pageNums[pageNums.length - 1] < totalPages && <span className="text-[#94A3B8] text-xs px-1">…</span>}
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={safePage === totalPages}
+                  className="w-7 h-7 flex items-center justify-center rounded text-xs text-[#94A3B8] hover:text-white hover:bg-white/8 disabled:opacity-30 transition-colors"
+                ><ChevronRight size={14} /></button>
+              </div>
+            </div>
+          </>
+        )
+      })()}
     </div>
   )
 }

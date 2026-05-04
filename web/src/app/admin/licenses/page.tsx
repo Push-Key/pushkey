@@ -535,7 +535,11 @@ function LicensesInner() {
             />
           </div>
           <button
-            onClick={() => adminApi.exportCsv(secret).catch(() => {})}
+            onClick={() => adminApi.exportCsv(secret, {
+              tier:   activeTab === "Revoked" ? undefined : activeTab,
+              status: activeTab === "Revoked" ? "revoked" : undefined,
+              search: search || undefined,
+            }).catch(() => {})}
             className="flex items-center gap-2 border border-white/10 text-[#94A3B8] text-sm px-3.5 py-2 rounded-lg hover:border-white/20 hover:text-white transition-colors"
           >
             <Download size={14} /> Export CSV
