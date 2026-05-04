@@ -1123,38 +1123,38 @@ def inject_env_file(project_path, vault, key_names=None, target_env="all"):
 # ═══════════════════════════════════════════════
 
 C_DARK = {
-    # Backgrounds — OLED-punchy, clearly tiered (lifted bg3/bg4 for visible separation)
-    "bg":           "#050A0F",
-    "bg2":          "#0A1628",
-    "bg3":          "#1A2E47",
-    "bg4":          "#22385A",
-    "surface":      "#0A1628",
-    # Brand accent — CYAN (green demoted to health status only)
+    # Backgrounds — deep navy-black matching mockup palette
+    "bg":           "#070B11",
+    "bg2":          "#0A1020",
+    "bg3":          "#0D1620",
+    "bg4":          "#122030",
+    "surface":      "#0D1620",
+    # Brand accent — CYAN
     "accent":       "#22D3EE",
     "accent2":      "#06B6D4",
-    "accent_dim":   "#051318",
+    "accent_dim":   "#040E14",
     # Violet — security, MFA, enterprise tier
     "violet":       "#7C3AED",
-    "violet_dim":   "#110D1E",
-    # Text — cyan-tinted hierarchy (text3 lifted for WCAG AA on bg)
-    "text":         "#F0F9FF",
-    "text2":        "#9BC5DC",
-    "text3":        "#5A8AAA",
-    # Borders — visible (bumped from #112233/#1A3550 — barely-visible)
-    "border":       "#2A4560",
-    "border2":      "#3A5570",
+    "violet_dim":   "#0C0A18",
+    # Text — cool hierarchy, recessed inactive labels
+    "text":         "#C8D8E8",
+    "text2":        "#7A9BB5",
+    "text3":        "#3D5A73",
+    # Borders — subtle, don't compete with content
+    "border":       "#1A2A38",
+    "border2":      "#1E3040",
     # Buttons
-    "btn":          "#1A2E47",
-    "btn_hover":    "#22385A",
-    # Semantic — green LOCKED to healthy status only
+    "btn":          "#0D1620",
+    "btn_hover":    "#122030",
+    # Semantic
     "green":        "#00DC82",
-    "green_bg":     "#041A0F",
+    "green_bg":     "#030F08",
     "amber":        "#F59E0B",
-    "amber_bg":     "#1F1200",
+    "amber_bg":     "#150D00",
     "red":          "#EF4444",
-    "red_bg":       "#1F0808",
+    "red_bg":       "#150606",
     "blue":         "#22D3EE",
-    "blue_bg":      "#051318",
+    "blue_bg":      "#040E14",
     # Environment pills
     "env_dev":      "#22D3EE",
     "env_staging":  "#F59E0B",
@@ -4936,6 +4936,7 @@ class AppFrame(ctk.CTkFrame):
         self._search_debounce_id = self.after(200, self._render_key_rows)
 
     def _render_key_rows(self):
+        self.update_idletasks()
         for w in self.keys_scroll.winfo_children():
             w.destroy()
         self._bulk_select_vars = {}
@@ -5058,26 +5059,30 @@ class AppFrame(ctk.CTkFrame):
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
         is_expanded = (name == self._expanded_key)
+        # Dim non-focused rows when accordion is open (focus effect from mockup)
+        is_dimmed = bool(self._expanded_key) and not is_expanded
+        row_surface = C["bg"] if is_dimmed else C["surface"]
+        row_border  = C["accent"] if is_expanded else ("border2" if is_dimmed else "border")
+        row_border_color = C["accent"] if is_expanded else C[row_border if is_dimmed else "border"]
 
         row = ctk.CTkFrame(
             self.keys_scroll,
-            fg_color=C["surface"],
+            fg_color=row_surface,
             corner_radius=6 if not is_expanded else 0,
             border_width=1,
-            border_color=C["accent"] if is_expanded else C["border"],
+            border_color=row_border_color,
             cursor="hand2",
         )
         row.pack(fill="x", padx=4, pady=(2, 0 if is_expanded else 2))
         row.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
 
-        def _hover_in(e, r=row, exp=is_expanded):
-            r.configure(fg_color=C["bg3"])
-            if not exp:
+        def _hover_in(e, r=row, exp=is_expanded, dim=is_dimmed):
+            if not dim:
+                r.configure(fg_color=C["bg3"])
+            if not exp and not dim:
                 r.configure(border_color=C["accent"])
-        def _hover_out(e, r=row, exp=is_expanded):
-            r.configure(fg_color=C["surface"])
-            if not exp:
-                r.configure(border_color=C["border"])
+        def _hover_out(e, r=row, exp=is_expanded, dim=is_dimmed, surf=row_surface, bdr=row_border_color):
+            r.configure(fg_color=surf, border_color=bdr)
         row.bind("<Enter>", _hover_in)
         row.bind("<Leave>", _hover_out)
 
@@ -5166,9 +5171,10 @@ class AppFrame(ctk.CTkFrame):
                          font=(_UI_FONT, 8, "bold"),
                          text_color=env_color).pack(padx=4, pady=1)
 
-        # Key name — fills remaining space, smaller font for compact row
+        # Key name — fills remaining space; dim when another row is expanded
         name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11),
-                                text_color=C["text"], anchor="w", cursor="hand2")
+                                text_color=C["text3"] if is_dimmed else C["text"],
+                                anchor="w", cursor="hand2")
         name_lbl.pack(side="left", fill="x", expand=True, padx=(0, 8))
         name_lbl.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
 
