@@ -47,6 +47,33 @@ def lock_vault() -> dict:
     return {"success": True}
 
 
+@mcp.tool()
+def list_keys(env: str = None, provider: str = None, project: str = None) -> dict:
+    """List all keys in the vault (metadata only, no values). Optional filters: env, provider, project."""
+    err = _require_unlock()
+    if err:
+        return err
+    vault = _SESSION["vault"]
+    keys = []
+    for name, meta in vault.items():
+        if env and meta.get("env") != env:
+            continue
+        if provider and meta.get("provider", "").lower() != provider.lower():
+            continue
+        if project and project not in meta.get("projects", []):
+            continue
+        keys.append({
+            "name": name,
+            "provider": meta.get("provider", "Unknown"),
+            "env": meta.get("env", "all"),
+            "projects": meta.get("projects", []),
+            "created": meta.get("created", ""),
+            "rotated": meta.get("rotated", ""),
+            "notes": meta.get("notes", ""),
+        })
+    return {"count": len(keys), "keys": keys}
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
