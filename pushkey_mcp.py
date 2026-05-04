@@ -224,6 +224,39 @@ def rotate_key(name: str, new_value: str) -> dict:
     return {"success": True, "name": name, "rotated": vault[name]["rotated"]}
 
 
+@mcp.tool()
+def list_projects() -> dict:
+    """List all projects that have keys assigned, with key counts and key names."""
+    err = _require_unlock()
+    if err:
+        return err
+    vault = _SESSION["vault"]
+    projects: dict[str, dict] = {}
+    for name, meta in vault.items():
+        for proj in meta.get("projects", []):
+            if proj not in projects:
+                projects[proj] = {"key_count": 0, "keys": []}
+            projects[proj]["key_count"] += 1
+            projects[proj]["keys"].append(name)
+    return {"projects": projects, "total": len(projects)}
+
+
+@mcp.tool()
+def assign_key(key_name: str, project_path: str) -> dict:
+    """Assign a vault key to a project path (adds to key's projects list)."""
+    err = _require_unlock()
+    if err:
+        return err
+    vault = _SESSION["vault"]
+    if key_name not in vault:
+        return {"success": False, "error": f"key '{key_name}' not found"}
+    projects = vault[key_name].setdefault("projects", [])
+    if project_path not in projects:
+        projects.append(project_path)
+        _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    return {"success": True, "key": key_name, "project": project_path}
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
