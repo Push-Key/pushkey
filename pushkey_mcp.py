@@ -93,6 +93,40 @@ def get_key(name: str) -> dict:
     }
 
 
+@mcp.tool()
+def add_key(
+    name: str,
+    value: str,
+    provider: str = None,
+    env: str = "dev",
+    notes: str = "",
+    overwrite: bool = False,
+) -> dict:
+    """Add a new key to the vault. Fails if key already exists unless overwrite=True."""
+    err = _require_unlock()
+    if err:
+        return err
+    from datetime import datetime
+    import pushkey_providers as _prov
+    vault = _SESSION["vault"]
+    if name in vault and not overwrite:
+        return {"success": False, "error": f"key '{name}' already exists; pass overwrite=True to replace"}
+    if not provider:
+        provider = _prov.detect_provider(name, value) or "Unknown"
+    now = datetime.now().strftime("%Y-%m-%d")
+    vault[name] = {
+        "value": value,
+        "created": now,
+        "rotated": now,
+        "provider": provider,
+        "env": env,
+        "projects": [],
+        "notes": notes,
+    }
+    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    return {"success": True, "name": name, "provider": provider}
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
