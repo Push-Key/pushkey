@@ -33,6 +33,7 @@ def build_gui(root):
     icon_path = root / "pushkey.ico"
     if icon_path.exists():
         cmd += ["--icon", str(icon_path)]
+        cmd += ["--add-data", f"{icon_path};."]
 
     logo_path = root / "pushkey_logo.png"
     if logo_path.exists():

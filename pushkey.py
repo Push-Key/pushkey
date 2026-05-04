@@ -8001,9 +8001,18 @@ class PushkeyApp:
         self.root.geometry("960x680")
         self.root.configure(fg_color=C["bg"])
         try:
-            _ico = Path(__file__).with_name("pushkey.ico")
+            _ico = _asset_dir() / "pushkey.ico"
             if _ico.exists():
                 self.root.iconbitmap(str(_ico))
+            else:
+                # Fallback: use logo PNG via iconphoto (works in --onefile builds)
+                _png = _asset_dir() / "pushkey_logo.png"
+                if _png.exists():
+                    from PIL import Image as _PILImg, ImageTk as _PILTk
+                    _img = _PILImg.open(_png).resize((32, 32))
+                    _photo = _PILTk.PhotoImage(_img)
+                    self.root.iconphoto(True, _photo)
+                    self.root._icon_photo_ref = _photo  # keep ref
         except Exception:
             pass
         self.root.resizable(True, True)
