@@ -285,3 +285,46 @@ def test_rotate_key_updates_value(tmp_path, monkeypatch):
     vault, _ = load_vault("pw")
     assert vault["MY_KEY"]["value"] == "new-value"
     assert vault["MY_KEY"]["rotated"] != "2020-01-01"
+
+
+def test_list_projects(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    vault = {
+        "KEY_A": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                  "provider": "Unknown", "env": "dev", "projects": ["/app1", "/app2"], "notes": ""},
+        "KEY_B": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                  "provider": "Unknown", "env": "dev", "projects": ["/app1"], "notes": ""},
+    }
+    save_vault(vault, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.list_projects()
+    assert "/app1" in result["projects"]
+    assert result["projects"]["/app1"]["key_count"] == 2
+
+
+def test_assign_key_to_project(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault, load_vault
+    save_vault({"MY_KEY": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                           "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.assign_key("MY_KEY", "/myapp")
+    assert result["success"] is True
+
+    vault, _ = load_vault("pw")
+    assert "/myapp" in vault["MY_KEY"]["projects"]
