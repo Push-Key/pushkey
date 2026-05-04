@@ -153,18 +153,45 @@ async def auth_request_reset(request: Request):
                 import smtplib
                 from email.mime.text import MIMEText
                 reset_link = f"{APP_URL}/reset?token={token}&email={email}"
-                text = f"""You requested a password reset for your Pushkey cloud sync account.
+                reset_body = f"""
+      <h1 style="margin:0 0 12px 0;color:#FFFFFF;font-size:22px;font-weight:700;">Reset your password</h1>
+      <p style="margin:0 0 24px 0;color:#7A9BB5;font-size:14px;line-height:1.6;">
+        We received a request to reset the password for your Pushkey cloud sync account.<br>
+        This link expires in <strong style="color:#C8D8E8;">{RESET_TOKEN_TTL_MIN} minutes</strong>.
+      </p>
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:24px;">
+        <tr><td align="center">
+          <a href="{reset_link}" style="display:inline-block;background:#22D3EE;color:#070B11;font-size:15px;font-weight:700;padding:14px 32px;border-radius:10px;text-decoration:none;letter-spacing:0.2px;">
+            &#x1F511; Reset Password
+          </a>
+        </td></tr>
+      </table>
+      <div style="background:#070B11;border:1px solid #1A2A38;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
+        <p style="margin:0;color:#3D5A73;font-size:11px;font-family:'Courier New',Courier,monospace;word-break:break-all;">{reset_link}</p>
+      </div>
+      <p style="margin:0;color:#3D5A73;font-size:12px;line-height:1.6;">
+        If you didn&rsquo;t request this, you can safely ignore this email &mdash; your password will not change.
+      </p>"""
+                reset_html = _email_html(
+                    title="Reset your Pushkey password",
+                    preview=f"Reset link inside — expires in {RESET_TOKEN_TTL_MIN} minutes.",
+                    body_html=reset_body,
+                )
+                reset_plain = f"""Reset your Pushkey password
 
-Click the link below within {RESET_TOKEN_TTL_MIN} minutes to set a new password:
+Click the link below within {RESET_TOKEN_TTL_MIN} minutes:
 
 {reset_link}
 
 If you didn't request this, ignore this email — your password won't change.
 """
-                m = MIMEText(text, "plain")
+                from email.mime.multipart import MIMEMultipart
+                m = MIMEMultipart("alternative")
                 m["Subject"] = "Reset your Pushkey password"
                 m["From"]    = FROM_EMAIL
                 m["To"]      = email
+                m.attach(MIMEText(reset_plain, "plain"))
+                m.attach(MIMEText(reset_html,  "html"))
                 with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
                     s.starttls()
                     s.login(SMTP_USER, SMTP_PASS)
@@ -346,9 +373,12 @@ async def _handle_heartbeat(body: dict) -> dict:
 
     entry["last_heartbeat"] = _utcnow().isoformat()
     entry["platform"] = platform
+    agent_token_count = body.get("agent_token_count", 0)
+    if isinstance(agent_token_count, int):
+        entry["agent_token_count"] = agent_token_count
     _save_licenses(lic)
 
-    _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version})
+    _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version, "agent_tokens": agent_token_count})
 
     # Return shape compatible with both old token flow and new admin flow
     return {"ok": True, "status": entry["status"], "tier": entry["tier"], "token": ""}
@@ -391,42 +421,354 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 APP_URL    = os.environ.get("APP_URL", "https://pushkey.app")
 
 
-def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at: str | None) -> dict:
+def _email_html(title: str, preview: str, body_html: str) -> str:
+    """Wrap body_html in a clean, dark-branded email shell."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+</head>
+<body style="margin:0;padding:0;background:#0A0F1E;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<!-- preview text -->
+<span style="display:none;max-height:0;overflow:hidden;mso-hide:all;">{preview}</span>
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0A0F1E;padding:40px 16px;">
+  <tr><td align="center">
+    <table width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
+
+      <!-- logo bar -->
+      <tr><td style="padding-bottom:28px;text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="display:inline-table;">
+          <tr>
+            <td style="background:#22D3EE;border-radius:10px;width:36px;height:36px;text-align:center;vertical-align:middle;">
+              <!-- key icon -->
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block;margin:8px auto;">
+                <circle cx="8" cy="15" r="4" stroke="#0A0F1E" stroke-width="2"/>
+                <path d="M12 15h9M18 15v-3" stroke="#0A0F1E" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </td>
+            <td style="padding-left:10px;vertical-align:middle;">
+              <span style="color:#FFFFFF;font-size:20px;font-weight:700;letter-spacing:-0.3px;">Pushkey</span>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+      <!-- card -->
+      <tr><td style="background:#0D1620;border:1px solid #1A2A38;border-radius:16px;padding:36px 40px;">
+        {body_html}
+      </td></tr>
+
+      <!-- footer -->
+      <tr><td style="padding-top:24px;text-align:center;">
+        <p style="margin:0;color:#3D5A73;font-size:12px;line-height:1.6;">
+          You received this because a Pushkey license was issued to this address.<br>
+          Questions? Reply to this email — we read every one.<br>
+          <a href="{APP_URL}" style="color:#22D3EE;text-decoration:none;">{APP_URL}</a>
+        </p>
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"""
+
+
+def _send_email_html(to: str, subject: str, html: str, plain: str) -> dict:
     if not SMTP_HOST:
         return {"sent": False, "reason": "smtp_not_configured"}
     import smtplib
+    from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
-
-    display_name = name or to_email.split("@")[0]
-    tier_label   = tier.capitalize()
-    expiry_line  = f"\nThis key expires on {expires_at[:10]}.\n" if expires_at else ""
-
-    plain = f"""Hi {display_name},
-
-Here's your Pushkey {tier_label} license key:
-
-  {key}
-
-To activate:
-1. Download Pushkey: {APP_URL}/download
-2. Open Settings → License
-3. Enter your key
-{expiry_line}
-Questions? Reply to this email.
-"""
-    msg = MIMEText(plain, "plain")
-    msg["Subject"] = f"Your Pushkey {tier_label} access key"
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
     msg["From"]    = FROM_EMAIL
-    msg["To"]      = to_email
-
+    msg["To"]      = to
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(html,  "html"))
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
             s.starttls()
             s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+            s.sendmail(FROM_EMAIL, [to], msg.as_string())
         return {"sent": True}
     except Exception as exc:
         return {"sent": False, "reason": str(exc)}
+
+
+def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at: str | None) -> dict:
+    import base64
+
+    # High-quality brand SVGs encoded as data URIs — vector, crisp at any size
+    def _b64svg(svg: str) -> str:
+        return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
+
+    WIN_LOGO = _b64svg(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 88 88">'
+        '<path fill="#f25022" d="M0 0h42v42H0z"/>'
+        '<path fill="#7fba00" d="M46 0h42v42H46z"/>'
+        '<path fill="#00a4ef" d="M0 46h42v42H0z"/>'
+        '<path fill="#ffb900" d="M46 46h42v42H46z"/>'
+        '</svg>'
+    )
+    APPLE_LOGO = _b64svg(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 814 1000">'
+        '<path fill="#22D3EE" d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-207.5 135.4-317.3 269-317.3 70.1 0 128.4 46.4 172.5 46.4 42.8 0 109.6-49 192.5-49 31 0 133.9 2.6 198.3 99zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z"/>'
+        '</svg>'
+    )
+    LINUX_LOGO = _b64svg(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">'
+        '<path fill="#22D3EE" d="M24 4C15.2 4 9 11.4 9 20c0 4.2 1.5 8 4 10.8-.5.8-.9 1.7-1.3 2.5-.9 1.9-1.5 3.8-.8 5 .5.9 1.6 1.2 2.7 1.2 1.3 0 2.7-.4 3.9-.7 1-.3 1.9-.5 2.5-.5.6 0 1.4.2 2.3.5 1.3.4 2.7.7 3.9.7 1.1 0 2.2-.3 2.7-1.2.7-1.2.1-3.1-.8-5-.4-.8-.8-1.7-1.3-2.5C30.5 28 32 24.2 32 20c0-8.6-3.5-16-8-16zm0 3c3.3 0 6 5.4 6 13s-2.7 13-6 13-6-5.4-6-13 2.7-13 6-13z"/>'
+        '<circle fill="#0A1020" cx="20" cy="20" r="2"/>'
+        '<circle fill="#0A1020" cx="28" cy="20" r="2"/>'
+        '<path fill="#22D3EE" d="M21 25c0 1.1 1.3 2 3 2s3-.9 3-2"/>'
+        '</svg>'
+    )
+
+    display_name = name or to_email.split("@")[0]
+    first_name   = display_name.split()[0] if display_name else display_name
+    tier_label   = tier.capitalize()
+    expiry_plain = f"\nExpires: {expires_at[:10]}" if expires_at else ""
+
+    TIER_COLOR   = {"free": "#7A9BB5", "starter": "#22D3EE", "pro": "#7C3AED", "team": "#00DC82", "enterprise": "#F59E0B"}
+    TIER_EMOJI   = {"free": "🔓", "starter": "⚡", "pro": "🚀", "team": "👥", "enterprise": "🏢"}
+    TIER_BULLETS = {
+        "free":       ["Secure local vault", "Up to 10 keys", "CLI access"],
+        "starter":    ["Secure local vault", "Unlimited keys", "CLI + GUI access", "Key health monitoring"],
+        "pro":        ["Everything in Starter", "Cloud sync (1 device)", "API auto-rotation", "Key injection into .env files"],
+        "team":       ["Everything in Pro", "Up to 5 devices", "Team vault sharing", "Audit log + timeline"],
+        "enterprise": ["Everything in Team", "Unlimited devices", "SSO + SAML", "Priority support"],
+    }
+    tier_color   = TIER_COLOR.get(tier, "#22D3EE")
+    tier_emoji   = TIER_EMOJI.get(tier, "🔑")
+    bullets      = TIER_BULLETS.get(tier, TIER_BULLETS["starter"])
+
+    def _svg_img(svg_body: str, w: int = 18, h: int = 18) -> str:
+        """Encode an SVG as a data-URI <img> so Gmail renders it."""
+        svg = f'<svg width="{w}" height="{h}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">{svg_body}</svg>'
+        b64 = base64.b64encode(svg.encode()).decode()
+        return f'<img src="data:image/svg+xml;base64,{b64}" width="{w}" height="{h}" alt="" style="display:block;vertical-align:middle;">'
+
+    # Lucide-style SVG paths
+    ico_download = _svg_img('<path d="M12 3v13M7 11l5 5 5-5" stroke="#22D3EE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 21h18" stroke="#22D3EE" stroke-width="2" stroke-linecap="round"/>')
+    ico_settings = _svg_img('<circle cx="12" cy="12" r="3" stroke="#22D3EE" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="#22D3EE" stroke-width="2"/>')
+    ico_key      = _svg_img('<circle cx="8" cy="15" r="4" stroke="#22D3EE" stroke-width="2"/><path d="M12 15h9M18 15v-3" stroke="#22D3EE" stroke-width="2" stroke-linecap="round"/>')
+    ico_check    = _svg_img('<path d="M20 6L9 17l-5-5" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'.replace("{c}", tier_color), 16, 16)
+    ico_clock    = _svg_img('<circle cx="12" cy="12" r="9" stroke="#F59E0B" stroke-width="2"/><path d="M12 7v5l3 3" stroke="#F59E0B" stroke-width="2" stroke-linecap="round"/>', 14, 14)
+
+    expiry_row = f"""
+        <tr><td style="padding-top:10px;border-top:1px solid #1A2A38;">
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td style="vertical-align:middle;padding-right:6px;">{ico_clock}</td>
+              <td style="vertical-align:middle;"><span style="color:#F59E0B;font-size:12px;font-weight:600;">Trial expires {expires_at[:10]} &mdash; activate before then</span></td>
+            </tr>
+          </table>
+        </td></tr>""" if expires_at else ""
+
+    bullets_html = ""
+    for b in bullets:
+        bullets_html += f"""
+          <tr><td style="padding-bottom:8px;">
+            <table cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="vertical-align:middle;padding-right:8px;padding-top:1px;">{ico_check}</td>
+                <td style="vertical-align:middle;"><span style="color:#C8D8E8;font-size:13px;">{b}</span></td>
+              </tr>
+            </table>
+          </td></tr>"""
+
+    body = f"""
+      <!-- greeting -->
+      <p style="margin:0 0 4px 0;color:#7A9BB5;font-size:14px;">Hey {first_name} 👋</p>
+      <h1 style="margin:0 0 6px 0;color:#FFFFFF;font-size:24px;font-weight:800;line-height:1.2;">Your {tier_emoji} Pushkey {tier_label} license is ready</h1>
+      <p style="margin:0 0 28px 0;color:#7A9BB5;font-size:14px;line-height:1.6;">
+        Welcome to Pushkey — your secrets are now under your control.<br>Follow the 3 steps below to get set up in under 2 minutes.
+      </p>
+
+      <!-- key card -->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:2px solid {tier_color}44;border-radius:14px;margin-bottom:28px;">
+        <tr><td style="padding:20px 24px;">
+
+          <!-- tier badge -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
+            <tr>
+              <td style="background:{tier_color}18;border:1px solid {tier_color}44;border-radius:20px;padding:4px 12px;">
+                <span style="color:{tier_color};font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;">{tier_emoji} {tier_label} Plan</span>
+              </td>
+            </tr>
+          </table>
+
+          <!-- key label -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:8px;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:6px;">{ico_key}</td>
+              <td style="vertical-align:middle;"><span style="color:#7A9BB5;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">Your License Key</span></td>
+            </tr>
+          </table>
+
+          <!-- key value -->
+          <div style="background:#0A1020;border:1px solid #1E3040;border-radius:8px;padding:12px 16px;margin-bottom:4px;">
+            <code style="color:#22D3EE;font-size:16px;font-family:'Courier New',Courier,monospace;letter-spacing:1.5px;word-break:break-all;font-weight:700;">{key}</code>
+          </div>
+          <p style="margin:6px 0 0 0;color:#3D5A73;font-size:11px;">&#128274; Keep this key private — do not share it publicly</p>
+
+          {expiry_row}
+        </td></tr>
+      </table>
+
+      <!-- what you get -->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#0A1020;border:1px solid #1A2A38;border-radius:12px;margin-bottom:28px;">
+        <tr><td style="padding:16px 20px 8px 20px;">
+          <p style="margin:0 0 12px 0;color:#C8D8E8;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">&#10024; What&rsquo;s included in your {tier_label} plan</p>
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            {bullets_html}
+          </table>
+        </td></tr>
+      </table>
+
+      <!-- steps header -->
+      <p style="margin:0 0 16px 0;color:#C8D8E8;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">&#128640; Get started in 3 steps</p>
+
+      <!-- step 1 -->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:1px solid #1A2A38;border-radius:10px;margin-bottom:8px;">
+        <tr><td style="padding:16px 20px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td style="width:36px;vertical-align:top;padding-top:2px;">
+                <div style="width:28px;height:28px;background:#22D3EE18;border:1px solid #22D3EE44;border-radius:50%;text-align:center;line-height:28px;color:#22D3EE;font-size:13px;font-weight:800;">1</div>
+              </td>
+              <td style="padding-left:12px;vertical-align:top;">
+                <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:4px;">
+                  <tr>
+                    <td style="vertical-align:middle;padding-right:6px;">{ico_download}</td>
+                    <td style="vertical-align:middle;"><span style="color:#FFFFFF;font-size:14px;font-weight:700;">Download &amp; install Pushkey</span></td>
+                  </tr>
+                </table>
+                <p style="margin:0 0 10px 0;color:#7A9BB5;font-size:13px;line-height:1.5;">Choose your platform and run the installer, then launch Pushkey.</p>
+                <table cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td style="padding-right:8px;">
+                      <a href="{APP_URL}/download?os=windows" style="display:inline-block;background:#22D3EE;color:#070B11;font-size:12px;font-weight:700;padding:8px 16px;border-radius:8px;text-decoration:none;vertical-align:middle;">
+                        <img src="{WIN_LOGO}" width="16" height="16" alt="" style="display:inline-block;vertical-align:middle;margin-right:6px;">Windows
+                      </a>
+                    </td>
+                    <td style="padding-right:8px;">
+                      <a href="{APP_URL}/download?os=mac" style="display:inline-block;background:#1A2A38;border:1px solid #22D3EE55;color:#22D3EE;font-size:12px;font-weight:700;padding:8px 16px;border-radius:8px;text-decoration:none;vertical-align:middle;">
+                        <img src="{APPLE_LOGO}" width="14" height="16" alt="" style="display:inline-block;vertical-align:middle;margin-right:6px;">macOS
+                      </a>
+                    </td>
+                    <td>
+                      <a href="{APP_URL}/download?os=linux" style="display:inline-block;background:#1A2A38;border:1px solid #22D3EE55;color:#22D3EE;font-size:12px;font-weight:700;padding:8px 16px;border-radius:8px;text-decoration:none;vertical-align:middle;">
+                        <img src="{LINUX_LOGO}" width="16" height="16" alt="" style="display:inline-block;vertical-align:middle;margin-right:6px;">Linux
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+
+      <!-- step 2 -->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:1px solid #1A2A38;border-radius:10px;margin-bottom:8px;">
+        <tr><td style="padding:16px 20px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td style="width:36px;vertical-align:top;padding-top:2px;">
+                <div style="width:28px;height:28px;background:#22D3EE18;border:1px solid #22D3EE44;border-radius:50%;text-align:center;line-height:28px;color:#22D3EE;font-size:13px;font-weight:800;">2</div>
+              </td>
+              <td style="padding-left:12px;vertical-align:top;">
+                <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:4px;">
+                  <tr>
+                    <td style="vertical-align:middle;padding-right:6px;">{ico_settings}</td>
+                    <td style="vertical-align:middle;"><span style="color:#FFFFFF;font-size:14px;font-weight:700;">Open Settings &rarr; License</span></td>
+                  </tr>
+                </table>
+                <p style="margin:0;color:#7A9BB5;font-size:13px;line-height:1.5;">Once Pushkey is open, click the <strong style="color:#C8D8E8;">gear icon ⚙️</strong> in the left sidebar to open Settings, then click the <strong style="color:#C8D8E8;">License</strong> tab.</p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+
+      <!-- step 3 -->
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:1px solid #1A2A38;border-radius:10px;margin-bottom:28px;">
+        <tr><td style="padding:16px 20px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td style="width:36px;vertical-align:top;padding-top:2px;">
+                <div style="width:28px;height:28px;background:#22D3EE18;border:1px solid #22D3EE44;border-radius:50%;text-align:center;line-height:28px;color:#22D3EE;font-size:13px;font-weight:800;">3</div>
+              </td>
+              <td style="padding-left:12px;vertical-align:top;">
+                <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:4px;">
+                  <tr>
+                    <td style="vertical-align:middle;padding-right:6px;">{ico_key}</td>
+                    <td style="vertical-align:middle;"><span style="color:#FFFFFF;font-size:14px;font-weight:700;">Paste your key &amp; activate</span></td>
+                  </tr>
+                </table>
+                <p style="margin:0 0 8px 0;color:#7A9BB5;font-size:13px;line-height:1.5;">Copy your license key from above, paste it into the license field, and click <strong style="color:#C8D8E8;">Activate</strong>. That&rsquo;s it &mdash; you&rsquo;re in. 🎉</p>
+                <div style="background:#0A1020;border:1px solid #1E3040;border-radius:6px;padding:8px 12px;display:inline-block;">
+                  <code style="color:#22D3EE;font-size:13px;font-family:'Courier New',Courier,monospace;letter-spacing:1px;">{key}</code>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+
+      <!-- divider -->
+      <div style="height:1px;background:#1A2A38;margin-bottom:20px;"></div>
+
+      <!-- support -->
+      <p style="margin:0;color:#7A9BB5;font-size:13px;line-height:1.7;">
+        &#128172; <strong style="color:#C8D8E8;">Need help?</strong> Just reply to this email &mdash; we respond within 24 hours.<br>
+        &#127760; Docs &amp; guides at <a href="{APP_URL}" style="color:#22D3EE;text-decoration:none;">{APP_URL}</a>
+      </p>"""
+
+    html = _email_html(
+        title=f"Your Pushkey {tier_label} License",
+        preview=f"{tier_emoji} Your {tier_label} license key is inside — get set up in 3 steps.",
+        body_html=body,
+    )
+
+    plain = f"""Hey {first_name},
+
+Your {tier_emoji} Pushkey {tier_label} license is ready.
+
+LICENSE KEY
+-----------
+{key}{expiry_plain}
+
+Keep this key private — do not share it publicly.
+
+WHAT'S INCLUDED ({tier_label.upper()})
+{chr(10).join("  • " + b for b in bullets)}
+
+GET STARTED IN 3 STEPS
+-----------------------
+1. Download Pushkey for your platform
+   Windows : {APP_URL}/download?os=windows
+   macOS   : {APP_URL}/download?os=mac
+   Linux   : {APP_URL}/download?os=linux
+   Run the installer and launch the app.
+
+2. Open Settings → License
+   Click the gear icon ⚙ in the sidebar, then the License tab.
+
+3. Paste your key and click Activate
+   Copy the key above, paste it in, hit Activate. Done! 🎉
+
+Need help? Reply to this email — we respond within 24 hours.
+Docs & guides: {APP_URL}
+
+— The Pushkey Team
+"""
+
+    return _send_email_html(to_email, f"{tier_emoji} Your Pushkey {tier_label} license key is ready", html, plain)
 
 
 def _auto_expire(lic: dict) -> bool:
@@ -457,13 +799,15 @@ async def admin_stats(_: None = Depends(_require_admin)):
     new_today  = sum(1 for v in lic.values() if v.get("activated", "") >= today)
     yesterday_new = sum(1 for v in lic.values() if yesterday <= v.get("activated", "") < today)
     return {
-        "total":        len(lic),
-        "total_active": len(active),
-        "new_today":    new_today,
-        "pro_team":     sum(1 for v in active if v["tier"] in ("pro", "team")),
-        "revoked":      sum(1 for v in lic.values() if v["status"] == "revoked"),
-        "week_delta":   sum(1 for v in lic.values() if v.get("activated", "") >= week),
-        "today_delta":  new_today - yesterday_new,
+        "total":              len(lic),
+        "total_active":       len(active),
+        "new_today":          new_today,
+        "pro_team":           sum(1 for v in active if v["tier"] in ("pro", "team")),
+        "revoked":            sum(1 for v in lic.values() if v["status"] == "revoked"),
+        "week_delta":         sum(1 for v in lic.values() if v.get("activated", "") >= week),
+        "today_delta":        new_today - yesterday_new,
+        "mcp_users":          sum(1 for v in lic.values() if v.get("agent_token_count", 0) > 0),
+        "total_agent_tokens": sum(v.get("agent_token_count", 0) for v in lic.values()),
     }
 
 
@@ -849,12 +1193,54 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
     if SMTP_HOST and FROM_EMAIL:
         try:
             import smtplib
-            from email.mime.text import MIMEText
-            text = f"New Pushkey support ticket:\n\nFrom: {email}\nSubject: {subj}\nPriority: {pri}\n\n{msg}"
-            m = MIMEText(text, "plain")
+            from email.mime.text import MIMEText  # noqa (used by MIMEMultipart attach below)
+            PRI_COLOR = {"low": "#22D3EE", "medium": "#F59E0B", "high": "#EF4444"}
+            pri_color = PRI_COLOR.get(pri, "#22D3EE")
+            ticket_body = f"""
+      <h1 style="margin:0 0 20px 0;color:#FFFFFF;font-size:20px;font-weight:700;">New Support Ticket</h1>
+      <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:1px solid #1A2A38;border-radius:12px;margin-bottom:24px;">
+        <tr><td style="padding:20px 24px;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td style="padding-bottom:12px;border-bottom:1px solid #1A2A38;">
+                <span style="display:inline-block;background:{pri_color}22;border:1px solid {pri_color}55;border-radius:6px;padding:3px 10px;color:{pri_color};font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">{pri} priority</span>
+              </td>
+            </tr>
+            <tr><td style="padding-top:14px;padding-bottom:6px;">
+              <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">From</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;">{email}</p>
+            </td></tr>
+            <tr><td style="padding-bottom:6px;">
+              <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Subject</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;font-weight:600;">{subj}</p>
+            </td></tr>
+            <tr><td style="padding-bottom:4px;">
+              <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Message</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;line-height:1.6;white-space:pre-wrap;">{msg}</p>
+            </td></tr>
+          </table>
+        </td></tr>
+      </table>
+      <table cellpadding="0" cellspacing="0" border="0" width="100%">
+        <tr><td align="center">
+          <a href="{APP_URL}/admin/support" style="display:inline-block;background:#22D3EE;color:#070B11;font-size:14px;font-weight:700;padding:12px 28px;border-radius:10px;text-decoration:none;">
+            View in Admin
+          </a>
+        </td></tr>
+      </table>"""
+            ticket_html = _email_html(
+                title=f"[Support] {subj}",
+                preview=f"New {pri} priority ticket from {email}: {subj}",
+                body_html=ticket_body,
+            )
+            ticket_plain = f"New Pushkey support ticket:\n\nFrom: {email}\nSubject: {subj}\nPriority: {pri}\n\n{msg}\n\nView in admin: {APP_URL}/admin/support"
+            from email.mime.multipart import MIMEMultipart
+            m = MIMEMultipart("alternative")
             m["Subject"] = f"[Pushkey Support — {pri.upper()}] {subj}"
             m["From"]    = FROM_EMAIL
             m["To"]      = FROM_EMAIL
+            m.attach(MIMEText(ticket_plain, "plain"))
+            m.attach(MIMEText(ticket_html,  "html"))
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
                 s.starttls()
                 s.login(SMTP_USER, SMTP_PASS)
@@ -1042,21 +1428,20 @@ async def admin_test_email(request: Request, _: None = Depends(_require_admin)):
     if not SMTP_HOST:
         return {"sent": False, "reason": "SMTP not configured. Set SMTP_HOST/SMTP_USER/SMTP_PASS env vars."}
 
-    import smtplib
-    from email.mime.text import MIMEText
-    msg = MIMEText("This is a Pushkey admin test email. Your SMTP config is working.", "plain")
-    msg["Subject"] = "Pushkey SMTP Test"
-    msg["From"]    = FROM_EMAIL
-    msg["To"]      = to_email
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+    test_body = """
+      <h1 style="margin:0 0 12px 0;color:#FFFFFF;font-size:20px;font-weight:700;">SMTP test successful</h1>
+      <p style="margin:0 0 20px 0;color:#7A9BB5;font-size:14px;line-height:1.6;">
+        Your Pushkey email configuration is working correctly.<br>
+        License keys, invites, and password resets will be delivered.
+      </p>
+      <div style="background:#00DC8222;border:1px solid #00DC8255;border-radius:10px;padding:16px 20px;">
+        <p style="margin:0;color:#00DC82;font-size:14px;font-weight:600;">&#x2713; All systems go</p>
+      </div>"""
+    html = _email_html("Pushkey SMTP Test", "Your SMTP config is working correctly.", test_body)
+    result = _send_email_html(to_email, "Pushkey SMTP Test", html, "Pushkey SMTP test — your email config is working correctly.")
+    if result["sent"]:
         return {"sent": True, "to": to_email}
-    except Exception as exc:
-        return {"sent": False, "reason": str(exc)}
+    return result
 
 
 if __name__ == "__main__":
