@@ -2097,6 +2097,9 @@ class AppFrame(ctk.CTkFrame):
         self._tab_rendered: set = set()
         self._tab_dirty: set = set()
         self._search_debounce_id = None
+        self._expanded_key: str | None = None
+        self._rotate_pending: bool = False
+        self._rotate_result: str | None = None
 
         # ── Top bar ──
         top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=64)
@@ -5003,6 +5006,15 @@ class AppFrame(ctk.CTkFrame):
             self._collapsed_groups.discard(group_key)
         else:
             self._collapsed_groups.add(group_key)
+        self._render_key_rows()
+
+    def _toggle_expand(self, name: str):
+        if self._expanded_key == name:
+            self._expanded_key = None
+        else:
+            self._expanded_key = name
+        self._rotate_pending = False
+        self._rotate_result = None
         self._render_key_rows()
 
     def _render_single_key(self, name, info):
