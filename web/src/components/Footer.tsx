@@ -5,6 +5,7 @@ const PRODUCT_LINKS: { label: string; href: string }[] = [
   { label: "Features", href: "#features" },
   { label: "Security", href: "#security" },
   { label: "Pricing", href: "#pricing" },
+  { label: "Documentation", href: "/docs" },
   { label: "Changelog", href: "https://github.com/Push-Key/pushkey/releases" },
   { label: "Roadmap", href: "https://github.com/Push-Key/pushkey/issues" },
 ]

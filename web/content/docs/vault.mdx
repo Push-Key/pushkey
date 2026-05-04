@@ -1,0 +1,55 @@
+---
+title: Vault & Crypto
+description: AES-256-GCM encryption, Argon2id key derivation, and vault file format.
+---
+
+## Vault file
+
+Single file at `~/.pushkey/vault.enc`.
+
+```
+PK2\x00                 # 4-byte magic
+<16 bytes>              # Argon2id salt
+<12 bytes><ciphertext>  # nonce + AES-256-GCM body
+```
+
+The decrypted payload is a JSON dict:
+
+```json
+{
+  "OPENAI_API_KEY": {
+    "value": "sk-...",
+    "created": "2026-01-01T00:00:00Z",
+    "rotated": "2026-04-01T00:00:00Z",
+    "provider": "openai",
+    "env": "prod",
+    "projects": ["/path/to/project"],
+    "notes": ""
+  }
+}
+```
+
+## Key derivation
+
+**Argon2id** — time=3, memory=64 MB, parallelism=4.
+
+Falls back to PBKDF2-HMAC-SHA256 at 600,000 iterations if `libargon2` is unavailable.
+
+The derived key is 32 bytes and used directly as the AES-256-GCM key. It is never persisted.
+
+## Legacy V1 vaults
+
+Older vaults use Fernet (AES-128-CBC), detected by the absence of the `PK2\x00` magic. PushKey auto-detects and prompts for migration on load.
+
+## Audit log encryption
+
+Log entries are individually encrypted using a deterministic key derived from the salt — no password required to decrypt logs, by design. This lets tooling verify the audit trail without requiring the master password.
+
+## Config and health files
+
+| Path | Contents |
+|------|----------|
+| `~/.pushkey/vault.enc` | Encrypted key vault |
+| `~/.pushkey/config.json` | Project paths and key assignments (encrypted) |
+| `~/.pushkey/health.json` | Public sidecar — no secrets, just health status + timestamps |
+| `~/.pushkey/.license` | AES-GCM encrypted license file |

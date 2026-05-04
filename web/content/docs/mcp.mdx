@@ -1,0 +1,81 @@
+---
+title: MCP Server
+description: Connect AI agents to your vault via the Model Context Protocol.
+---
+
+PushKey ships a built-in MCP server so AI agents — Claude Code, VS Code Copilot, OpenAI Agents SDK, and any MCP-compatible host — can interact with your vault without secrets appearing in conversation history or logs.
+
+## Start the server
+
+```bash
+python pushkey_mcp.py
+# SSE mode (VS Code Copilot, browser clients)
+python pushkey_mcp.py --port 8765
+```
+
+## Claude Code setup
+
+Add to `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pushkey": {
+      "command": "python",
+      "args": ["/absolute/path/to/pushkey_mcp.py"]
+    }
+  }
+}
+```
+
+Replace the path with the absolute path to your local PushKey install.
+
+## VS Code Copilot setup
+
+Start the SSE server, then add to `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "pushkey": {
+      "type": "sse",
+      "url": "http://localhost:8765/sse"
+    }
+  }
+}
+```
+
+## Available tools
+
+Call `unlock_vault` first — all other tools require an active session.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `unlock_vault` | `(password: str)` | Unlock vault; required before all other tools |
+| `lock_vault` | `()` | Clear in-memory session |
+| `list_keys` | `(env?, provider?, project?)` | List all keys — metadata only, no values |
+| `get_key` | `(name: str)` | Retrieve a key's plaintext value |
+| `add_key` | `(name, value, provider?, env?, notes?, overwrite?)` | Store a new key |
+| `inject_env` | `(project_path, keys?)` | Write keys to `.env` + update `.gitignore` |
+| `check_health` | `(rotation_threshold_days?=90)` | Report stale / expiring keys |
+| `rotate_key` | `(name, new_value)` | Update value + rotation timestamp |
+| `list_projects` | `()` | List all projects with assigned keys |
+| `assign_key` | `(key_name, project_path)` | Link a key to a project path |
+
+## Typical agent workflow
+
+```
+1. unlock_vault("master-password")
+2. list_keys()                               # see what's available
+3. get_key("OPENAI_API_KEY")                # retrieve a value
+4. inject_env("/path/to/project",
+     keys=["OPENAI_API_KEY", "STRIPE_KEY"]) # populate .env
+5. check_health()                            # flag stale keys before deploy
+6. lock_vault()                              # clear session
+```
+
+## Machine-readable manifest
+
+```
+GET /.well-known/mcp.json
+```
