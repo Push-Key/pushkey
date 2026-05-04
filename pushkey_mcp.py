@@ -208,6 +208,22 @@ def check_health(rotation_threshold_days: int = 90) -> dict:
     }
 
 
+@mcp.tool()
+def rotate_key(name: str, new_value: str) -> dict:
+    """Replace a key's value and update its rotated timestamp."""
+    err = _require_unlock()
+    if err:
+        return err
+    from datetime import datetime
+    vault = _SESSION["vault"]
+    if name not in vault:
+        return {"success": False, "error": f"key '{name}' not found"}
+    vault[name]["value"] = new_value
+    vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
+    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    return {"success": True, "name": name, "rotated": vault[name]["rotated"]}
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
