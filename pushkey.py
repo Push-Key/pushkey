@@ -7953,6 +7953,24 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["btn"], text_color=C["text2"], width=80).pack(side="left", padx=(8, 0))
 
 
+def _check_crypto_deps():
+    missing = []
+    try:
+        import argon2  # noqa: F401
+    except ImportError:
+        missing.append("argon2-cffi")
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+    except ImportError:
+        missing.append("cryptography")
+    if missing:
+        import tkinter.messagebox as _mb
+        _mb.showerror("Missing Dependencies",
+                      f"Required packages not found: {', '.join(missing)}\n\n"
+                      "Run: pip install " + " ".join(missing))
+        raise SystemExit(1)
+
+
 # ═══════════════════════════════════════════════
 # APP
 # ═══════════════════════════════════════════════
