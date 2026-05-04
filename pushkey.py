@@ -2097,6 +2097,9 @@ class AppFrame(ctk.CTkFrame):
         self._tab_rendered: set = set()
         self._tab_dirty: set = set()
         self._search_debounce_id = None
+        self._expanded_key: str | None = None
+        self._rotate_pending: bool = False
+        self._rotate_result: str | None = None
 
         # ── Top bar ──
         top = ctk.CTkFrame(self, fg_color=C["bg2"], corner_radius=0, height=64)
@@ -2301,6 +2304,10 @@ class AppFrame(ctk.CTkFrame):
     }
 
     def _nav_switch(self, key: str):
+        if key != "keys":
+            self._expanded_key = None
+            self._rotate_pending = False
+            self._rotate_result = None
         self._active_nav.set(key)
         for k, btn in self._nav_btns.items():
             ico_name = self._nav_icons.get(k)
@@ -4923,6 +4930,9 @@ class AppFrame(ctk.CTkFrame):
     def _on_search_change(self, *_):
         if self._search_debounce_id:
             self.after_cancel(self._search_debounce_id)
+        self._expanded_key = None
+        self._rotate_pending = False
+        self._rotate_result = None
         self._search_debounce_id = self.after(200, self._render_key_rows)
 
     def _render_key_rows(self):
@@ -4992,10 +5002,15 @@ class AppFrame(ctk.CTkFrame):
             if not collapsed:
                 for name, info in items:
                     self._render_single_key(name, info)
+                    if name == self._expanded_key:
+                        self._render_expand_panel(name, info)
 
     def _toggle_group_by(self):
         self._group_by = "category" if self._group_by == "file" else "file"
         self._collapsed_groups.clear()
+        self._expanded_key = None
+        self._rotate_pending = False
+        self._rotate_result = None
         self._render_key_rows()
 
     def _toggle_group(self, group_key):
@@ -5003,6 +5018,15 @@ class AppFrame(ctk.CTkFrame):
             self._collapsed_groups.discard(group_key)
         else:
             self._collapsed_groups.add(group_key)
+        self._render_key_rows()
+
+    def _toggle_expand(self, name: str):
+        if self._expanded_key == name:
+            self._expanded_key = None
+        else:
+            self._expanded_key = name
+        self._rotate_pending = False
+        self._rotate_result = None
         self._render_key_rows()
 
     def _render_single_key(self, name, info):
@@ -5033,24 +5057,42 @@ class AppFrame(ctk.CTkFrame):
         # in the modal — the row is for scanning + quick actions only.
         cat_col = CAT_COLORS.get(cat, C["text3"])
 
-        # Each row keeps its own outline so it reads as a card. Hover still
-        # tints the bg for affordance — outline never disappears.
-        row = ctk.CTkFrame(self.keys_scroll, fg_color=C["surface"],
-                           corner_radius=6, border_width=1,
-                           border_color=C["border"], cursor="hand2")
-        row.pack(fill="x", padx=4, pady=2)
-        row.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        is_expanded = (name == self._expanded_key)
 
-        def _hover_in(e, r=row):
-            r.configure(fg_color=C["bg3"], border_color=C["accent"])
-        def _hover_out(e, r=row):
-            r.configure(fg_color=C["surface"], border_color=C["border"])
+        row = ctk.CTkFrame(
+            self.keys_scroll,
+            fg_color=C["surface"],
+            corner_radius=6 if not is_expanded else 0,
+            border_width=1,
+            border_color=C["accent"] if is_expanded else C["border"],
+            cursor="hand2",
+        )
+        row.pack(fill="x", padx=4, pady=(2, 0 if is_expanded else 2))
+        row.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
+
+        def _hover_in(e, r=row, exp=is_expanded):
+            r.configure(fg_color=C["bg3"])
+            if not exp:
+                r.configure(border_color=C["accent"])
+        def _hover_out(e, r=row, exp=is_expanded):
+            r.configure(fg_color=C["surface"])
+            if not exp:
+                r.configure(border_color=C["border"])
         row.bind("<Enter>", _hover_in)
         row.bind("<Leave>", _hover_out)
 
         inner = ctk.CTkFrame(row, fg_color="transparent")
         inner.pack(fill="x", padx=10, pady=4)
-        inner.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        inner.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
+
+        # Chevron
+        ctk.CTkLabel(
+            inner,
+            text="▼" if is_expanded else "▶",
+            font=(_UI_FONT, 10),
+            text_color=C["accent"] if is_expanded else C["text3"],
+            width=14,
+        ).pack(side="left", padx=(0, 4))
 
         # ── LEFT: checkbox + category dot + name ──
         sel_var = ctk.BooleanVar(value=False)
@@ -5128,7 +5170,238 @@ class AppFrame(ctk.CTkFrame):
         name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11),
                                 text_color=C["text"], anchor="w", cursor="hand2")
         name_lbl.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        name_lbl.bind("<Button-1>", lambda e, n=name: self.show_key_detail(n))
+        name_lbl.bind("<Button-1>", lambda e, n=name: self._toggle_expand(n))
+
+    def _render_expand_panel(self, name: str, info: dict):
+        """Two-pane expansion panel rendered inline below the open accordion row."""
+        cat        = info.get("category", "General")
+        cat_col    = CAT_COLORS.get(cat, C["text3"])
+        provider   = info.get("provider", "") or ""
+        env        = info.get("env", "all")
+        created    = (info.get("created") or "")[:10] or "—"
+        rotated_ts = info.get("rotated", "")
+        val        = info["value"]
+        revealed   = name in self.revealed
+        raw_projs  = info.get("projects", [])
+        projects   = [p.get("name", str(p)) if isinstance(p, dict) else str(p)
+                      for p in raw_projs]
+
+        if rotated_ts:
+            try:
+                delta = (datetime.now() - datetime.fromisoformat(rotated_ts)).days
+                rotated_str = f"{delta}d ago"
+                rotated_col = C["red"] if delta > 90 else C["amber"] if delta > 60 else C["text2"]
+            except Exception:
+                rotated_str = rotated_ts[:10]
+                rotated_col = C["text2"]
+        else:
+            rotated_str = "never"
+            rotated_col = C["amber"]
+
+        # 3px category-color left bar (Swagger method-color pattern)
+        outer = ctk.CTkFrame(self.keys_scroll, fg_color=cat_col,
+                             corner_radius=0, border_width=0)
+        outer.pack(fill="x", padx=4, pady=(0, 6))
+
+        inner_bg = ctk.CTkFrame(outer, fg_color=C["bg2"], corner_radius=0,
+                                border_width=1, border_color=C["accent"])
+        inner_bg.pack(fill="x", padx=(3, 0))
+
+        body = ctk.CTkFrame(inner_bg, fg_color="transparent")
+        body.pack(fill="x")
+
+        # ── LEFT PANE ──
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=(14, 0), pady=10)
+
+        ctk.CTkLabel(left, text="VALUE", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+
+        val_row = ctk.CTkFrame(left, fg_color=C["bg3"], corner_radius=4,
+                               border_width=1, border_color=C["border"])
+        val_row.pack(fill="x", pady=(0, 8))
+
+        display_val = val if revealed else "●" * min(len(val), 24)
+        ctk.CTkLabel(val_row, text=display_val, font=(_MONO_FONT, 11),
+                     text_color=C["text"] if revealed else C["accent"],
+                     anchor="w").pack(side="left", padx=8, pady=4, fill="x", expand=True)
+
+        def _toggle_reveal_inline():
+            if name in self.revealed:
+                self.revealed.discard(name)
+            else:
+                self.revealed.add(name)
+                self.after(10000, lambda: (self.revealed.discard(name),
+                                           self._render_key_rows()))
+            self._render_key_rows()
+
+        make_btn(val_row, "Hide" if revealed else "Show", _toggle_reveal_inline,
+                 fg_color="transparent", text_color=C["text3"],
+                 width=38, height=22, border=False).pack(side="right", padx=(0, 4))
+
+        # Meta grid (2×2)
+        meta = ctk.CTkFrame(left, fg_color="transparent")
+        meta.pack(fill="x", pady=(0, 6))
+        meta.columnconfigure(0, weight=1)
+        meta.columnconfigure(1, weight=1)
+
+        def _meta_cell(row_idx, col_idx, label, value, val_color=None):
+            cell = ctk.CTkFrame(meta, fg_color="transparent")
+            cell.grid(row=row_idx, column=col_idx, sticky="w", pady=1, padx=(0, 12))
+            ctk.CTkLabel(cell, text=label, font=(_UI_FONT, 9, "bold"),
+                         text_color=C["text3"]).pack(anchor="w")
+            ctk.CTkLabel(cell, text=value, font=(_MONO_FONT, 10),
+                         text_color=val_color or C["text2"]).pack(anchor="w")
+
+        _meta_cell(0, 0, "PROVIDER", provider or "—")
+        _meta_cell(0, 1, "ENV", env.upper())
+        _meta_cell(1, 0, "CREATED", created)
+        _meta_cell(1, 1, "ROTATED", rotated_str, rotated_col)
+
+        # Project tags
+        if projects:
+            ctk.CTkLabel(left, text="PROJECTS", font=(_UI_FONT, 9, "bold"),
+                         text_color=C["text3"]).pack(anchor="w", pady=(2, 2))
+            pills_row = ctk.CTkFrame(left, fg_color="transparent")
+            pills_row.pack(fill="x")
+            for proj in projects[:6]:
+                tag = ctk.CTkFrame(pills_row, fg_color=C["bg3"], corner_radius=10,
+                                   border_width=1, border_color=C["border2"])
+                tag.pack(side="left", padx=(0, 4), pady=1)
+                ctk.CTkLabel(tag, text=proj, font=(_UI_FONT, 9),
+                             text_color=C["accent"]).pack(padx=6, pady=1)
+
+        # Vertical divider
+        ctk.CTkFrame(body, fg_color=C["border"], width=1,
+                     corner_radius=0).pack(side="left", fill="y", pady=8)
+
+        # ── RIGHT PANE ──
+        right = ctk.CTkFrame(body, fg_color="transparent", width=150)
+        right.pack(side="left", fill="y", padx=12, pady=10)
+        right.pack_propagate(False)
+
+        ctk.CTkLabel(right, text="ACTIONS", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 6))
+
+        copy_btn = make_btn(right, "⎘  Copy Value", lambda: None,
+                            fg_color=C["btn"], text_color=C["accent"],
+                            width=126, height=28, border=False)
+        copy_btn.configure(command=lambda v=val, b=copy_btn: self.copy_key(v, flash_widget=b))
+        copy_btn.pack(fill="x", pady=(0, 4))
+
+        API_ROTATE = {"OpenAI", "Anthropic", "AWS"}
+        if provider in API_ROTATE:
+            make_btn(right, "↻  Rotate", lambda n=name: self.rotate_key(n),
+                     fg_color=C["amber_bg"], text_color=C["amber"],
+                     width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+        else:
+            make_btn(right, "↻  Rotate", lambda n=name: self._show_rotate_subpanel(n),
+                     fg_color=C["amber_bg"], text_color=C["amber"],
+                     width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+
+        make_btn(right, "→  Inject .env", lambda n=name: self._inline_inject(n),
+                 fg_color=C["btn"], text_color=C["green"],
+                 width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+
+        make_btn(right, "✕  Revoke", lambda n=name: self.delete_key(n),
+                 fg_color=C["red_bg"], text_color=C["red"],
+                 width=126, height=28, border=False).pack(fill="x")
+
+        # Inline rotation sub-panel (if pending)
+        if self._rotate_pending and self._expanded_key == name:
+            self._render_rotate_subpanel(inner_bg, name)
+
+    def _inline_inject(self, name: str):
+        self._auto_inject_key(name)
+        self._invalidate_tabs("dashboard", "keys", "timeline")
+
+    def _show_rotate_subpanel(self, name: str):
+        self._rotate_pending = True
+        self._rotate_result = None
+        self._render_key_rows()
+
+    def _dismiss_rotate_result(self):
+        self._rotate_pending = False
+        self._rotate_result = None
+        self._render_key_rows()
+
+    def _render_rotate_subpanel(self, parent_frame, name: str):
+        if self._rotate_result is not None:
+            # ── Result strip ──
+            strip = ctk.CTkFrame(parent_frame, fg_color=C["green_bg"],
+                                 corner_radius=0, border_width=0)
+            strip.pack(fill="x", padx=0, pady=(1, 0))
+
+            row = ctk.CTkFrame(strip, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=7)
+
+            ctk.CTkLabel(row, text="✓  Rotated", font=(_UI_FONT, 11, "bold"),
+                         text_color=C["green"]).pack(side="left", padx=(0, 10))
+
+            new_masked = "●" * min(len(self._rotate_result), 24)
+            val_box = ctk.CTkFrame(row, fg_color=C["bg3"], corner_radius=4,
+                                   border_width=1, border_color=C["border"])
+            val_box.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(val_box, text=new_masked, font=(_MONO_FONT, 11),
+                         text_color=C["accent"]).pack(side="left", padx=8, pady=3)
+
+            copy_result_btn = make_btn(row, "⎘ Copy", lambda: None,
+                                       fg_color=C["btn"], text_color=C["green"],
+                                       width=60, height=24, border=False)
+            result_val = self._rotate_result
+            copy_result_btn.configure(
+                command=lambda v=result_val, b=copy_result_btn: self.copy_key(v, flash_widget=b))
+            copy_result_btn.pack(side="left", padx=(6, 0))
+
+            make_btn(row, "✕", self._dismiss_rotate_result,
+                     fg_color="transparent", text_color=C["text3"],
+                     width=24, height=24, border=False).pack(side="right")
+
+            self.after(8000, self._dismiss_rotate_result)
+            return
+
+        # ── Input strip ──
+        strip = ctk.CTkFrame(parent_frame, fg_color=C["amber_bg"],
+                             corner_radius=0, border_width=0)
+        strip.pack(fill="x", padx=0, pady=(1, 0))
+
+        ctk.CTkLabel(strip, text="↻  ROTATE KEY", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["amber"]).pack(anchor="w", padx=14, pady=(7, 2))
+
+        inp_var = tk.StringVar()
+        inp = ctk.CTkEntry(strip, textvariable=inp_var,
+                           font=(_MONO_FONT, 11),
+                           fg_color=C["bg3"], text_color=C["text"],
+                           border_color=C["amber"],
+                           placeholder_text="Paste new key value...")
+        inp.pack(fill="x", padx=14, pady=(0, 4))
+        inp.focus_set()
+
+        btn_row = ctk.CTkFrame(strip, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(0, 8))
+
+        def _confirm(n=name):
+            new_val = inp_var.get().strip()
+            if not new_val:
+                return
+            self._apply_rotation(n, new_val)
+            self._rotate_pending = False
+            self._rotate_result = new_val
+            self._render_key_rows()
+
+        def _cancel():
+            self._rotate_pending = False
+            self._rotate_result = None
+            self._render_key_rows()
+
+        make_btn(btn_row, "Confirm Rotate", _confirm,
+                 fg_color=C["amber_bg"], text_color=C["amber"],
+                 border=True, width=120, height=26).pack(side="left", padx=(0, 6))
+        make_btn(btn_row, "Cancel", _cancel,
+                 fg_color="transparent", text_color=C["text3"],
+                 border=True, width=70, height=26).pack(side="left")
+        ctk.CTkLabel(btn_row, text="Old value backed up to history",
+                     font=(_UI_FONT, 9), text_color=C["text3"]).pack(side="right")
 
     def _select_all_keys(self):
         for var in self._bulk_select_vars.values():
@@ -5768,11 +6041,18 @@ class AppFrame(ctk.CTkFrame):
             self.after(10000, lambda: (self.revealed.discard(name), self._render_key_rows()))
         self._render_key_rows()
 
-    def copy_key(self, value):
+    def copy_key(self, value, flash_widget=None):
         self.clipboard_clear()
         self.clipboard_append(value)
         job_id = self.after(30000, self.clipboard_clear)
         self._clipboard_jobs.append(job_id)
+        if flash_widget:
+            try:
+                flash_widget.configure(text="✓  Copied", text_color=C["green"])
+                self.after(1500, lambda: flash_widget.configure(
+                    text="⎘  Copy Value", text_color=C["accent"]))
+            except Exception:
+                pass
 
     def _rbac_check(self, name: str, action: str) -> bool:
         """Returns True if action allowed. action: 'can_rotate' | 'can_delete' | 'can_read'"""
