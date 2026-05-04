@@ -127,6 +127,52 @@ def add_key(
     return {"success": True, "name": name, "provider": provider}
 
 
+@mcp.tool()
+def inject_env(project_path: str, keys: list[str] = None) -> dict:
+    """
+    Write vault keys into <project_path>/.env and ensure .env is in .gitignore.
+    If keys is None, injects all keys whose projects list includes project_path.
+    """
+    err = _require_unlock()
+    if err:
+        return err
+    from pathlib import Path
+    vault = _SESSION["vault"]
+    project = Path(project_path)
+    if not project.is_dir():
+        return {"success": False, "error": f"directory not found: {project_path}"}
+
+    if keys is None:
+        keys = [n for n, m in vault.items() if project_path in m.get("projects", [])]
+        if not keys:
+            return {"success": False, "error": "no keys assigned to this project; pass keys=[...] explicitly"}
+
+    missing = [k for k in keys if k not in vault]
+    if missing:
+        return {"success": False, "error": f"keys not in vault: {missing}"}
+
+    env_path = project / ".env"
+    existing_lines = []
+    existing_keys = set()
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            existing_lines.append(line)
+            if "=" in line and not line.startswith("#"):
+                existing_keys.add(line.split("=", 1)[0].strip())
+
+    new_lines = [f"{k}={vault[k]['value']}" for k in keys if k not in existing_keys]
+    all_lines = existing_lines + new_lines
+    env_path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
+
+    gitignore_path = project / ".gitignore"
+    gitignore_content = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    if ".env" not in gitignore_content.splitlines():
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            f.write("\n.env\n")
+
+    return {"success": True, "injected": new_lines, "skipped_existing": list(existing_keys & set(keys))}
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
