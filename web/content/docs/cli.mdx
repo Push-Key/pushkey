@@ -1,0 +1,45 @@
+---
+title: CLI Reference
+description: Full reference for the pushkey command-line interface.
+---
+
+## Core commands
+
+```bash
+pushkey add <NAME> <VALUE>        # store a key
+pushkey get <NAME>                # print decrypted value
+pushkey list                      # list all key names (no values)
+pushkey inject <project-dir>      # write assigned keys to .env
+pushkey rotate <NAME> <NEW_VAL>   # rotate value + log history
+pushkey delete <NAME>             # remove key from vault
+pushkey license                   # show current tier
+```
+
+## Project binding
+
+Bind keys to a project directory so `inject` knows what to write:
+
+```bash
+pushkey assign <NAME> <project-dir>
+pushkey inject <project-dir>      # writes only assigned keys
+pushkey unassign <NAME> <project-dir>
+```
+
+## Export / import
+
+Team-safe export embeds an ephemeral salt — the recipient decrypts with a shared password, not your vault password.
+
+```bash
+pushkey export --out team-keys.enc --password <shared-password>
+pushkey import team-keys.enc --password <shared-password>
+```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `--vault <path>` | Use a non-default vault file |
+| `--password <pw>` | Supply vault password (non-interactive / CI) |
+| `--json` | Output as JSON (list, get) |
+| `--env <name>` | Tag key with environment (prod, staging, dev) |
+| `--provider <name>` | Override auto-detected provider |

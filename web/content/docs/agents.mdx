@@ -1,0 +1,61 @@
+---
+title: AI Agents & Skills
+description: Use PushKey with Claude Code, OpenAI Agents SDK, and any MCP-compatible agent framework.
+---
+
+## Claude Code skill
+
+PushKey ships a companion Claude Code skill that auto-activates when your conversation mentions API keys, secrets, `.env` files, or key rotation. It guides Claude through the correct MCP tool call sequence without manual lookup.
+
+### Trigger phrases
+
+The skill activates when you say things like:
+
+- "what keys do I have"
+- "add this key to my vault"
+- "set up env for my new project"
+- "my STRIPE_KEY needs rotating"
+- "inject secrets into /path/to/app"
+
+### How it works
+
+Claude detects the trigger, calls `unlock_vault`, then uses the appropriate tools (`list_keys`, `get_key`, `inject_env`, etc.) in sequence. Key values are returned in the tool result — they never appear in the chat transcript.
+
+## OpenAI Agents SDK
+
+Use PushKey as an MCP server in any OpenAI-compatible agent:
+
+```python
+from agents import Agent, MCPServerStdio
+
+pushkey = MCPServerStdio(
+    command="python",
+    args=["/absolute/path/to/pushkey_mcp.py"]
+)
+
+agent = Agent(
+    name="DevAgent",
+    mcp_servers=[pushkey]
+)
+```
+
+The agent can then call `unlock_vault`, `list_keys`, `inject_env`, and all other tools listed in the [MCP Server](/docs/mcp) reference.
+
+## Any MCP-compatible host
+
+PushKey implements standard MCP stdio and SSE transports. Any host that supports MCP works — LangChain, LlamaIndex, Cursor, Windsurf, etc.
+
+```bash
+# stdio (default)
+python pushkey_mcp.py
+
+# SSE
+python pushkey_mcp.py --port 8765
+```
+
+## Security in agent context
+
+- Key values **never appear in conversation history** or model context
+- The MCP server holds a short-lived in-memory session; `lock_vault()` clears it immediately
+- Agents that call `get_key()` receive the value in the tool result only — not in the assistant message
+- The server logs all tool calls to the encrypted audit log

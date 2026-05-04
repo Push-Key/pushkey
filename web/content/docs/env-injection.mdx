@@ -1,0 +1,52 @@
+---
+title: .env Injection
+description: Write assigned keys directly into project .env files.
+---
+
+## How it works
+
+`pushkey inject` merges assigned keys into the project's `.env` — existing values for other variables are preserved. `.env` is automatically added to `.gitignore` if not already present.
+
+```bash
+pushkey inject /path/to/project
+```
+
+## Assign keys to a project first
+
+```bash
+pushkey assign OPENAI_API_KEY /path/to/project
+pushkey assign STRIPE_SECRET_KEY /path/to/project
+pushkey inject /path/to/project
+# → writes both keys to /path/to/project/.env
+```
+
+## CI/CD
+
+Pass the vault password via environment variable for non-interactive pipelines:
+
+```bash
+PUSHKEY_PASSWORD=${{ secrets.VAULT_PASS }} pushkey inject .
+```
+
+## GitHub Actions
+
+```yaml
+- name: Inject secrets
+  env:
+    PUSHKEY_PASSWORD: ${{ secrets.VAULT_PASS }}
+  run: |
+    pip install pushkey
+    pushkey inject .
+```
+
+## Vercel
+
+```bash
+pushkey inject . && vercel env pull
+```
+
+## Notes
+
+- Inject is **non-destructive** — it only writes keys assigned to the project and leaves all other `.env` lines untouched
+- The `.env` file is created if it doesn't exist
+- Running inject again updates values if they've been rotated in the vault

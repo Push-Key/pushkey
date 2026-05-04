@@ -1,0 +1,38 @@
+---
+title: Security Model
+description: Local-first guarantees, zero-knowledge cloud sync, and responsible disclosure.
+---
+
+## Local-first guarantees
+
+- Master password **never stored or transmitted** — used only to derive the encryption key in memory
+- Vault decrypted in memory only; the plaintext JSON never touches disk
+- No telemetry from the desktop app or CLI by default
+- `.env` files automatically added to `.gitignore` on inject
+
+## Zero-knowledge cloud sync
+
+Cloud sync (Pro+) uploads only AES-GCM ciphertext. The server stores:
+
+- An opaque encrypted blob
+- Your email (for billing)
+- A Stripe customer ID
+
+The server **cannot decrypt your vault**. There is no server-side key escrow.
+
+## Agent / MCP security
+
+- Key values never appear in AI conversation history or model context
+- The MCP server holds a short-lived in-memory session
+- All tool calls are written to the encrypted audit log
+- `lock_vault()` clears the session immediately
+
+## Audit trail
+
+Every vault operation (add, rotate, delete, inject, unlock) is logged as an individually encrypted entry. The log can be verified without the master password.
+
+## Reporting vulnerabilities
+
+Email [security@push-key.com](mailto:security@push-key.com). We follow responsible disclosure and aim to respond within 48 hours.
+
+See our full [Security Policy](https://github.com/Push-Key/pushkey/blob/main/SECURITY.md) on GitHub.

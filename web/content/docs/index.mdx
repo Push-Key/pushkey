@@ -1,0 +1,27 @@
+---
+title: Introduction
+description: PushKey is an encrypted API key vault with MCP server, AI agent integration, direct .env injection, and zero-knowledge cloud sync.
+---
+
+## What is PushKey?
+
+PushKey is a local-first encrypted vault for API keys and secrets. It runs entirely on your machine — no account required to start, no telemetry, no cloud dependency.
+
+## Core features
+
+- **AES-256-GCM encryption** with Argon2id key derivation
+- **Direct `.env` injection** — assign keys to projects and push them in one command
+- **MCP server** — Claude Code, VS Code Copilot, and any MCP-compatible AI agent can read keys, check rotation health, and inject secrets without values appearing in chat history
+- **CLI + GUI** — full-featured desktop app and `pushkey` CLI
+- **Cloud sync** (Pro+) — zero-knowledge backup; the server stores only ciphertext
+- **VS Code extension** — decorates files where stale or missing keys are referenced
+
+## Quick start
+
+```bash
+pip install pushkey
+pushkey add OPENAI_API_KEY sk-...
+pushkey inject /path/to/project
+```
+
+That's it. The key is encrypted in your vault and written to `.env` in your project.

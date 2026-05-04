@@ -1,0 +1,62 @@
+---
+title: Integrations
+description: VS Code extension, GitHub Actions, Vercel, Railway, and more.
+---
+
+## VS Code extension
+
+Reads `~/.pushkey/health.json` and decorates editor files where assigned keys are used, highlighting stale or missing secrets inline.
+
+Install from the marketplace or load the `.vsix` manually:
+
+```bash
+code --install-extension vscode-pushkey/pushkey-0.1.0.vsix
+```
+
+## GitHub Actions
+
+```yaml
+- name: Inject secrets
+  env:
+    PUSHKEY_PASSWORD: ${{ secrets.VAULT_PASS }}
+  run: |
+    pip install pushkey
+    pushkey inject .
+```
+
+Store your vault password as a repository secret named `VAULT_PASS`.
+
+## Vercel
+
+```bash
+pushkey inject . && vercel env pull
+```
+
+Or sync directly to Vercel environment variables using the Vercel CLI.
+
+## Railway / Render
+
+Use `pushkey export` to produce an encrypted bundle, then load it in CI:
+
+```bash
+pushkey export --out secrets.enc --password $SHARED_PASS
+# upload secrets.enc to your CI secret store
+# then in CI:
+pushkey import secrets.enc --password $SHARED_PASS
+pushkey inject .
+```
+
+## 32+ provider auto-detection
+
+PushKey auto-detects the provider from the key name or value prefix:
+
+| Prefix / pattern | Provider |
+|-----------------|----------|
+| `sk-` | OpenAI |
+| `sk-ant-` | Anthropic |
+| `STRIPE_` | Stripe |
+| `GITHUB_TOKEN` | GitHub |
+| `SUPABASE_` | Supabase |
+| … and 27 more | — |
+
+Override with `--provider <name>` or set it in the GUI.
