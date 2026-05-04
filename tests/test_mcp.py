@@ -116,3 +116,34 @@ def test_list_keys_filter_env(tmp_path, monkeypatch):
     result = mcp_mod.list_keys(env="dev")
     assert result["count"] == 1
     assert result["keys"][0]["name"] == "DEV_KEY"
+
+
+def test_get_key_returns_value(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+
+    from pushkey_vault import save_vault
+    save_vault({"MY_KEY": {"value": "super-secret", "created": "2024-01-01", "rotated": "2024-01-01",
+                           "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.get_key("MY_KEY")
+    assert result["value"] == "super-secret"
+
+
+def test_get_key_not_found(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+
+    from pushkey_vault import save_vault
+    save_vault({}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.get_key("MISSING_KEY")
+    assert "error" in result
