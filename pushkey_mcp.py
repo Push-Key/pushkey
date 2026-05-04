@@ -36,7 +36,7 @@ def _require_unlock() -> dict | None:
 
 @mcp.tool()
 def unlock_vault(password: str) -> dict:
-    """Unlock the Pushkey vault with master password. Required before most other tools."""
+    """Unlock the Pushkey vault with the master password. Must be called before list_keys, get_key, add_key, inject_env, rotate_key, list_projects, or assign_key. Session is cleared by lock_vault or process exit."""
     return _unlock(password)
 
 
@@ -53,6 +53,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=None, help="SSE port (omit for stdio)")
     args = parser.parse_args()
     if args.port:
-        mcp.run(transport="sse", port=args.port)
+        mcp.run(transport="sse", host="127.0.0.1", port=args.port)
     else:
         mcp.run(transport="stdio")
