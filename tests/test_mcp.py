@@ -240,3 +240,27 @@ def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
     gitignore = project_dir / ".gitignore"
     assert gitignore.exists()
     assert ".env" in gitignore.read_text()
+
+
+def test_check_health_stale(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    vault = {
+        "OLD_KEY": {"value": "v", "created": "2020-01-01", "rotated": "2020-01-01",
+                    "provider": "Unknown", "env": "dev", "projects": [], "notes": ""},
+        "NEW_KEY": {"value": "v2", "created": "2026-04-01", "rotated": "2026-04-01",
+                    "provider": "Unknown", "env": "dev", "projects": [], "notes": ""},
+    }
+    save_vault(vault, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.check_health()
+    stale_names = [k["name"] for k in result["stale_keys"]]
+    assert "OLD_KEY" in stale_names
+    assert "NEW_KEY" not in stale_names
