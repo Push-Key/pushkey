@@ -74,6 +74,25 @@ def list_keys(env: str = None, provider: str = None, project: str = None) -> dic
     return {"count": len(keys), "keys": keys}
 
 
+@mcp.tool()
+def get_key(name: str) -> dict:
+    """Get the value and metadata of a specific key from the vault by name."""
+    err = _require_unlock()
+    if err:
+        return err
+    vault = _SESSION["vault"]
+    if name not in vault:
+        return {"error": f"key '{name}' not found"}
+    meta = vault[name]
+    return {
+        "name": name,
+        "value": meta["value"],
+        "provider": meta.get("provider", "Unknown"),
+        "env": meta.get("env", "all"),
+        "notes": meta.get("notes", ""),
+    }
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
