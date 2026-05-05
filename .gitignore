@@ -18,6 +18,8 @@ env/
 .idea/
 *.swp
 *.swo
+.claude/settings.local.json
+.claude/settings.json
 
 # OS
 .DS_Store
@@ -29,3 +31,27 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+.worktreesnotebook-import/
+.claude/worktrees/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Tooling scratch
+.git-rewrite/
+.superpowers/
+.vercel/
+graphify-out/
+_debug.log
+=*
+
+# Release / test scratch
+release-*.json
+test_bulk_keys.txt
+test_dashboard_format.txt
+
+# VS Code extension build output
+vscode-pushkey/*.vsix
