@@ -14,6 +14,7 @@ Configure Pushkey to use: http://your-server:8000
 """
 
 import hashlib
+import html as _html
 import json
 import os
 import secrets
@@ -48,10 +49,22 @@ except ImportError:
     )
 
 # ── Config ──────────────────────────────────────────────────────
-DATA_DIR   = Path(os.environ.get("PUSHKEY_DATA_DIR", "~/.pushkey-cloud")).expanduser()
-SECRET_KEY = os.environ.get("PUSHKEY_JWT_SECRET", secrets.token_hex(32))
-ALGORITHM  = "HS256"
-TOKEN_TTL  = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "720"))  # 30 days
+DATA_DIR  = Path(os.environ.get("PUSHKEY_DATA_DIR", "~/.pushkey-cloud")).expanduser()
+ALGORITHM = "HS256"
+TOKEN_TTL = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "720"))  # 30 days
+
+_DEV_MODE  = os.environ.get("PUSHKEY_ENV", "production").lower() in ("development", "dev", "local")
+SECRET_KEY = os.environ.get("PUSHKEY_JWT_SECRET", "")
+if not SECRET_KEY:
+    if _DEV_MODE:
+        SECRET_KEY = secrets.token_hex(32)
+        print("[pushkey] WARNING: PUSHKEY_JWT_SECRET not set — ephemeral secret active (dev mode only)")
+    else:
+        raise SystemExit(
+            "\n[pushkey] FATAL: PUSHKEY_JWT_SECRET environment variable is required.\n"
+            "Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
+        )
 
 DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
@@ -77,7 +90,17 @@ app.add_middleware(
 
 # ── Admin config ─────────────────────────────────────────────────
 LICENSES_FILE = DATA_DIR / "licenses.json"
-ADMIN_SECRET  = os.environ.get("PUSHKEY_ADMIN_SECRET", "dev-change-me")
+ADMIN_SECRET = os.environ.get("PUSHKEY_ADMIN_SECRET", "")
+if not ADMIN_SECRET:
+    if _DEV_MODE:
+        ADMIN_SECRET = "dev-change-me"
+        print("[pushkey] WARNING: PUSHKEY_ADMIN_SECRET not set — using 'dev-change-me' (dev mode only)")
+    else:
+        raise SystemExit(
+            "\n[pushkey] FATAL: PUSHKEY_ADMIN_SECRET environment variable is required.\n"
+            "Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
+        )
 TIER_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
 
 
@@ -110,6 +133,9 @@ def _current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
 # ── Auth endpoints ───────────────────────────────────────────────
 @app.post("/api/v1/auth/register")
 async def register(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+        raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
     pw    = body.get("password", "")
@@ -124,6 +150,9 @@ async def register(request: Request):
 
 @app.post("/api/v1/auth/login")
 async def login(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+        raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
     pw    = body.get("password", "")
@@ -333,27 +362,35 @@ def _load_audit() -> list[dict]:
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
-# Simple in-memory token bucket: max RATE_LIMIT_MAX heartbeats per RATE_LIMIT_WINDOW_SEC per license_key
+# Simple in-memory token bucket rate limiter
 RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
-_HEARTBEAT_HITS: dict[str, list[float]] = {}
+AUTH_RATE_MAX         = int(os.environ.get("AUTH_RATE_MAX", "5"))
+AUTH_RATE_WINDOW_SEC  = int(os.environ.get("AUTH_RATE_WINDOW", "60"))
+PORTAL_RATE_MAX       = int(os.environ.get("PORTAL_RATE_MAX", "20"))
+PORTAL_RATE_WINDOW_SEC = int(os.environ.get("PORTAL_RATE_WINDOW", "60"))
 
-def _check_rate_limit(key: str) -> bool:
-    """Returns True if request allowed, False if rate-limited."""
+_HEARTBEAT_HITS: dict[str, list[float]] = {}
+_AUTH_HITS:      dict[str, list[float]] = {}
+_PORTAL_HITS:    dict[str, list[float]] = {}
+
+
+def _rate_check(bucket: dict, key: str, max_hits: int, window_sec: int) -> bool:
+    """Generic token-bucket check. Returns True if allowed."""
     now = time.time()
-    hits = _HEARTBEAT_HITS.get(key, [])
-    # Drop hits outside window
-    hits = [h for h in hits if now - h < RATE_LIMIT_WINDOW_SEC]
-    if len(hits) >= RATE_LIMIT_MAX:
-        _HEARTBEAT_HITS[key] = hits
+    hits = [h for h in bucket.get(key, []) if now - h < window_sec]
+    if len(hits) >= max_hits:
+        bucket[key] = hits
         return False
     hits.append(now)
-    _HEARTBEAT_HITS[key] = hits
-    # Periodic cleanup to avoid unbounded growth
-    if len(_HEARTBEAT_HITS) > 10000:
-        cutoff = now - RATE_LIMIT_WINDOW_SEC
-        _HEARTBEAT_HITS.clear()  # nuke and rebuild lazily
+    bucket[key] = hits
+    if len(bucket) > 10000:
+        bucket.clear()
     return True
+
+
+def _check_rate_limit(key: str) -> bool:
+    return _rate_check(_HEARTBEAT_HITS, key, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC)
 
 
 async def _handle_heartbeat(body: dict) -> dict:
@@ -1202,6 +1239,9 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
             from email.mime.text import MIMEText  # noqa (used by MIMEMultipart attach below)
             PRI_COLOR = {"low": "#22D3EE", "medium": "#F59E0B", "high": "#EF4444"}
             pri_color = PRI_COLOR.get(pri, "#22D3EE")
+            safe_email = _html.escape(email)
+            safe_subj  = _html.escape(subj)
+            safe_msg   = _html.escape(msg)
             ticket_body = f"""
       <h1 style="margin:0 0 20px 0;color:#FFFFFF;font-size:20px;font-weight:700;">New Support Ticket</h1>
       <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#070B11;border:1px solid #1A2A38;border-radius:12px;margin-bottom:24px;">
@@ -1214,15 +1254,15 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
             </tr>
             <tr><td style="padding-top:14px;padding-bottom:6px;">
               <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">From</p>
-              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;">{email}</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;">{safe_email}</p>
             </td></tr>
             <tr><td style="padding-bottom:6px;">
               <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Subject</p>
-              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;font-weight:600;">{subj}</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;font-weight:600;">{safe_subj}</p>
             </td></tr>
             <tr><td style="padding-bottom:4px;">
               <p style="margin:0;color:#7A9BB5;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Message</p>
-              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;line-height:1.6;white-space:pre-wrap;">{msg}</p>
+              <p style="margin:4px 0 0 0;color:#C8D8E8;font-size:14px;line-height:1.6;white-space:pre-wrap;">{safe_msg}</p>
             </td></tr>
           </table>
         </td></tr>
@@ -1235,8 +1275,8 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
         </td></tr>
       </table>"""
             ticket_html = _email_html(
-                title=f"[Support] {subj}",
-                preview=f"New {pri} priority ticket from {email}: {subj}",
+                title=f"[Support] {safe_subj}",
+                preview=f"New {pri} priority ticket from {safe_email}: {safe_subj}",
                 body_html=ticket_body,
             )
             ticket_plain = f"New Pushkey support ticket:\n\nFrom: {email}\nSubject: {subj}\nPriority: {pri}\n\n{msg}\n\nView in admin: {APP_URL}/admin/support"
@@ -1290,6 +1330,9 @@ async def portal_lookup(request: Request):
     Customer enters their license key to view info.
     Returns sanitized license info — never exposes other customers' data.
     """
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_check(_PORTAL_HITS, ip, PORTAL_RATE_MAX, PORTAL_RATE_WINDOW_SEC):
+        raise HTTPException(429, f"Too many requests — try again in {PORTAL_RATE_WINDOW_SEC}s")
     body = await request.json()
     key = body.get("license_key", "").strip().upper()
     if not key:
