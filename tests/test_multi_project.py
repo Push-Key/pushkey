@@ -26,10 +26,7 @@ def projects(tmp_path):
 
 def test_link_key_to_multiple_projects(tmp_path, monkeypatch, projects):
     """One key can be linked to multiple projects."""
-    monkeypatch.setattr(pushkey, "VAULT_DIR", tmp_path / "vault")
-    monkeypatch.setattr(pushkey, "CONFIG_FILE", tmp_path / "vault" / "config.json")
-    (tmp_path / "vault").mkdir()
-
+    import pushkey_shared
     config = {
         "projects": {
             "project1": {
@@ -47,7 +44,7 @@ def test_link_key_to_multiple_projects(tmp_path, monkeypatch, projects):
         }
     }
 
-    (tmp_path / "vault" / "config.json").write_text(json.dumps(config))
+    pushkey_shared.CONFIG_FILE.write_text(json.dumps(config))
     loaded = pushkey.load_config()
 
     # All projects should reference the same key
