@@ -331,3 +331,83 @@ def test_assign_key_to_project(tmp_path, monkeypatch):
 
     vault, _ = load_vault("pw")
     assert expected in vault["MY_KEY"]["projects"]
+
+
+# ── Dual-rotation tools ─────────────────────────────────────────────────────
+
+def _seed_vault_with_key(tmp_path, monkeypatch, key_name="OPENAI_KEY", provider="OpenAI"):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
+
+    from pushkey_vault import save_vault
+    save_vault({key_name: {"value": "active-v1", "created": "2024-01-01", "rotated": "2024-01-01",
+                           "provider": provider, "env": "dev", "projects": [], "notes": ""}}, "pw")
+
+    import pushkey_tiers
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "pro")
+
+
+def test_set_backup_key_writes_next_value(tmp_path, monkeypatch):
+    _seed_vault_with_key(tmp_path, monkeypatch)
+    from pushkey_vault import load_vault
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.set_backup_key("OPENAI_KEY", "backup-v2")
+    assert result["success"] is True
+    assert result["status"] == "backup_ready"
+    assert "warning" not in result  # OpenAI is multi_key
+
+    vault, _ = load_vault("pw")
+    assert vault["OPENAI_KEY"]["next_value"] == "backup-v2"
+    assert vault["OPENAI_KEY"]["dual_rotation"] is True
+    assert vault["OPENAI_KEY"]["next_added"] is not None
+
+
+def test_set_backup_key_warns_for_single_key_provider(tmp_path, monkeypatch):
+    _seed_vault_with_key(tmp_path, monkeypatch, key_name="DISCORD_TOKEN", provider="Discord")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.set_backup_key("DISCORD_TOKEN", "backup-v2")
+    assert result["success"] is True
+    assert "warning" in result
+    assert "one active key" in result["warning"].lower()
+
+
+def test_set_backup_key_blocked_on_free_tier(tmp_path, monkeypatch):
+    _seed_vault_with_key(tmp_path, monkeypatch)
+    import pushkey_tiers
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "free")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.set_backup_key("OPENAI_KEY", "backup-v2")
+    assert result["success"] is False
+    assert "Pro" in result["error"]
+
+
+def test_rotate_to_backup_promotes_and_clears_slot(tmp_path, monkeypatch):
+    _seed_vault_with_key(tmp_path, monkeypatch)
+    from pushkey_vault import load_vault
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    mcp_mod.set_backup_key("OPENAI_KEY", "backup-v2")
+    result = mcp_mod.rotate_to_backup("OPENAI_KEY")
+    assert result["success"] is True
+    assert result["backup_slot"] == "empty"
+
+    vault, _ = load_vault("pw")
+    assert vault["OPENAI_KEY"]["value"] == "backup-v2"
+    assert vault["OPENAI_KEY"]["next_value"] is None
+    assert vault["OPENAI_KEY"]["next_added"] is None
+
+
+def test_rotate_to_backup_rejects_when_no_backup(tmp_path, monkeypatch):
+    _seed_vault_with_key(tmp_path, monkeypatch)
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    result = mcp_mod.rotate_to_backup("OPENAI_KEY")
+    assert result["success"] is False
+    assert "dual rotation" in result["error"].lower() or "backup" in result["error"].lower()
