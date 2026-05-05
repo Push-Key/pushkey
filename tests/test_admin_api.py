@@ -317,6 +317,64 @@ def test_test_email_no_smtp(client):
     assert "smtp" in body["reason"].lower() or "configured" in body["reason"].lower()
 
 
+# ── Rate limiters ────────────────────────────────────────────────
+@pytest.fixture
+def low_rate_limit_app(tmp_path, monkeypatch):
+    """Re-import cloud_api with tight rate limits so tests run fast."""
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_SECRET", "test-secret")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "2")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    monkeypatch.setenv("PORTAL_RATE_MAX", "2")
+    monkeypatch.setenv("PORTAL_RATE_WINDOW", "60")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+    import importlib, sys
+    if "pushkey_cloud_api" in sys.modules:
+        del sys.modules["pushkey_cloud_api"]
+    return importlib.import_module("pushkey_cloud_api")
+
+
+def test_auth_login_rate_limit(low_rate_limit_app):
+    from fastapi.testclient import TestClient
+    client = TestClient(low_rate_limit_app.app)
+    body = {"email": "u@x.com", "password": "wrong"}
+    # First two requests pass through (return 401 invalid creds, NOT 429)
+    r1 = client.post("/api/v1/auth/login", json=body)
+    r2 = client.post("/api/v1/auth/login", json=body)
+    assert r1.status_code != 429
+    assert r2.status_code != 429
+    # Third hits the limiter
+    r3 = client.post("/api/v1/auth/login", json=body)
+    assert r3.status_code == 429
+    assert "try again" in r3.json()["detail"].lower()
+
+
+def test_auth_register_rate_limit_shares_bucket_with_login(low_rate_limit_app):
+    from fastapi.testclient import TestClient
+    client = TestClient(low_rate_limit_app.app)
+    # Register and login share _AUTH_HITS bucket per-IP — 2 of either trips it
+    r1 = client.post("/api/v1/auth/register", json={"email": "a@x.com", "password": "p"})
+    r2 = client.post("/api/v1/auth/login", json={"email": "a@x.com", "password": "p"})
+    r3 = client.post("/api/v1/auth/register", json={"email": "b@x.com", "password": "p"})
+    assert r1.status_code != 429
+    assert r2.status_code != 429
+    assert r3.status_code == 429
+
+
+def test_portal_lookup_rate_limit(low_rate_limit_app):
+    from fastapi.testclient import TestClient
+    client = TestClient(low_rate_limit_app.app)
+    body = {"email": "anyone@x.com"}
+    r1 = client.post("/api/v1/portal/lookup", json=body)
+    r2 = client.post("/api/v1/portal/lookup", json=body)
+    r3 = client.post("/api/v1/portal/lookup", json=body)
+    assert r1.status_code != 429
+    assert r2.status_code != 429
+    assert r3.status_code == 429
+
+
 # ── Export ───────────────────────────────────────────────────────
 def test_csv_export(client):
     _make_key(client, email="ex@x.com")
