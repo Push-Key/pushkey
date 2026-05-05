@@ -109,11 +109,12 @@ function ViewModal({ lic, onClose }: { lic: License; onClose: () => void }) {
         {/* Tier limits */}
         <div className="border border-white/8 rounded-lg p-4 mb-4">
           <p className="text-[10px] uppercase tracking-wider text-[#94A3B8] mb-3">Tier Limits — {cfg.label}</p>
-          <div className="grid grid-cols-3 gap-3 mb-3">
+          <div className="grid grid-cols-4 gap-3 mb-3">
             {[
-              { label: "Keys",     value: cfg.maxKeys ?? "∞" },
-              { label: "Projects", value: cfg.maxProjects ?? "∞" },
-              { label: "Devices",  value: cfg.maxDevices ?? "∞" },
+              { label: "Keys",         value: cfg.maxKeys ?? "∞" },
+              { label: "Projects",     value: cfg.maxProjects ?? "∞" },
+              { label: "Devices",      value: cfg.maxDevices ?? "∞" },
+              { label: "Agent Tokens", value: lic.agent_token_count != null ? `${lic.agent_token_count} active` : "—" },
             ].map(({ label, value }) => (
               <div key={label} className="text-center">
                 <p className={`text-xl font-bold ${cfg.text}`}>{value}</p>

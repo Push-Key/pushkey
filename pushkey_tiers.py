@@ -102,12 +102,19 @@ def server_heartbeat(license_key: str) -> dict | None:
     """Call /v1/heartbeat. Returns server response or None if unreachable."""
     import platform as _pl
     token = load_token()
+    agent_token_count = 0
+    try:
+        import pushkey_agent_tokens as _at
+        agent_token_count = len(_at.list_tokens())
+    except Exception:
+        pass
     return _server_post("/v1/heartbeat", {
-        "license_key": license_key,
-        "fingerprint": get_machine_fingerprint(),
-        "token":       token.get("token", "") if token else "",
-        "platform":    f"{_pl.system()} {_pl.release()}",
-        "version":     getattr(_s, "VERSION", ""),
+        "license_key":       license_key,
+        "fingerprint":       get_machine_fingerprint(),
+        "token":             token.get("token", "") if token else "",
+        "platform":          f"{_pl.system()} {_pl.release()}",
+        "version":           getattr(_s, "VERSION", ""),
+        "agent_token_count": agent_token_count,
     })
 
 

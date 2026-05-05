@@ -17,6 +17,7 @@ export interface License {
   expires_at?: string | null
   stage?: "trial" | "active" | "converted" | "churned" | "cold"
   sent_invite?: boolean
+  agent_token_count?: number
 }
 
 export interface ContactKey {
@@ -63,6 +64,8 @@ export interface AdminStats {
   revoked: number
   week_delta: number
   today_delta: number
+  mcp_users?: number
+  total_agent_tokens?: number
 }
 
 export interface SupportTicket {
