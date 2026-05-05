@@ -252,7 +252,9 @@ def _migrate_vault(data):
         for key_data in data.get("keys", {}).values():
             if isinstance(key_data, dict):
                 key_data.setdefault("env", "all")
-        data["_schema"] = _s.VAULT_SCHEMA_VERSION
+    # Schema 3: dual-rotation fields (dual_rotation, next_value, next_added).
+    # Fields are optional — absence means False/None. No backfill needed.
+    data["_schema"] = _s.VAULT_SCHEMA_VERSION
     return data
 
 
