@@ -4201,8 +4201,55 @@ class AppFrame(ctk.CTkFrame):
                                fill=C["text3"], anchor="w")
                 labeled_months.add(day.month)
 
+        # ─────────── Dual-rotation section ───────────
+        dr_keys     = [(n, i) for n, i in real_keys if i.get("dual_rotation")]
+        dr_missing  = [(n, i) for n, i in dr_keys if not i.get("next_value")]
+        dr_ready    = [(n, i) for n, i in dr_keys if i.get("next_value")]
+        if dr_keys:
+            sec_hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+            sec_hdr.pack(fill="x", padx=18, pady=(8, 2))
+            ctk.CTkLabel(sec_hdr, text="DUAL-KEY ROTATION",
+                         font=(_UI_FONT, 10, "bold"),
+                         text_color=C["violet"]).pack(side="left")
+            ctk.CTkLabel(sec_hdr,
+                         text=f"  {len(dr_ready)} ready · {len(dr_missing)} need backup",
+                         font=FONT_XS, text_color=C["text3"]).pack(side="left")
+
+            for n, info in dr_missing:
+                outer = ctk.CTkFrame(scroll, fg_color=C["amber"], corner_radius=8)
+                outer.pack(fill="x", padx=18, pady=2)
+                row = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7)
+                row.pack(fill="both", expand=True, padx=(4, 0))
+                inside = ctk.CTkFrame(row, fg_color="transparent")
+                inside.pack(fill="x", padx=14, pady=10)
+                ctk.CTkLabel(inside, text=n, font=FONT_MONO,
+                             text_color=C["text"]).pack(side="left", padx=(0, 8))
+                ctk.CTkLabel(inside, text="backup slot empty",
+                             font=FONT_XS, text_color=C["amber"]).pack(side="left")
+                make_btn(inside, "+ Add Backup",
+                         lambda nm=n: self._set_backup_key(nm),
+                         fg_color=C["violet_dim"], text_color=C["violet"],
+                         width=110, height=24).pack(side="right")
+
+            for n, info in dr_ready:
+                outer = ctk.CTkFrame(scroll, fg_color=C["violet"], corner_radius=8)
+                outer.pack(fill="x", padx=18, pady=2)
+                row = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=7)
+                row.pack(fill="both", expand=True, padx=(4, 0))
+                inside = ctk.CTkFrame(row, fg_color="transparent")
+                inside.pack(fill="x", padx=14, pady=10)
+                ctk.CTkLabel(inside, text=n, font=FONT_MONO,
+                             text_color=C["text"]).pack(side="left", padx=(0, 8))
+                added = info.get("next_added") or "—"
+                ctk.CTkLabel(inside, text=f"backup ready · added {added}",
+                             font=FONT_XS, text_color=C["violet"]).pack(side="left")
+                make_btn(inside, "Promote",
+                         lambda nm=n: self._promote_backup_key(nm),
+                         fg_color=C["violet_dim"], text_color=C["violet"],
+                         width=80, height=24).pack(side="right")
+
         # ─────────── Empty-state CTA when nothing scheduled ───────────
-        if not scheduled:
+        if not scheduled and not dr_keys:
             empty = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=8,
                                  border_width=1, border_color=C["border"])
             empty.pack(fill="x", padx=18, pady=8)
@@ -4654,6 +4701,41 @@ class AppFrame(ctk.CTkFrame):
                     make_btn(btn_col, f"Open {prov or 'Dashboard'}",
                              lambda u=prov_url: webbrowser.open(u),
                              fg_color="transparent", text_color=C["accent"], width=120).pack(pady=(4, 0))
+
+        # ── Dual-rotation status ──
+        dr_keys = [(n, i) for n, i in real_keys if i.get("dual_rotation")]
+        if dr_keys:
+            dr_missing = [(n, i) for n, i in dr_keys if not i.get("next_value")]
+            dr_ready   = [(n, i) for n, i in dr_keys if i.get("next_value")]
+            hdr_color  = C["amber"] if dr_missing else C["violet"]
+            ctk.CTkLabel(pad, text="🔄  DUAL-KEY ROTATION", font=FONT_XS,
+                         text_color=hdr_color).pack(anchor="w", pady=(8, 4))
+
+            summary = ctk.CTkFrame(pad, fg_color=C["surface"], corner_radius=6,
+                                   border_width=1, border_color=C["border"])
+            summary.pack(fill="x", pady=(0, 4))
+            row = ctk.CTkFrame(summary, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=10)
+            ctk.CTkLabel(row,
+                         text=f"{len(dr_ready)} ready · {len(dr_missing)} need backup",
+                         font=FONT_XS, text_color=C["text2"]).pack(side="left")
+
+            for name, info in dr_missing:
+                outer = ctk.CTkFrame(pad, fg_color=C["amber"], corner_radius=6)
+                outer.pack(fill="x", pady=2)
+                inner = ctk.CTkFrame(outer, fg_color=C["surface"], corner_radius=5)
+                inner.pack(fill="both", expand=True, padx=(3, 0))
+                left = ctk.CTkFrame(inner, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+                ctk.CTkLabel(left, text=name, font=FONT_MONO,
+                             text_color=C["text"]).pack(anchor="w")
+                ctk.CTkLabel(left,
+                             text="Backup slot empty — add a backup key to maintain rotation cycle",
+                             font=FONT_XS, text_color=C["amber"]).pack(anchor="w")
+                make_btn(inner, "+ Add Backup",
+                         lambda n=name: self._set_backup_key(n),
+                         fg_color=C["violet_dim"], text_color=C["violet"],
+                         width=110, height=28).pack(side="right", padx=10)
 
         # ── Row 3: Recent Activity Feed ──
         # Filter out garbled/non-English log lines (decryption junk, partial
@@ -5171,6 +5253,22 @@ class AppFrame(ctk.CTkFrame):
                          font=(_UI_FONT, 8, "bold"),
                          text_color=env_color).pack(padx=4, pady=1)
 
+        # Dual-rotation pill — only rendered for keys with dual_rotation enabled
+        if info.get("dual_rotation"):
+            dr_has_backup = bool(info.get("next_value"))
+            dr_bg  = C["green_bg"]  if dr_has_backup else C["amber_bg"]
+            dr_fg  = C["green"]     if dr_has_backup else C["amber"]
+            dr_txt = "🔄 READY"    if dr_has_backup else "🔄 NO BK"
+            dr_slot = ctk.CTkFrame(inner, fg_color="transparent", width=70, height=22)
+            dr_slot.pack(side="right", padx=(0, 2))
+            dr_slot.pack_propagate(False)
+            dr_pill = ctk.CTkFrame(dr_slot, fg_color=dr_bg, corner_radius=8,
+                                   border_width=1, border_color=dr_fg)
+            dr_pill.pack(side="left", anchor="center")
+            ctk.CTkLabel(dr_pill, text=dr_txt,
+                         font=(_UI_FONT, 8, "bold"),
+                         text_color=dr_fg).pack(padx=4, pady=1)
+
         # Key name — fills remaining space; dim when another row is expanded
         name_lbl = ctk.CTkLabel(inner, text=name, font=(_MONO_FONT, 11),
                                 text_color=C["text3"] if is_dimmed else C["text"],
@@ -5309,6 +5407,28 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["btn"], text_color=C["green"],
                  width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
 
+        # ── Dual-rotation section (Pro+) ──────────────────────────
+        from pushkey_tiers import can_do as _can_do_dr
+        if _can_do_dr("dual_rotation"):
+            ctk.CTkFrame(right, fg_color=C["border"], height=1,
+                         corner_radius=0).pack(fill="x", pady=(2, 4))
+            if info.get("dual_rotation"):
+                if info.get("next_value"):
+                    make_btn(right, "↓  Promote Backup",
+                             lambda n=name: self._promote_backup_key(n),
+                             fg_color=C["violet_dim"], text_color=C["violet"],
+                             width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+                else:
+                    make_btn(right, "⊕  Add Backup Key",
+                             lambda n=name: self._set_backup_key(n),
+                             fg_color=C["violet_dim"], text_color=C["violet"],
+                             width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+            else:
+                make_btn(right, "🔄  Dual Rotation",
+                         lambda n=name: self._set_backup_key(n, enable=True),
+                         fg_color=C["btn"], text_color=C["text3"],
+                         width=126, height=28, border=False).pack(fill="x", pady=(0, 4))
+
         make_btn(right, "✕  Revoke", lambda n=name: self.delete_key(n),
                  fg_color=C["red_bg"], text_color=C["red"],
                  width=126, height=28, border=False).pack(fill="x")
@@ -5320,6 +5440,101 @@ class AppFrame(ctk.CTkFrame):
     def _inline_inject(self, name: str):
         self._auto_inject_key(name)
         self._invalidate_tabs("dashboard", "keys", "timeline")
+
+    # ── Dual-rotation handlers ─────────────────────────────────────────────────
+
+    def _set_backup_key(self, name: str, enable: bool = False):
+        """Dialog to store a backup key for dual-key rotation."""
+        from pushkey_tiers import can_do
+        if not can_do("dual_rotation"):
+            self._gate("dual_rotation")
+            return
+        info = self.vault.get(name, {})
+        provider = info.get("provider", "")
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Set Backup Key — {name}")
+        win.geometry("480x280")
+        win.configure(fg_color=C["bg2"])
+        win.transient(self)
+        win.grab_set()
+
+        title_txt = "Enable Dual-Key Rotation" if enable else "Update Backup Key"
+        ctk.CTkLabel(win, text=title_txt, font=FONT_H2, text_color=C["text"]).pack(pady=(16, 2))
+        ctk.CTkLabel(
+            win,
+            text=f"Generate a second key for '{provider or name}' at the provider dashboard,\n"
+                 "then paste it below. Pushkey will hold it until you rotate.",
+            font=FONT_XS, text_color=C["text3"], justify="center",
+        ).pack(pady=(0, 12))
+
+        entry_frame = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=6)
+        entry_frame.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(entry_frame, text="BACKUP KEY VALUE", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", padx=10, pady=(8, 0))
+        bk_entry = ctk.CTkEntry(entry_frame, font=FONT_MONO_SM, fg_color=C["bg3"],
+                                text_color=C["text"], border_color=C["border2"], show="*")
+        bk_entry.pack(fill="x", padx=10, pady=(4, 10))
+        bk_entry.focus()
+
+        err_lbl = ctk.CTkLabel(win, text="", font=FONT_XS, text_color=C["red"])
+        err_lbl.pack()
+
+        def _save():
+            val = bk_entry.get().strip()
+            if not val:
+                err_lbl.configure(text="Backup key value cannot be empty")
+                return
+            val = val.replace("\r", "").replace("\n", "")
+            self.vault[name]["next_value"] = val
+            self.vault[name]["next_added"] = datetime.now().strftime("%Y-%m-%d")
+            was_enabled = self.vault[name].get("dual_rotation", False)
+            self.vault[name]["dual_rotation"] = True
+            self.save()
+            log_event(f"backup key {'added' if was_enabled else 'enabled'}: {name}")
+            win.destroy()
+            self._invalidate_tabs("keys", "dashboard", "timeline")
+            self._render_key_rows()
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack()
+        make_btn(btn_row, "Save Backup Key", _save,
+                 fg_color=C["accent"], text_color=C["bg"],
+                 width=150, height=32).pack(side="left", padx=4)
+        make_btn(btn_row, "Cancel", win.destroy,
+                 fg_color=C["btn"], text_color=C["text3"],
+                 width=80, height=32).pack(side="left", padx=4)
+
+    def _promote_backup_key(self, name: str):
+        """Atomically rotate active→backup, clear backup slot, prompt to add new backup."""
+        info = self.vault.get(name, {})
+        if not info.get("dual_rotation") or not info.get("next_value"):
+            messagebox.showerror("Error", "No backup key stored for this key.")
+            return
+        if not messagebox.askyesno(
+            "Promote Backup Key",
+            f"Promote the backup key to active for '{name}'?\n\n"
+            "• Active key will be discarded from Pushkey\n"
+            "• Backup key becomes the new active value\n"
+            "• Backup slot will be empty (you'll need to add a new backup)\n\n"
+            "After confirming, revoke the OLD key at your provider dashboard.",
+        ):
+            return
+        old_value = self.vault[name]["value"]
+        self.vault[name]["value"] = self.vault[name]["next_value"]
+        self.vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
+        self.vault[name]["next_value"] = None
+        self.vault[name]["next_added"] = None
+        self.save()
+        log_event(f"backup promoted to active: {name}")
+        self._invalidate_tabs("keys", "dashboard", "timeline")
+        self._render_key_rows()
+        messagebox.showinfo(
+            "Rotation Complete",
+            f"'{name}' rotated to backup key.\n\n"
+            "Next step: revoke the old key at your provider,\n"
+            "then add a new backup key to maintain the rotation cycle.",
+        )
 
     def _show_rotate_subpanel(self, name: str):
         self._rotate_pending = True
