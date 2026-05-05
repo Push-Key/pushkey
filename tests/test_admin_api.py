@@ -14,6 +14,9 @@ def app_module(tmp_path, monkeypatch):
     monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PUSHKEY_ADMIN_SECRET", "test-secret")
     monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
+    # Block .env from leaking host SMTP creds into module-level constants
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
 
     # Force reimport so env vars take effect
     import importlib
