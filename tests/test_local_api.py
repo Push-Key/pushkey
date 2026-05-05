@@ -481,3 +481,177 @@ def test_create_agent_token_requires_pro(unlocked, auth):
     r = unlocked.post("/api/agents", headers=auth,
                       json={"name": "ci", "scopes": ["read"]})
     assert r.status_code == 403
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Phase 3 — advanced ops (forecast, lifecycle, audit, init, recovery, backup)
+# ════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def unlocked_with_keys(client, auth):
+    from datetime import datetime, timedelta
+    old = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+    fresh = datetime.now().strftime("%Y-%m-%d")
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "OLD_KEY":   {"value": "old", "env": "prod", "provider": "OpenAI",
+                      "rotated": old,   "created": old,   "projects": []},
+        "FRESH_KEY": {"value": "new", "env": "dev",  "provider": "Stripe",
+                      "rotated": fresh, "created": fresh, "projects": []},
+    })
+    r = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert r.status_code == 200
+    return client
+
+
+# ── health ────────────────────────────────────────────────────────
+def test_health_classifies_keys(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/health", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2
+    stale_names = [k["name"] for k in body["stale"]]
+    assert "OLD_KEY" in stale_names
+    assert 0 <= body["score"] <= 100
+
+
+def test_health_blocked_when_locked(client, auth):
+    r = client.get("/api/health", headers=auth)
+    assert r.status_code == 423
+
+
+# ── forecast ──────────────────────────────────────────────────────
+def test_forecast_lists_due_keys(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/forecast", headers=auth, params={"window_days": 365})
+    body = r.json()
+    names = [u["name"] for u in body["upcoming"]]
+    assert "OLD_KEY" in names
+    overdue = [u for u in body["upcoming"] if u["overdue"]]
+    assert len(overdue) >= 1
+
+
+def test_forecast_window_filters(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/forecast", headers=auth, params={"window_days": 1})
+    # OLD_KEY is far overdue → days_left negative → still <= window_days
+    # FRESH_KEY rotated today, due in 90 (or provider interval); should NOT appear
+    body = r.json()
+    names = [u["name"] for u in body["upcoming"]]
+    assert "FRESH_KEY" not in names
+
+
+# ── lifecycle ─────────────────────────────────────────────────────
+def test_lifecycle_returns_full_record(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/lifecycle/OLD_KEY", headers=auth)
+    body = r.json()
+    assert body["name"] == "OLD_KEY"
+    assert body["age_days"] >= 100
+    assert body["status"] in ("warning", "critical")
+    assert body["next_due_date"]
+
+
+def test_lifecycle_unknown_404(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/lifecycle/NOPE", headers=auth)
+    assert r.status_code == 404
+
+
+# ── audit ─────────────────────────────────────────────────────────
+def test_audit_post_logs_event(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/audit/log", headers=auth,
+                                json={"message": "rotated OLD_KEY"})
+    assert r.status_code == 200
+    listing = unlocked_with_keys.get("/api/audit", headers=auth).json()
+    assert any("rotated OLD_KEY" in e for e in listing["events"])
+
+
+def test_audit_post_requires_message(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/audit/log", headers=auth, json={"message": ""})
+    assert r.status_code == 400
+
+
+# ── init ──────────────────────────────────────────────────────────
+def test_init_creates_vault_when_none(client, auth):
+    r = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["created"] is True
+    assert body["recovery_code"].startswith("PUSH-")
+    assert _s.VAULT_FILE.exists()
+    # Can unlock with that password
+    u = client.post("/api/unlock", headers=auth, json={"password": "newpass-1234"})
+    assert u.status_code == 200
+
+
+def test_init_rejects_when_vault_exists(client, auth):
+    _seed_vault("pw-1234567", "PUSH-AAAA-BBBB-CCCC-DDDD", {})
+    r = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})
+    assert r.status_code == 409
+
+
+def test_init_rejects_short_password(client, auth):
+    r = client.post("/api/init", headers=auth, json={"password": "short"})
+    assert r.status_code == 400
+
+
+# ── recovery / rekey ──────────────────────────────────────────────
+def test_rekey_with_recovery_code(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/vault/rekey", headers=auth,
+                    json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD",
+                          "new_password": "rotated-pass"})
+    assert r.status_code == 200
+    # Old password rejected
+    bad = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert bad.status_code == 401
+    # New password works
+    good = client.post("/api/unlock", headers=auth, json={"password": "rotated-pass"})
+    assert good.status_code == 200
+
+
+def test_rekey_wrong_recovery_code(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/vault/rekey", headers=auth,
+                    json={"recovery_code": "PUSH-WRON-GGGG-WRON-GGGG",
+                          "new_password": "another-pass"})
+    assert r.status_code == 401
+
+
+# ── backup export / import ────────────────────────────────────────
+def test_backup_export_returns_blob(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/backup/export", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["format"] == "pushkey-vault-v3"
+    assert body["size_bytes"] > 0
+    assert len(body["blob_b64"]) > 100
+
+
+def test_backup_import_replaces_vault(client, auth):
+    import base64
+    # First seed and export
+    _seed_vault("orig-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "orig"}})
+    client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
+    exported = client.post("/api/backup/export", headers=auth).json()["blob_b64"]
+    # Modify vault: re-init with different password
+    _s.VAULT_FILE.unlink()
+    _seed_vault("new-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"DIFF": {"value": "v"}})
+    # Import original blob
+    r = client.post("/api/backup/import", headers=auth, json={"blob_b64": exported})
+    assert r.status_code == 200
+    # Original password unlocks, key K is back
+    u = client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
+    assert u.status_code == 200
+
+
+def test_backup_import_rejects_non_v3(client, auth):
+    import base64
+    bad = base64.b64encode(b"NOT_A_VAULT").decode()
+    r = client.post("/api/backup/import", headers=auth, json={"blob_b64": bad})
+    assert r.status_code == 400
+
+
+# ── cloud status ──────────────────────────────────────────────────
+def test_cloud_status(client, auth):
+    r = client.get("/api/cloud/status", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert "tier" in body
+    assert "cloud_sync_available" in body

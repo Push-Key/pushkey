@@ -81,8 +81,38 @@ class AgentCreate(BaseModel):
     scopes: list[str]
 
 
+class InitBody(BaseModel):
+    password: str
+    recovery_code: Optional[str] = None
+
+
+class AddRecoveryBody(BaseModel):
+    password: str
+
+
+class RekeyBody(BaseModel):
+    recovery_code: str
+    new_password: str
+
+
+class ImportBody(BaseModel):
+    blob_b64: str
+
+
 def _gen_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _gen_recovery_code() -> str:
+    """PUSH-XXXX-XXXX-XXXX-XXXX (Crockford-style alphabet, no I/L/O/U)."""
+    alphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
+    parts = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(4)]
+    return "PUSH-" + "-".join(parts)
+
+
+def _now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
 
 
 class _Session:
@@ -538,6 +568,227 @@ def create_app() -> FastAPI:
         import pushkey_agent_tokens as _at
         if not _at.revoke_token(token_id):
             raise HTTPException(404, "token not found")
+
+    # ── Phase 3: advanced ops ────────────────────────────────────────────
+
+    @app.get("/api/health")
+    def get_health(threshold_days: int = 90, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        import pushkey_providers as _prov
+        from datetime import datetime
+        now = datetime.now()
+        stale, healthy, unknown_provider, backup_missing = [], [], [], []
+        score_total = 0
+        for name, meta in sess.vault.items():
+            if name.startswith("_") or not isinstance(meta, dict):
+                continue
+            rotated_str = meta.get("rotated") or meta.get("created", "")
+            try:
+                rotated = datetime.fromisoformat(rotated_str)
+                age_days = (now - rotated).days
+            except Exception:
+                age_days = 9999
+            status_str = _prov.health_status(meta)
+            entry = {"name": name, "provider": meta.get("provider", "Unknown"),
+                     "env": meta.get("env", "all"), "age_days": age_days, "status": status_str}
+            if status_str == "critical" or age_days >= threshold_days:
+                stale.append(entry)
+            else:
+                healthy.append(entry)
+                score_total += 100 if status_str == "healthy" else 60
+            if meta.get("provider") in ("Unknown", "", None):
+                unknown_provider.append(name)
+            if meta.get("dual_rotation") and not meta.get("next_value"):
+                backup_missing.append(name)
+        total_keys = len(healthy) + len(stale)
+        score = int(score_total / max(total_keys, 1))
+        return {
+            "total": total_keys,
+            "healthy": healthy,
+            "stale": stale,
+            "unknown_provider": unknown_provider,
+            "backup_missing": backup_missing,
+            "score": score,
+            "threshold_days": threshold_days,
+        }
+
+    @app.get("/api/forecast")
+    def get_forecast(window_days: int = 90, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        import pushkey_providers as _prov
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        upcoming = []
+        for name, meta in sess.vault.items():
+            if name.startswith("_") or not isinstance(meta, dict):
+                continue
+            provider = meta.get("provider", "")
+            interval = _prov.PROVIDERS.get(provider, {}).get("rotation_days", 90)
+            rotated_str = meta.get("rotated") or meta.get("created", "")
+            try:
+                rotated = datetime.fromisoformat(rotated_str)
+            except Exception:
+                continue
+            due = rotated + timedelta(days=interval)
+            days_left = (due - now).days
+            if days_left <= window_days:
+                upcoming.append({
+                    "name": name,
+                    "provider": provider,
+                    "env": meta.get("env", "all"),
+                    "due_date": due.strftime("%Y-%m-%d"),
+                    "days_left": days_left,
+                    "overdue": days_left < 0,
+                    "has_backup": bool(meta.get("next_value")),
+                })
+        upcoming.sort(key=lambda x: x["days_left"])
+        return {"upcoming": upcoming, "count": len(upcoming), "window_days": window_days}
+
+    @app.get("/api/lifecycle/{name}")
+    def get_lifecycle(name: str, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        import pushkey_providers as _prov
+        from datetime import datetime, timedelta
+        if name.startswith("_") or name not in sess.vault:
+            raise HTTPException(404, "key not found")
+        entry = sess.vault[name]
+        provider = entry.get("provider", "")
+        interval = _prov.PROVIDERS.get(provider, {}).get("rotation_days", 90)
+        rotated_str = entry.get("rotated") or entry.get("created", "")
+        try:
+            rotated = datetime.fromisoformat(rotated_str)
+            age_days = (datetime.now() - rotated).days
+            due = (rotated + timedelta(days=interval)).strftime("%Y-%m-%d")
+        except Exception:
+            age_days = None
+            due = None
+        return {
+            "name": name,
+            "provider": provider,
+            "env": entry.get("env", "all"),
+            "created": entry.get("created"),
+            "rotated": entry.get("rotated"),
+            "age_days": age_days,
+            "rotation_interval_days": interval,
+            "next_due_date": due,
+            "status": _prov.health_status(entry),
+            "dual_rotation": bool(entry.get("dual_rotation")),
+            "next_value_present": bool(entry.get("next_value")),
+            "next_added": entry.get("next_added"),
+            "history": entry.get("history", []) or [],
+            "projects": entry.get("projects", []) or [],
+        }
+
+    # ── audit ─────────────────────────────────────────────────────────────
+
+    @app.get("/api/audit")
+    def get_audit(limit: int = 200, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        from pushkey_crypto import _log_decrypt_all
+        lines = _log_decrypt_all()
+        if limit > 0:
+            lines = lines[-limit:]
+        return {"events": lines, "count": len(lines)}
+
+    @app.post("/api/audit/log")
+    def post_audit(entry: dict = Body(...), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        from pushkey_crypto import log_event
+        msg = entry.get("message", "").strip()
+        if not msg:
+            raise HTTPException(400, "message required")
+        log_event(f"[ui] {msg}")
+        return {"logged": True}
+
+    # ── init / recovery / rekey ──────────────────────────────────────────
+
+    @app.post("/api/init")
+    def init_vault(body: InitBody, _: None = Depends(require_token)):
+        if _s.VAULT_FILE.exists():
+            raise HTTPException(409, "vault already exists")
+        if len(body.password) < 8:
+            raise HTTPException(400, "password must be at least 8 chars")
+        recovery = body.recovery_code or _gen_recovery_code()
+        from pushkey_crypto import encrypt_data_v3
+        import json as _json
+        payload = {"_schema": _s.VAULT_SCHEMA_VERSION, "keys": {}}
+        blob = encrypt_data_v3(_json.dumps(payload), body.password, recovery)
+        _s.ensure_vault_dir()
+        _s.VAULT_FILE.write_bytes(blob)
+        try:
+            os.chmod(_s.VAULT_FILE, 0o600)
+        except Exception:
+            pass
+        return {"created": True, "recovery_code": recovery}
+
+    @app.post("/api/recovery/add")
+    def add_recovery(body: AddRecoveryBody, _: None = Depends(require_token)):
+        if not _s.VAULT_FILE.exists():
+            raise HTTPException(404, "no vault")
+        from pushkey_crypto import add_recovery_key
+        token = _s.VAULT_FILE.read_bytes()
+        recovery = _gen_recovery_code()
+        try:
+            new_blob = add_recovery_key(token, body.password, recovery)
+        except Exception:
+            raise HTTPException(401, "wrong password")
+        _s.VAULT_FILE.write_bytes(new_blob)
+        return {"recovery_code": recovery}
+
+    @app.post("/api/vault/rekey")
+    def rekey(body: RekeyBody, _: None = Depends(require_token)):
+        if not _s.VAULT_FILE.exists():
+            raise HTTPException(404, "no vault")
+        if len(body.new_password) < 8:
+            raise HTTPException(400, "password must be at least 8 chars")
+        from pushkey_crypto import rekey_vault
+        token = _s.VAULT_FILE.read_bytes()
+        try:
+            new_blob = rekey_vault(token, body.recovery_code, body.new_password)
+        except Exception:
+            raise HTTPException(401, "invalid recovery code")
+        _s.VAULT_FILE.write_bytes(new_blob)
+        # Force re-unlock
+        app.state.session.lock()
+        return {"rekeyed": True}
+
+    # ── backup export / import ───────────────────────────────────────────
+
+    @app.post("/api/backup/export")
+    def backup_export(sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+        if not _s.VAULT_FILE.exists():
+            raise HTTPException(404, "no vault")
+        import base64
+        blob = _s.VAULT_FILE.read_bytes()
+        return {
+            "format": "pushkey-vault-v3",
+            "exported_at": _now_iso(),
+            "size_bytes": len(blob),
+            "blob_b64": base64.b64encode(blob).decode(),
+        }
+
+    @app.post("/api/backup/import")
+    def backup_import(body: ImportBody, _: None = Depends(require_token)):
+        import base64
+        try:
+            blob = base64.b64decode(body.blob_b64)
+        except Exception:
+            raise HTTPException(400, "invalid base64")
+        from pushkey_crypto import _V3_MAGIC as _V3
+        if not blob.startswith(_V3):
+            raise HTTPException(400, "not a v3 vault")
+        _s.ensure_vault_dir()
+        _s.VAULT_FILE.write_bytes(blob)
+        app.state.session.lock()
+        return {"imported": True, "bytes": len(blob)}
+
+    # ── cloud (status only — push/pull deferred) ─────────────────────────
+
+    @app.get("/api/cloud/status")
+    def cloud_status(_: None = Depends(require_token)):
+        from pushkey_tiers import current_tier
+        tier = current_tier()
+        tier_meta = _s.TIERS.get(tier, {})
+        return {
+            "tier": tier,
+            "cloud_sync_available": bool(tier_meta.get("cloud_sync")),
+            "endpoint": _s.ACTIVATION_SERVER,
+        }
 
     return app
 
