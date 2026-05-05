@@ -12,7 +12,6 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY pushkey_cloud_api.py ./
 
 ENV PUSHKEY_DATA_DIR=/data
-VOLUME /data
 
 EXPOSE 8000
 
