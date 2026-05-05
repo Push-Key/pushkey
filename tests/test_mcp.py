@@ -323,8 +323,11 @@ def test_assign_key_to_project(tmp_path, monkeypatch):
                            "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
-    result = mcp_mod.assign_key("MY_KEY", "/myapp")
+    from pathlib import Path
+    project_path = str(tmp_path / "myapp")
+    expected = str(Path(project_path).resolve())
+    result = mcp_mod.assign_key("MY_KEY", project_path)
     assert result["success"] is True
 
     vault, _ = load_vault("pw")
-    assert "/myapp" in vault["MY_KEY"]["projects"]
+    assert expected in vault["MY_KEY"]["projects"]
