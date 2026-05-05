@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Commit & Identity Policy (mandatory)
+
+- **Git identity:** always commit as `pushkeydev <pushkeydev@gmail.com>`. Never use `abrown18@gmail.com` or any other identity for this repo. Verify with `git config user.email` before any commit.
+- **No AI attribution in commits:** do NOT append `Co-Authored-By: Claude`, `Generated with Claude Code`, `noreply@anthropic.com`, or any similar AI-tooling attribution to commit messages or PR bodies. Pushkey is shipped as `pushkeydev`'s work.
+- **Client-integration references are allowed:** docs and code MAY mention "Claude Code" / "VS Code" / "Cursor" etc. as MCP client names — those are product integration references, not authorship. Only attribution/co-author lines are forbidden.
+
 ## Commands
 
 ```bash
