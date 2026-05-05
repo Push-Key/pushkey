@@ -64,7 +64,13 @@ app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", os.environ.get("ADMIN_ORIGIN", "")],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://www.push-key.com",
+        "https://push-key.com",
+        os.environ.get("ADMIN_ORIGIN", ""),
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
