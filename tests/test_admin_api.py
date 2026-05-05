@@ -317,6 +317,82 @@ def test_test_email_no_smtp(client):
     assert "smtp" in body["reason"].lower() or "configured" in body["reason"].lower()
 
 
+# ── License-CRM E2E flow ─────────────────────────────────────────
+def test_license_crm_e2e_issue_to_contact_to_invite(client):
+    """End-to-end: issue trial → appears in /contacts → update stage → resend invite."""
+    # 1. Issue a trial license
+    r1 = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
+        "tier": "pro",
+        "email": "lead@example.com",
+        "name": "Sample Lead",
+        "company": "Acme Co",
+        "source": "Direct",
+        "trial_days": 14,
+        "send_email": False,
+    })
+    assert r1.status_code == 200
+    issued = r1.json()
+    assert issued["tier"] == "pro"
+    assert issued["stage"] == "trial"
+    assert issued["expires_at"] is not None
+    assert issued["sent_invite"] is False
+    key = issued["key"]
+
+    # 2. /contacts surfaces the lead
+    r2 = client.get("/api/admin/contacts", headers=ADMIN)
+    assert r2.status_code == 200
+    contacts = r2.json()
+    assert isinstance(contacts, list)
+    found = next((c for c in contacts if c["email"] == "lead@example.com"), None)
+    assert found is not None
+    assert found["company"] == "Acme Co"
+
+    # 3. Update stage trial → converted
+    r3 = client.patch("/api/admin/contacts/lead@example.com", headers=ADMIN,
+                      json={"stage": "converted"})
+    assert r3.status_code == 200
+    assert r3.json()["updated"] == 1
+
+    # 4. Confirm stage written to license file
+    import json as _json
+    from pathlib import Path
+    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
+    data = _json.loads(licenses_file.read_text())
+    assert data[key]["stage"] == "converted"
+
+    # 5. Trigger resend invite (no SMTP → sent=False, but endpoint should not 500)
+    r5 = client.post(f"/api/admin/licenses/{key}/send-invite", headers=ADMIN)
+    assert r5.status_code == 200
+    body = r5.json()
+    assert "sent" in body  # may be False (no SMTP); just verify shape
+
+
+def test_license_crm_auto_expire_flips_status(client):
+    """Issuing with a past expires_at and listing should auto-flip status to expired."""
+    # Issue normally then mutate expires_at to past via direct file (simulating time passing)
+    r = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
+        "tier": "pro", "email": "exp@x.com", "trial_days": 7,
+    })
+    assert r.status_code == 200
+    key = r.json()["key"]
+
+    # Force expires_at into the past
+    import json as _json
+    from pathlib import Path
+    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
+    data = _json.loads(licenses_file.read_text())
+    data[key]["expires_at"] = "2000-01-01T00:00:00"
+    licenses_file.write_text(_json.dumps(data))
+
+    # Hit /contacts which calls _auto_expire
+    r2 = client.get("/api/admin/contacts", headers=ADMIN)
+    assert r2.status_code == 200
+
+    # Reload — status should now be "expired"
+    data2 = _json.loads(licenses_file.read_text())
+    assert data2[key]["status"] == "expired"
+
+
 # ── Rate limiters ────────────────────────────────────────────────
 @pytest.fixture
 def low_rate_limit_app(tmp_path, monkeypatch):
