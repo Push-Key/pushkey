@@ -72,6 +72,13 @@ def _lock():
     _SESSION.clear()
 
 
+# Backward-compat alias for tests written before the password/token split.
+def _unlock(password: str) -> dict:
+    if password.startswith("pk_agent_"):
+        return _unlock_with_token(password)
+    return _unlock_with_password(password)
+
+
 def _require_unlock() -> dict | None:
     if "vault" not in _SESSION:
         return {"error": "vault_locked", "hint": "Call unlock_vault first with master password or agent token"}
