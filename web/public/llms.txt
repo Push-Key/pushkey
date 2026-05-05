@@ -1,0 +1,115 @@
+# Pushkey
+
+> Pushkey is a local encrypted API key vault with a built-in MCP server for Claude Code and VS Code Copilot. Agents can unlock the vault, retrieve keys, inject .env files, check rotation health, and rotate secrets — all without secrets leaving the machine or appearing in conversation history.
+
+## MCP Server
+
+Transport options: stdio (Claude Code), SSE (VS Code Copilot / any SSE client)
+
+### Claude Code setup
+
+Add to `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pushkey": {
+      "command": "python",
+      "args": ["/path/to/pushkey_mcp.py"]
+    }
+  }
+}
+```
+
+### OpenAI Agents SDK setup
+
+```python
+from agents import Agent, MCPServerStdio
+
+pushkey = MCPServerStdio(
+    command="python",
+    args=["/path/to/pushkey_mcp.py"]
+)
+
+agent = Agent(
+    name="DevAgent",
+    mcp_servers=[pushkey]
+)
+```
+
+Replace `/path/to/pushkey_mcp.py` with the absolute path to your local Pushkey install.
+
+### VS Code Copilot setup
+
+Start the SSE server:
+```bash
+python pushkey_mcp.py --port 8765
+```
+
+Add to `.vscode/mcp.json` in your workspace:
+```json
+{
+  "servers": {
+    "pushkey": {
+      "type": "sse",
+      "url": "http://localhost:8765/sse"
+    }
+  }
+}
+```
+
+## Available MCP Tools
+
+Call `unlock_vault` first — all other tools require an active session.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `unlock_vault` | `(password: str)` | Unlock vault; required before all other tools |
+| `lock_vault` | `()` | Clear in-memory session |
+| `list_keys` | `(env?, provider?, project?)` | List all keys (metadata only, no values) |
+| `get_key` | `(name: str)` | Retrieve a key's plaintext value |
+| `add_key` | `(name, value, provider?, env?, notes?, overwrite?)` | Store a new key |
+| `inject_env` | `(project_path, keys?)` | Write keys to `.env` and add `.env` to `.gitignore` |
+| `check_health` | `(rotation_threshold_days?=90)` | Report stale/expiring keys |
+| `rotate_key` | `(name, new_value)` | Update value + rotation timestamp |
+| `list_projects` | `()` | List all projects with assigned keys |
+| `assign_key` | `(key_name, project_path)` | Link a key to a project path |
+
+## Typical Agent Workflow
+
+```
+1. unlock_vault("master-password")
+2. list_keys()                              # see what's available
+3. get_key("OPENAI_API_KEY")               # retrieve a specific value
+4. inject_env("/path/to/project",
+     keys=["OPENAI_API_KEY", "STRIPE_KEY"]) # populate .env
+5. check_health()                           # flag stale keys before deploy
+```
+
+## Claude Code Skill
+
+A companion skill auto-activates when the conversation mentions:
+- API keys, secrets, credentials
+- .env files or environment variables
+- "what keys do I have", "add this key", "set up env for X"
+- Key rotation or expiry
+
+The skill guides Claude through the correct tool call sequence without manual lookup.
+
+## Security Model
+
+- Vault encrypted with AES-256-GCM + Argon2id KDF (600k PBKDF2 fallback)
+- Cloud sync is zero-knowledge — server only stores ciphertext
+- Key values never appear in conversation history or logs
+- `.env` files automatically added to `.gitignore` on `inject_env`
+- Master password never stored; decrypted in-memory only
+
+## Machine-Readable MCP Manifest
+
+GET /.well-known/mcp.json
+
+## Links
+
+- Site: https://pushkey.dev
+- MCP setup guide: https://pushkey.dev/docs/mcp-setup
+- GitHub: https://github.com/pushkeydev/pushkey

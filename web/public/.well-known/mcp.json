@@ -1,0 +1,87 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Pushkey Vault",
+  "name_for_model": "pushkey",
+  "description_for_human": "Local encrypted API key vault with MCP integration for Claude Code and VS Code Copilot.",
+  "description_for_model": "Pushkey provides 9 MCP tools to manage an encrypted local API key vault. Always call unlock_vault first with the user's master password — never guess it. After unlocking, use list_keys to browse available secrets, get_key to retrieve a value, inject_env to write a .env file, check_health to surface stale keys, and rotate_key to update a secret. Values never appear in conversation history; the vault is local and zero-knowledge.",
+  "transports": [
+    {
+      "type": "stdio",
+      "command": "python",
+      "args": ["pushkey_mcp.py"],
+      "description": "Claude Code / OpenAI Agents SDK — local stdio transport"
+    },
+    {
+      "type": "sse",
+      "url": "http://localhost:8765/sse",
+      "description": "VS Code Copilot / any SSE client — run: python pushkey_mcp.py --port 8765"
+    }
+  ],
+  "client_examples": {
+    "claude_code": {
+      "config_file": "~/.claude/claude_desktop_config.json",
+      "snippet": "{\"mcpServers\":{\"pushkey\":{\"command\":\"python\",\"args\":[\"/path/to/pushkey_mcp.py\"]}}}"
+    },
+    "openai_agents_sdk": {
+      "install": "pip install openai-agents",
+      "snippet": "from agents import Agent, MCPServerStdio\npushkey = MCPServerStdio(command='python', args=['/path/to/pushkey_mcp.py'])\nagent = Agent(name='DevAgent', mcp_servers=[pushkey])"
+    }
+  },
+  "tools": [
+    {
+      "name": "unlock_vault",
+      "description": "Unlock the Pushkey vault with the master password. Required before all other tools. Ask the user for the password — never guess."
+    },
+    {
+      "name": "lock_vault",
+      "description": "Clear the in-memory vault session."
+    },
+    {
+      "name": "list_keys",
+      "description": "List all keys in the vault (metadata only, no values). Optional filters: env, provider, project path."
+    },
+    {
+      "name": "get_key",
+      "description": "Get a key's plaintext value by name. Only call when the user explicitly needs the value."
+    },
+    {
+      "name": "add_key",
+      "description": "Add a new key to the vault. Fails if key already exists unless overwrite=true."
+    },
+    {
+      "name": "inject_env",
+      "description": "Write vault keys into a project .env file and ensure .env is added to .gitignore. Confirm with user before writing."
+    },
+    {
+      "name": "check_health",
+      "description": "Report vault health: total keys, stale keys not rotated within threshold (default 90 days), and keys with unknown provider."
+    },
+    {
+      "name": "rotate_key",
+      "description": "Replace a key's value and update its rotated timestamp."
+    },
+    {
+      "name": "list_projects",
+      "description": "List all project paths that have keys assigned, with key counts."
+    },
+    {
+      "name": "assign_key",
+      "description": "Assign a vault key to a project path (adds to the key's projects list)."
+    }
+  ],
+  "skill": {
+    "triggers": [
+      "API keys",
+      "secrets",
+      "credentials",
+      ".env files",
+      "environment variables",
+      "what keys do I have",
+      "add this key",
+      "set up env",
+      "rotate key",
+      "key expiry"
+    ],
+    "skill_file": "~/.claude/skills/pushkey/SKILL.md"
+  }
+}
