@@ -49,6 +49,35 @@ def load_vault(password) -> tuple:
         raise ValueError(f"corrupted:{e}")
 
 
+def load_vault_with_key(vault_key: bytes) -> tuple:
+    """
+    Load vault using a raw vault key (agent token auth path — no master password needed).
+
+    V2 format: _V2_MAGIC(4) + nonce(12) + ct
+    V3 format: _V3_MAGIC(4) + header(184) + body_nonce(12) + body_ct(...)
+    """
+    if not _s.VAULT_FILE.exists():
+        return {}, vault_key
+    try:
+        raw = _s.VAULT_FILE.read_bytes()
+        if raw.startswith(_V3_MAGIC):
+            # body starts after: magic(4)+salt(32)+rec_salt(32)+pw_nonce(12)+pw_ct(48)+rec_nonce(12)+rec_ct(48) = 188
+            payload = raw[4:]
+            body_nonce = payload[184:196]
+            body_ct = payload[196:]
+            plaintext = AESGCM(vault_key).decrypt(body_nonce, body_ct, None)
+        elif raw.startswith(_V2_MAGIC):
+            nonce = raw[4:16]
+            ct = raw[16:]
+            plaintext = AESGCM(vault_key).decrypt(nonce, ct, None)
+        else:
+            return None, None
+        data = _migrate_vault(json.loads(plaintext))
+        return _deserialize_vault(data), vault_key
+    except Exception:
+        return None, None
+
+
 def save_vault(vault, password, *, vault_key=None, recovery_code=None):
     """Save vault. For V3: pass vault_key (preserve existing key) or recovery_code (create new V3)."""
     import shutil

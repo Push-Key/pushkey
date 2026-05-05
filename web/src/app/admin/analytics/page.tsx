@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { BarChart2, TrendingUp, Key, Shield, Activity } from "lucide-react"
+import { BarChart2, TrendingUp, Key, Shield, Activity, Bot } from "lucide-react"
 import { adminApi, type License, type AdminStats } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
@@ -150,11 +150,15 @@ export default function AnalyticsPage() {
       </div>
 
       {/* KPI row */}
-      <div className="grid grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-3 gap-4 mb-4">
         <StatCard icon={<Key size={18} />} label="Total Keys" value={total} sub="All time" color="#00DC82" />
         <StatCard icon={<TrendingUp size={18} />} label="New This Week" value={stats?.week_delta ?? 0} sub="Activations" color="#38BDF8" />
         <StatCard icon={<Shield size={18} />} label="Pro + Team" value={stats?.pro_team ?? 0} sub={`${total ? Math.round(((stats?.pro_team ?? 0) / total) * 100) : 0}% paid`} color="#A78BFA" />
+      </div>
+      <div className="grid grid-cols-3 gap-4 mb-8">
         <StatCard icon={<Activity size={18} />} label="Churn Rate" value={`${rotationRate}%`} sub="Expired or revoked" color="#F59E0B" />
+        <StatCard icon={<Bot size={18} />} label="MCP Users" value={stats?.mcp_users ?? 0} sub={`${total ? Math.round(((stats?.mcp_users ?? 0) / total) * 100) : 0}% of licenses`} color="#A78BFA" />
+        <StatCard icon={<Bot size={18} />} label="Agent Tokens" value={stats?.total_agent_tokens ?? 0} sub="Total active across all users" color="#60A5FA" />
       </div>
 
       <div className="grid grid-cols-3 gap-6 mb-6">
