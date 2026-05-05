@@ -186,6 +186,19 @@ def _resolve_port() -> int:
     return int(os.environ.get("PUSHKEY_LOCAL_PORT", "0") or 0)
 
 
+def _static_dir() -> Optional[str]:
+    """Resolve the bundled web-app/out/ directory if present (dev or PyInstaller)."""
+    from pathlib import Path
+    candidates = [
+        Path(__file__).parent / "web-app" / "out",
+        Path(getattr(__import__("sys"), "_MEIPASS", "")) / "web-app" / "out" if hasattr(__import__("sys"), "_MEIPASS") else None,
+    ]
+    for c in candidates:
+        if c and c.is_dir() and (c / "index.html").exists():
+            return str(c)
+    return None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Pushkey Local API", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = _resolve_token()
@@ -789,6 +802,12 @@ def create_app() -> FastAPI:
             "cloud_sync_available": bool(tier_meta.get("cloud_sync")),
             "endpoint": _s.ACTIVATION_SERVER,
         }
+
+    # ── Static frontend (bundled web-app/out) ─────────────────────────
+    static = _static_dir()
+    if static:
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=static, html=True), name="static")
 
     return app
 
