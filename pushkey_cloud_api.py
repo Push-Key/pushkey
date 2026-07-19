@@ -14,11 +14,14 @@ Configure Pushkey to use: http://your-server:8000
 """
 
 import hashlib
+import hmac
 import html as _html
 import json
 import os
 import secrets
+import threading
 import time
+import base64
 from pathlib import Path
 
 # Load .env if present
@@ -31,6 +34,7 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pushkey_shared import TIERS as PRODUCT_TIERS
 
 def _utcnow() -> datetime:
     """Replacement for deprecated datetime.utcnow() — returns naive UTC datetime."""
@@ -75,6 +79,7 @@ pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -101,7 +106,17 @@ if not ADMIN_SECRET:
             "Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
             "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
         )
-TIER_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
+_KNOWN_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
+TIER_PREFIXES = {tier: _KNOWN_PREFIXES[tier] for tier in PRODUCT_TIERS}
+DEVICE_LIMITS = {
+    tier: definition["max_devices"] for tier, definition in PRODUCT_TIERS.items()
+}
+DEVICE_TOKEN_TTL_DAYS = int(os.environ.get("PUSHKEY_DEVICE_TOKEN_TTL_DAYS", "7"))
+if DEVICE_TOKEN_TTL_DAYS <= 0:
+    raise RuntimeError("PUSHKEY_DEVICE_TOKEN_TTL_DAYS must be greater than zero")
+DEVICE_TOKEN_VERSION = 1
+DEVICE_TOKEN_AUDIENCE = "pushkey-device-license-v1"
+_LICENSE_LOCK = threading.RLock()
 
 
 # ── User store (flat JSON, fine for <1000 users) ─────────────────
@@ -365,72 +380,312 @@ def _load_audit() -> list[dict]:
 # Simple in-memory token bucket rate limiter
 RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
+RATE_LIMIT_MAX_ENTRIES = int(os.environ.get("RATE_LIMIT_MAX_ENTRIES", "10000"))
+RATE_LIMIT_GLOBAL_MULTIPLIER = int(
+    os.environ.get("RATE_LIMIT_GLOBAL_MULTIPLIER", "100")
+)
 AUTH_RATE_MAX         = int(os.environ.get("AUTH_RATE_MAX", "5"))
 AUTH_RATE_WINDOW_SEC  = int(os.environ.get("AUTH_RATE_WINDOW", "60"))
 PORTAL_RATE_MAX       = int(os.environ.get("PORTAL_RATE_MAX", "20"))
 PORTAL_RATE_WINDOW_SEC = int(os.environ.get("PORTAL_RATE_WINDOW", "60"))
 
+for _config_name, _config_value in {
+    "HEARTBEAT_RATE_MAX": RATE_LIMIT_MAX,
+    "HEARTBEAT_RATE_WINDOW": RATE_LIMIT_WINDOW_SEC,
+    "AUTH_RATE_MAX": AUTH_RATE_MAX,
+    "AUTH_RATE_WINDOW": AUTH_RATE_WINDOW_SEC,
+    "PORTAL_RATE_MAX": PORTAL_RATE_MAX,
+    "PORTAL_RATE_WINDOW": PORTAL_RATE_WINDOW_SEC,
+    "RATE_LIMIT_MAX_ENTRIES": RATE_LIMIT_MAX_ENTRIES,
+    "RATE_LIMIT_GLOBAL_MULTIPLIER": RATE_LIMIT_GLOBAL_MULTIPLIER,
+}.items():
+    if _config_value <= 0:
+        raise RuntimeError(f"{_config_name} must be greater than zero")
+
 _HEARTBEAT_HITS: dict[str, list[float]] = {}
+_ACTIVATION_HITS: dict[str, list[float]] = {}
+_DEACTIVATION_HITS: dict[str, list[float]] = {}
 _AUTH_HITS:      dict[str, list[float]] = {}
 _PORTAL_HITS:    dict[str, list[float]] = {}
+_RATE_LOCK = threading.Lock()
 
 
 def _rate_check(bucket: dict, key: str, max_hits: int, window_sec: int) -> bool:
-    """Generic token-bucket check. Returns True if allowed."""
+    """Bounded, thread-safe sliding-window check. Returns True if allowed."""
     now = time.time()
-    hits = [h for h in bucket.get(key, []) if now - h < window_sec]
-    if len(hits) >= max_hits:
+    with _RATE_LOCK:
+        cutoff = now - window_sec
+        hits = [h for h in bucket.get(key, ()) if h > cutoff]
+        if len(hits) >= max_hits:
+            bucket[key] = hits
+            return False
+        hits.append(now)
         bucket[key] = hits
+
+        # Remove expired/empty entries before enforcing the hard memory bound.
+        if len(bucket) > RATE_LIMIT_MAX_ENTRIES:
+            for stale_key in list(bucket):
+                live = [h for h in bucket[stale_key] if h > cutoff]
+                if live:
+                    bucket[stale_key] = live
+                else:
+                    bucket.pop(stale_key, None)
+            if len(bucket) > RATE_LIMIT_MAX_ENTRIES:
+                oldest = sorted(
+                    bucket, key=lambda item: bucket[item][-1]
+                )[: len(bucket) - RATE_LIMIT_MAX_ENTRIES]
+                for stale_key in oldest:
+                    bucket.pop(stale_key, None)
+        return True
+
+
+def _rate_check_request(
+    bucket: dict, identity: str, request: Request, max_hits: int, window_sec: int
+) -> bool:
+    """Limit one license identity and aggregate endpoint traffic."""
+    if not _rate_check(bucket, f"identity:{identity}", max_hits, window_sec):
         return False
-    hits.append(now)
-    bucket[key] = hits
-    if len(bucket) > 10000:
-        bucket.clear()
-    return True
+    return _rate_check(
+        bucket,
+        "global",
+        max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER),
+        window_sec,
+    )
 
 
-def _check_rate_limit(key: str) -> bool:
-    return _rate_check(_HEARTBEAT_HITS, key, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC)
+def _check_rate_limit(key: str, request: Request) -> bool:
+    return _rate_check_request(
+        _HEARTBEAT_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    )
 
 
-async def _handle_heartbeat(body: dict) -> dict:
+def _normalized_expiry(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if expiry.tzinfo:
+        expiry = expiry.astimezone(timezone.utc).replace(tzinfo=None)
+    return expiry
+
+
+def _license_state(entry: dict) -> str:
+    """Return the authoritative current status and apply time-based expiry."""
+    status = entry.get("status", "active")
+    expires_at = entry.get("expires_at")
+    if status == "active" and expires_at:
+        try:
+            expiry = _normalized_expiry(expires_at)
+        except (TypeError, ValueError):
+            entry["status"] = "invalid"
+            return "invalid"
+        if expiry <= _utcnow():
+            entry["status"] = "expired"
+            entry["stage"] = "churned"
+            return "expired"
+    return status
+
+
+def _device_token(license_key: str, fingerprint: str, tier: str) -> str:
+    """Issue a signed, expiring token bound to one license/device/tier."""
+    payload = {
+        "kh": hashlib.sha256(license_key.encode()).hexdigest(),
+        "fp": fingerprint,
+        "tier": tier,
+        "v": DEVICE_TOKEN_VERSION,
+        "aud": DEVICE_TOKEN_AUDIENCE,
+        "exp": (
+            _utcnow() + timedelta(days=DEVICE_TOKEN_TTL_DAYS)
+        ).isoformat(),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ).decode().rstrip("=")
+    signing_key = hmac.new(SECRET_KEY.encode(), b"pushkey/device-token/v1", hashlib.sha256).digest()
+    signature = hmac.new(signing_key, encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _valid_device_token(
+    token: str, license_key: str, fingerprint: str, tier: str
+) -> bool:
+    try:
+        encoded, signature = token.split(".", 1)
+        signing_key = hmac.new(SECRET_KEY.encode(), b"pushkey/device-token/v1", hashlib.sha256).digest()
+        expected = hmac.new(signing_key, encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        return (
+            payload["kh"] == hashlib.sha256(license_key.encode()).hexdigest()
+            and payload["fp"] == fingerprint
+            and payload["tier"] == tier
+            and payload["v"] == DEVICE_TOKEN_VERSION
+            and payload["aud"] == DEVICE_TOKEN_AUDIENCE
+            and _utcnow() <= datetime.fromisoformat(payload["exp"])
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _require_usable_license(licenses: dict, key: str) -> dict:
+    entry = licenses.get(key)
+    if entry is None:
+        raise HTTPException(404, {"code": "license_not_found", "message": "License not found"})
+    status = _license_state(entry)
+    if status == "revoked":
+        raise HTTPException(403, {"code": "license_revoked", "message": "License revoked"})
+    if status == "expired":
+        raise HTTPException(403, {"code": "license_expired", "message": "License expired"})
+    if status != "active":
+        raise HTTPException(403, {"code": "license_unusable", "message": f"License {status}"})
+    tier = entry.get("tier", "")
+    if tier not in DEVICE_LIMITS:
+        raise HTTPException(500, {"code": "invalid_license_tier", "message": "License has invalid tier"})
+    return entry
+
+
+async def _handle_activate(body: dict, request: Request) -> dict:
+    key = body.get("license_key", "").strip().upper()
+    fingerprint = body.get("fingerprint", "").strip()
+    if not key:
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not fingerprint:
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
+    if not _rate_check_request(
+        _ACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    ):
+        raise HTTPException(429, {"code": "rate_limited", "message": "Too many activation requests"})
+
+    def activate_device(licenses):
+        entry = _require_usable_license(licenses, key)
+        tier = entry["tier"]
+        devices = entry.setdefault("devices", {})
+        max_devices = DEVICE_LIMITS[tier]
+        if fingerprint not in devices and (max_devices is not None and len(devices) >= max_devices):
+            plural = "device" if max_devices == 1 else "devices"
+            raise HTTPException(409, {"code": "device_limit_reached", "message": f"Device limit reached ({max_devices} {plural} for {tier.title()} plan)."})
+        now = _utcnow().isoformat()
+        device = devices.setdefault(fingerprint, {"activated_at": now})
+        device.update({"last_seen": now, "platform": body.get("platform", ""), "version": body.get("version", "")})
+        entry["last_heartbeat"] = now
+        entry["platform"] = body.get("platform", "")
+        return entry.copy(), device.copy(), len(devices), max_devices
+
+    entry, device, devices_used, max_devices = _mutate_licenses(activate_device)
+    tier = entry["tier"]
+    _log_event(
+        "device_activated",
+        {"key": key[:8] + "…", "tier": tier, "platform": device["platform"]},
+    )
+    return {
+        "ok": True,
+        "status": "active",
+        "tier": tier,
+        "expires_at": entry.get("expires_at"),
+        "token": _device_token(key, fingerprint, tier),
+        "devices_used": devices_used,
+        "devices_max": max_devices,
+    }
+
+
+async def _handle_deactivate(body: dict, request: Request) -> dict:
+    key = body.get("license_key", "").strip().upper()
+    fingerprint = body.get("fingerprint", "").strip()
+    token = body.get("token", "")
+    if not key:
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not fingerprint:
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
+    if not _rate_check_request(
+        _DEACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    ):
+        raise HTTPException(429, {"code": "rate_limited", "message": "Too many deactivation requests"})
+
+    def deactivate_device(licenses):
+        entry = _require_usable_license(licenses, key)
+        if fingerprint not in entry.setdefault("devices", {}):
+            raise HTTPException(403, {"code": "device_unregistered", "message": "Device not registered"})
+        if not _valid_device_token(token, key, fingerprint, entry["tier"]):
+            raise HTTPException(403, {"code": "token_expired", "message": "Invalid or expired device token"})
+        entry["devices"].pop(fingerprint)
+    _mutate_licenses(deactivate_device)
+    _log_event("device_deactivated", {"key": key[:8] + "…"})
+    return {"ok": True}
+
+
+async def _handle_heartbeat(
+    body: dict, request: Request, *, strict: bool = True
+) -> dict:
     """Shared logic for both /v1/heartbeat and /api/v1/heartbeat."""
     import platform as _pl
     key = body.get("license_key", "").strip().upper()
     if not key:
-        raise HTTPException(400, "license_key required")
-    if not _check_rate_limit(key):
-        raise HTTPException(429, f"Too many heartbeats — limit is {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW_SEC}s")
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not _check_rate_limit(key, request):
+        raise HTTPException(429, {"code": "rate_limited", "message": f"Too many heartbeats — limit is {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW_SEC}s"})
 
     # Accept platform from body, or auto-detect if missing
     platform = body.get("platform", "") or f"{_pl.system()} {_pl.release()}"
     version  = body.get("version", "")
 
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-
-    entry = lic[key]
-    if entry["status"] == "revoked":
-        raise HTTPException(403, "License revoked")
-
-    entry["last_heartbeat"] = _utcnow().isoformat()
-    entry["platform"] = platform
+    fingerprint = body.get("fingerprint", "").strip()
+    token = body.get("token", "")
     agent_token_count = body.get("agent_token_count", 0)
-    if isinstance(agent_token_count, int):
-        entry["agent_token_count"] = agent_token_count
-    _save_licenses(lic)
+    if strict and (not fingerprint or not token):
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint and token required"})
+    def update_heartbeat(lic):
+        entry = _require_usable_license(lic, key)
+        if fingerprint:
+            devices = entry.setdefault("devices", {})
+            if fingerprint not in devices:
+                raise HTTPException(403, {"code": "device_unregistered", "message": "Device not registered. Please reactivate your license."})
+            if not _valid_device_token(token, key, fingerprint, entry["tier"]):
+                raise HTTPException(403, {"code": "token_expired", "message": "Invalid or expired device token"})
+            devices[fingerprint].update({
+                "last_seen": _utcnow().isoformat(),
+                "platform": platform,
+                "version": version,
+            })
+        entry["last_heartbeat"] = _utcnow().isoformat()
+        entry["platform"] = platform
+        if isinstance(agent_token_count, int):
+            entry["agent_token_count"] = agent_token_count
+        return entry.copy()
+
+    entry = _mutate_licenses(update_heartbeat)
 
     _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version, "agent_tokens": agent_token_count})
 
-    # Return shape compatible with both old token flow and new admin flow
-    return {"ok": True, "status": entry["status"], "tier": entry["tier"], "token": ""}
+    return {
+        "ok": True,
+        "status": entry["status"],
+        "tier": entry["tier"],
+        "expires_at": entry.get("expires_at"),
+        "token": _device_token(key, fingerprint, entry["tier"]) if fingerprint else "",
+    }
 
 
-@app.post("/v1/heartbeat")       # path desktop app calls
-@app.post("/api/v1/heartbeat")   # path admin API uses
+@app.post("/v1/heartbeat")
 async def heartbeat(request: Request):
-    return await _handle_heartbeat(await request.json())
+    return await _handle_heartbeat(await request.json(), request, strict=True)
+
+
+@app.post("/api/v1/heartbeat")
+async def heartbeat_alias(request: Request):
+    return await _handle_heartbeat(await request.json(), request, strict=True)
+
+
+@app.post("/v1/activate")
+@app.post("/api/v1/activate")
+async def activate(request: Request):
+    return await _handle_activate(await request.json(), request)
+
+
+@app.post("/v1/deactivate")
+@app.post("/api/v1/deactivate")
+async def deactivate(request: Request):
+    return await _handle_deactivate(await request.json(), request)
 
 
 # ── Admin helpers ────────────────────────────────────────────────
@@ -440,10 +695,21 @@ def _load_licenses() -> dict:
     return json.loads(LICENSES_FILE.read_text())
 
 def _save_licenses(data: dict) -> None:
-    LICENSES_FILE.write_text(json.dumps(data, indent=2))
+    tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, LICENSES_FILE)
+
+
+def _mutate_licenses(mutator):
+    """Run one synchronous license read-modify-write transaction."""
+    with _LICENSE_LOCK:
+        licenses = _load_licenses()
+        result = mutator(licenses)
+        _save_licenses(licenses)
+        return result
 
 def _require_admin(x_admin_secret: str = Header(default="")):
-    if x_admin_secret != ADMIN_SECRET:
+    if not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
         raise HTTPException(403, "Forbidden")
 
 def _gen_key(tier: str) -> str:
@@ -822,7 +1088,7 @@ def _auto_expire(lic: dict) -> bool:
         if (
             entry.get("expires_at")
             and entry["status"] == "active"
-            and entry["expires_at"] < now
+            and _normalized_expiry(entry["expires_at"]) <= _utcnow()
         ):
             entry["status"] = "expired"
             entry["stage"]  = "churned"
@@ -856,9 +1122,7 @@ async def admin_stats(_: None = Depends(_require_admin)):
 
 @app.get("/api/admin/licenses")
 async def admin_list_licenses(_: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if _auto_expire(lic):
-        _save_licenses(lic)
+    lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
     return list(lic.values())
 
 
@@ -868,22 +1132,20 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     tier = body.get("tier", "free").lower()
     if tier not in TIER_PREFIXES:
         raise HTTPException(400, f"tier must be one of: {list(TIER_PREFIXES)}")
-    lic = _load_licenses()
-    key = _gen_key(tier)
-    while key in lic:
+    def generate(lic):
         key = _gen_key(tier)
-    entry = {
-        "key":            key,
-        "tier":           tier,
-        "email":          body.get("email", ""),
-        "platform":       body.get("platform", ""),
-        "activated":      _utcnow().isoformat(),
-        "last_heartbeat": None,
-        "status":         "active",
-        "notes":          body.get("notes", ""),
-    }
-    lic[key] = entry
-    _save_licenses(lic)
+        while key in lic:
+            key = _gen_key(tier)
+        entry = {
+            "key": key, "tier": tier, "email": body.get("email", ""),
+            "platform": body.get("platform", ""), "activated": _utcnow().isoformat(),
+            "last_heartbeat": None, "status": "active",
+            "notes": body.get("notes", ""),
+        }
+        lic[key] = entry
+        return entry.copy()
+    entry = _mutate_licenses(generate)
+    key = entry["key"]
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
     _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]})
     return entry
@@ -919,13 +1181,12 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
     if trial_days is not None:
         expires_at = (_utcnow() + timedelta(days=trial_days)).isoformat()
 
-    lic = _load_licenses()
-    key = _gen_key(tier)
-    while key in lic:
+    def issue(lic):
         key = _gen_key(tier)
-
-    entry = {
-        "key":            key,
+        while key in lic:
+            key = _gen_key(tier)
+        entry = {
+        "key": key,
         "tier":           tier,
         "email":          email,
         "name":           name,
@@ -940,15 +1201,22 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
         "follow_up_date": follow_up,
         "stage":          "trial" if trial_days else "active",
         "sent_invite":    False,
-    }
+        }
+        lic[key] = entry
+        return entry.copy()
 
     email_result = {"sent": False, "reason": "not_requested"}
+    entry = _mutate_licenses(issue)
+    key = entry["key"]
     if send_email:
         email_result = _send_invite_email(email, name, tier, key, expires_at)
-        entry["sent_invite"] = email_result.get("sent", False)
-
-    lic[key] = entry
-    _save_licenses(lic)
+        if email_result.get("sent"):
+            def mark_invited(lic):
+                if key in lic:
+                    lic[key]["sent_invite"] = True
+                    return lic[key].copy()
+                return entry
+            entry = _mutate_licenses(mark_invited)
     _log_event("issued", {"key": key[:8] + "…", "tier": tier, "email": email})
     _log_audit("issue_license", key, {
         "tier": tier, "email": email, "trial_days": trial_days,
@@ -959,9 +1227,7 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
 
 @app.get("/api/admin/contacts")
 async def admin_contacts(_: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if _auto_expire(lic):
-        _save_licenses(lic)
+    lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
 
     by_email: dict[str, dict] = {}
     for entry in lic.values():
@@ -1017,19 +1283,20 @@ async def admin_update_contact(
 ):
     email = email.lower()
     body  = await request.json()
-    lic   = _load_licenses()
-    matched = [v for v in lic.values() if v.get("email", "").lower() == email]
-    if not matched:
-        raise HTTPException(404, "Contact not found")
     allowed = {"name", "company", "follow_up_date", "stage", "notes", "source"}
     changes = {k: v for k, v in body.items() if k in allowed}
-    for entry in matched:
-        for field in allowed:
-            if field in body:
-                entry[field] = body[field]
-    _save_licenses(lic)
-    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": len(matched)})
-    return {"ok": True, "updated": len(matched)}
+    def update_contact(lic):
+        matched = [v for v in lic.values() if v.get("email", "").lower() == email]
+        if not matched:
+            raise HTTPException(404, "Contact not found")
+        for entry in matched:
+            for field in allowed:
+                if field in body:
+                    entry[field] = body[field]
+        return len(matched)
+    matched_count = _mutate_licenses(update_contact)
+    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count})
+    return {"ok": True, "updated": matched_count}
 
 
 @app.post("/api/admin/licenses/{key}/send-invite")
@@ -1037,25 +1304,30 @@ async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
     lic = _load_licenses()
     if key not in lic:
         raise HTTPException(404, "License not found")
-    entry  = lic[key]
+    entry = lic[key].copy()
     result = _send_invite_email(
         entry["email"], entry.get("name", ""), entry["tier"],
         key, entry.get("expires_at")
     )
     if result.get("sent"):
-        entry["sent_invite"] = True
-        _save_licenses(lic)
+        def mark_invited(licenses):
+            if key not in licenses:
+                raise HTTPException(404, "License not found")
+            licenses[key]["sent_invite"] = True
+        _mutate_licenses(mark_invited)
     _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)})
     return result
 
 
 @app.post("/api/admin/licenses/{key}/expire")
 async def admin_expire(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "expired"
-    _save_licenses(lic)
+    def expire(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "expired"
+        return lic[key].copy()
+    entry = _mutate_licenses(expire)
+    lic = {key: entry}
     _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("expire_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1063,12 +1335,14 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
 
 @app.post("/api/admin/licenses/{key}/revoke")
 async def admin_revoke(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "revoked"
-    lic[key]["last_heartbeat"] = None
-    _save_licenses(lic)
+    def revoke(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "revoked"
+        lic[key]["last_heartbeat"] = None
+        return lic[key].copy()
+    entry = _mutate_licenses(revoke)
+    lic = {key: entry}
     _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("revoke_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1076,11 +1350,13 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
 
 @app.post("/api/admin/licenses/{key}/renew")
 async def admin_renew(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "active"
-    _save_licenses(lic)
+    def renew(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "active"
+        return lic[key].copy()
+    entry = _mutate_licenses(renew)
+    lic = {key: entry}
     _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("renew_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1338,17 +1614,12 @@ async def portal_lookup(request: Request):
     if not key:
         raise HTTPException(400, "license_key required")
 
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-
-    entry = lic[key]
-    # Auto-expire if past expiry
-    if (entry.get("expires_at")
-            and entry["status"] == "active"
-            and entry["expires_at"] < _utcnow().isoformat()):
-        entry["status"] = "expired"
-        _save_licenses(lic)
+    def lookup(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        _license_state(lic[key])
+        return lic[key].copy()
+    entry = _mutate_licenses(lookup)
 
     return {
         "key":            entry["key"],
@@ -1420,23 +1691,26 @@ async def admin_bulk_action(request: Request, _: None = Depends(_require_admin))
     if not keys:
         raise HTTPException(400, "keys list required")
 
-    lic = _load_licenses()
-    affected: list[str] = []
-    not_found: list[str] = []
-    for key in keys:
-        if key not in lic:
-            not_found.append(key)
-            continue
-        if action == "expire":
-            lic[key]["status"] = "expired"
-        elif action == "revoke":
-            lic[key]["status"] = "revoked"
-            lic[key]["last_heartbeat"] = None
-        elif action == "renew":
-            lic[key]["status"] = "active"
-        affected.append(key)
-        _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _save_licenses(lic)
+    def update_many(lic):
+        affected: list[tuple[str, str]] = []
+        not_found: list[str] = []
+        for key in keys:
+            if key not in lic:
+                not_found.append(key)
+                continue
+            if action == "expire":
+                lic[key]["status"] = "expired"
+            elif action == "revoke":
+                lic[key]["status"] = "revoked"
+                lic[key]["last_heartbeat"] = None
+            elif action == "renew":
+                lic[key]["status"] = "active"
+            affected.append((key, lic[key]["tier"]))
+        return affected, not_found
+    affected_with_tiers, not_found = _mutate_licenses(update_many)
+    affected = [key for key, _tier in affected_with_tiers]
+    for key, tier in affected_with_tiers:
+        _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": tier})
     _log_audit(f"bulk_{action}", f"{len(affected)} licenses", {
         "affected": [k[:8] + "…" for k in affected],
         "not_found": len(not_found),

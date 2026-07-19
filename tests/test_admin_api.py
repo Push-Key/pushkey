@@ -120,8 +120,10 @@ def test_lifecycle_action_404_for_unknown(client):
 # ── Heartbeat ────────────────────────────────────────────────────
 def test_heartbeat_updates_record(client):
     key = _make_key(client)
-    r = client.post("/v1/heartbeat",
-                    json={"license_key": key, "platform": "TestOS 1.0", "version": "1.2.3"})
+    activated = client.post("/v1/activate", json={"license_key": key, "fingerprint": "admin-test"}).json()
+    r = client.post("/api/v1/heartbeat",
+                    json={"license_key": key, "fingerprint": "admin-test", "token": activated["token"],
+                          "platform": "TestOS 1.0", "version": "1.2.3"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -133,21 +135,24 @@ def test_heartbeat_updates_record(client):
 
 
 def test_heartbeat_unknown_key_404(client):
-    r = client.post("/v1/heartbeat", json={"license_key": "FAKE-KEY"})
+    r = client.post("/api/v1/heartbeat", json={"license_key": "FAKE-KEY", "fingerprint": "x", "token": "x"})
     assert r.status_code == 404
 
 
 def test_heartbeat_revoked_key_blocked(client):
     key = _make_key(client)
+    activated = client.post("/v1/activate", json={"license_key": key, "fingerprint": "admin-test"}).json()
     client.post(f"/api/admin/licenses/{key}/revoke", headers=ADMIN)
-    r = client.post("/v1/heartbeat", json={"license_key": key})
+    r = client.post("/api/v1/heartbeat", json={"license_key": key, "fingerprint": "admin-test", "token": activated["token"]})
     assert r.status_code == 403
 
 
 def test_heartbeat_alias_path(client):
     """Both /v1/heartbeat and /api/v1/heartbeat should work."""
     key = _make_key(client)
-    r = client.post("/api/v1/heartbeat", json={"license_key": key, "platform": "Linux"})
+    activated = client.post("/v1/activate", json={"license_key": key, "fingerprint": "admin-test"}).json()
+    r = client.post("/api/v1/heartbeat", json={"license_key": key, "fingerprint": "admin-test",
+                                               "token": activated["token"], "platform": "Linux"})
     assert r.status_code == 200
 
 
@@ -482,10 +487,12 @@ def test_csv_export_filtered_by_status(client):
 def test_heartbeat_rate_limit(client, monkeypatch):
     """Default limit is 10 per 60s — 11th hit should 429."""
     key = _make_key(client)
+    token = client.post("/v1/activate", json={"license_key": key, "fingerprint": "rate-test"}).json()["token"]
     for _ in range(10):
-        r = client.post("/v1/heartbeat", json={"license_key": key})
+        r = client.post("/api/v1/heartbeat", json={"license_key": key, "fingerprint": "rate-test", "token": token})
         assert r.status_code == 200
-    r = client.post("/v1/heartbeat", json={"license_key": key})
+        token = r.json()["token"]
+    r = client.post("/api/v1/heartbeat", json={"license_key": key, "fingerprint": "rate-test", "token": token})
     assert r.status_code == 429
 
 

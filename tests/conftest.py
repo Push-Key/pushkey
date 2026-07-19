@@ -14,3 +14,14 @@ def isolate_vault_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey_shared, "IMPORT_DIR", tmp_path / "import")
     monkeypatch.setattr(pushkey_shared, "LICENSE_FILE", tmp_path / ".license")
     monkeypatch.setattr(pushkey_shared, "TOKEN_FILE", tmp_path / ".token")
+    try:
+        import pushkey_tiers
+        pushkey_tiers._LICENSE_CACHE = None
+    except ImportError:
+        pass
+    yield
+    try:
+        import pushkey_tiers
+        pushkey_tiers._LICENSE_CACHE = None
+    except ImportError:
+        pass
