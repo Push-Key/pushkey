@@ -8,6 +8,22 @@ This file provides guidance to AI coding agents when working with code in this r
 - **No AI attribution in commits:** do NOT append `Co-Authored-By: Claude`, `Generated with Claude Code`, `noreply@anthropic.com`, or any similar AI-tooling attribution to commit messages or PR bodies. Pushkey is shipped as `pushkeydev`'s work.
 - **Client-integration references are allowed:** docs and code MAY mention "Claude Code" / "VS Code" / "Cursor" etc. as MCP client names — those are product integration references, not authorship. Only attribution/co-author lines are forbidden.
 
+## MCP Plaintext-over-Chat Policy (mandatory for agents)
+
+When driving Pushkey via MCP, choose the rotation/add path by key lifetime:
+
+| Key lifetime | Path | Why |
+|--------------|------|-----|
+| Short-lived (dev, test, sandbox, throwaway) | `add_key` / `rotate_key` / `set_backup_key` over MCP | Fast, plaintext exposure acceptable when key is disposable |
+| Long-lived (prod, shared, anything you'd rotate on a schedule) | Local CLI (`pushkey add` / `rotate` / `set-backup` — getpass) | Secret never reaches LLM provider or chat transcript |
+| Long-lived, agent-driven rotation | Pre-stage backup via CLI, then `rotate_to_backup(name)` over MCP | Only the *name* crosses the LLM channel |
+
+Plaintext MCP write tools (`add_key`, `rotate_key`, `set_backup_key`) return a
+`warning` field. Agents MUST surface that warning to the user when the call
+succeeds, including the suggested CLI alternative for production keys. Do not
+swallow the warning silently. See `SECURITY.md` → "MCP / LLM Channel" for the
+full threat model.
+
 ## Commands
 
 ```bash
@@ -17,7 +33,7 @@ python pushkey.py
 # Run CLI
 python pushkey_cli.py --help
 
-# Run all tests (107 tests)
+# Run all tests (256 tests)
 pytest
 
 # Single test file
@@ -130,9 +146,10 @@ Then `Read` that PNG and visually confirm it matches the user's source. If they 
 
 ### Crypto Layer
 
-Two vault formats, both using `~/.pushkey/vault.enc`:
+Three vault formats, all using `~/.pushkey/vault.enc`:
 
-- **V2** (current): magic `PK2\x00`, AES-256-GCM, Argon2id KDF (time=3, mem=64MB, par=4) or PBKDF2 fallback at 600k iterations. Nonce is 12 bytes prepended to ciphertext.
+- **V3** (current): magic `PK3\x00`, AES-256-GCM envelope encryption with independent master-password and recovery-code slots wrapping the vault key.
+- **V2** (legacy): magic `PK2\x00`, AES-256-GCM, Argon2id KDF (time=3, mem=64MB, par=4) or PBKDF2 fallback at 600k iterations. Nonce is 12 bytes prepended to ciphertext.
 - **Legacy V1**: Fernet (AES-128-CBC). Auto-detected on load, user prompted to migrate.
 - **Team vault**: magic `PKT2`, ephemeral salt embedded in payload (not persisted to disk).
 

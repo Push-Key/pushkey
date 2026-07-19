@@ -8,7 +8,7 @@
 [![npm](https://img.shields.io/badge/npm-%40pushkey%2Fcli-cb3837?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/@pushkey/cli)
 [![License](https://img.shields.io/badge/license-MIT-7c3aed?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3572A5?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-107%20passing-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/tests-256%20passing-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-64748b?style=for-the-badge)](#installation)
 
 <br/>
@@ -325,7 +325,7 @@ pushkey/
 ## 🧪 Tests
 
 ```bash
-# 🧪 Run all 107 tests
+# 🧪 Run all 256 tests
 pytest
 
 # 🔍 Single module with verbose output
