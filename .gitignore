@@ -20,6 +20,7 @@ env/
 *.swo
 .claude/settings.local.json
 .claude/settings.json
+.claude/scheduled_tasks.lock
 
 # OS
 .DS_Store
