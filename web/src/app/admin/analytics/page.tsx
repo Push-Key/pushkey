@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { BarChart2, TrendingUp, Key, Shield, Activity, Bot } from "lucide-react"
+import { TrendingUp, Key, Shield, Activity, Bot } from "lucide-react"
 import { adminApi, type License, type AdminStats } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
@@ -54,14 +54,17 @@ function DonutChart({ slices, size = 120 }: {
   const r = size / 2 - 12
   const cx = size / 2
   const cy = size / 2
-  let angle = -Math.PI / 2
-  const paths = slices.map(s => {
+  const paths = slices.map((s, index) => {
+    const angle = slices.slice(0, index).reduce(
+      (current, previous) => current + (previous.value / total) * 2 * Math.PI,
+      -Math.PI / 2,
+    )
     const sweep = (s.value / total) * 2 * Math.PI
     const x1 = cx + r * Math.cos(angle)
     const y1 = cy + r * Math.sin(angle)
-    angle += sweep
-    const x2 = cx + r * Math.cos(angle)
-    const y2 = cy + r * Math.sin(angle)
+    const endAngle = angle + sweep
+    const x2 = cx + r * Math.cos(endAngle)
+    const y2 = cy + r * Math.sin(endAngle)
     const large = sweep > Math.PI ? 1 : 0
     return { ...s, d: `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z` }
   })

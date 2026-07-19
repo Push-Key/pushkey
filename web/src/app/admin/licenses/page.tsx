@@ -2,7 +2,7 @@
 import { useEffect, useState, useMemo, useCallback, Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import { Search, Download, Plus, ChevronLeft, ChevronRight, X, Check, Copy } from "lucide-react"
-import { adminApi, maskKey, timeAgo, fmtDate, fmtDateOrDash, isExpiringSoon, type License, type IssueKeyRequest, type IssueKeyResponse } from "@/lib/admin-api"
+import { adminApi, maskKey, timeAgo, fmtDate, fmtDateOrDash, isExpiringSoon, type License, type IssueKeyRequest } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
 // ── Tier config ──────────────────────────────────────────────────
@@ -465,7 +465,10 @@ function LicensesInner() {
       .finally(() => setLoading(false))
   }, [secret])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0)
+    return () => window.clearTimeout(timer)
+  }, [load])
 
   const filtered = useMemo(() => {
     let list = licenses

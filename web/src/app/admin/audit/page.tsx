@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { ShieldCheck, Filter, RefreshCw } from "lucide-react"
 import { adminApi, type AuditEntry } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
@@ -43,16 +43,19 @@ export default function AuditPage() {
   const [filter, setFilter]   = useState<string>("All")
   const [search, setSearch]   = useState("")
 
-  function load() {
+  const load = useCallback(() => {
     if (!secret) return
     setLoading(true)
     adminApi.audit(secret)
       .then(setEntries)
       .catch(() => {})
       .finally(() => setLoading(false))
-  }
+  }, [secret])
 
-  useEffect(() => { load() }, [secret])
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0)
+    return () => window.clearTimeout(timer)
+  }, [load])
 
   const filterOptions = useMemo(() => {
     const set = new Set(entries.map(e => e.action))

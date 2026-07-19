@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { MessageSquare, ChevronDown, ChevronUp, CheckCircle, Clock, AlertCircle } from "lucide-react"
 import { adminApi, type SupportTicket } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
@@ -38,11 +38,14 @@ export default function SupportPage() {
   const [submitting, setSubmitting] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  function load() {
+  const load = useCallback(() => {
     if (!secret) return
     adminApi.listTickets(secret).then(setTickets).catch(() => {})
-  }
-  useEffect(() => { load() }, [secret])
+  }, [secret])
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0)
+    return () => window.clearTimeout(timer)
+  }, [load])
 
   async function submitTicket() {
     if (!form.subject || !form.message) return

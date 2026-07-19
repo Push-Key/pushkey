@@ -126,7 +126,7 @@ export default function ComparisonTable() {
             Why developers choose PushKey
           </h2>
           <p className="text-lg max-w-xl mx-auto" style={{ color: "#94A3B8" }}>
-            The only secrets manager that's local-first, provider-aware, and doesn't require a cloud account to start.
+            The only secrets manager that&apos;s local-first, provider-aware, and doesn&apos;t require a cloud account to start.
           </p>
         </div>
 

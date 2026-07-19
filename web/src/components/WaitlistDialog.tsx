@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { X, Check, Loader2 } from "lucide-react"
 
 interface Props {
@@ -21,21 +21,19 @@ export default function WaitlistDialog({
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle")
   const [error, setError] = useState<string>("")
 
+  const handleClose = useCallback(() => {
+    setStatus("idle")
+    setError("")
+    onClose()
+  }, [onClose])
+
   // Close on Escape
   useEffect(() => {
     if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose() }
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") handleClose() }
     document.addEventListener("keydown", handler)
     return () => document.removeEventListener("keydown", handler)
-  }, [open, onClose])
-
-  // Reset state when dialog reopens
-  useEffect(() => {
-    if (open) {
-      setStatus("idle")
-      setError("")
-    }
-  }, [open])
+  }, [handleClose, open])
 
   if (!open) return null
 
@@ -67,7 +65,7 @@ export default function WaitlistDialog({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background: "rgba(6,11,20,0.85)", backdropFilter: "blur(4px)" }}
-      onClick={onClose}
+      onClick={handleClose}
     >
       <div
         onClick={e => e.stopPropagation()}
@@ -75,7 +73,7 @@ export default function WaitlistDialog({
         style={{ background: "#0D1B2A", border: "1px solid rgba(124,58,237,0.3)", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
       >
         <button
-          onClick={onClose}
+          onClick={handleClose}
           aria-label="Close"
           className="absolute top-4 right-4 p-1 rounded-md transition-colors"
           style={{ color: "#64748B" }}
@@ -98,7 +96,7 @@ export default function WaitlistDialog({
               We&apos;ll email <strong style={{ color: "#F8FAFC" }}>{email}</strong> the moment it&apos;s ready.
             </p>
             <button
-              onClick={onClose}
+              onClick={handleClose}
               className="mt-6 text-sm px-5 py-2 rounded-lg font-medium"
               style={{ background: "rgba(255,255,255,0.06)", color: "#F8FAFC", border: "1px solid rgba(255,255,255,0.1)" }}
             >
