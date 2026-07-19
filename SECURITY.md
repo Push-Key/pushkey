@@ -216,6 +216,53 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 | Cloud server compromise | Zero-knowledge — server stores only ciphertext |
 | Key accidentally committed to git | Git scan (Starter+) + `inject` always writes `.gitignore` guard |
 | Master password stolen, no physical access | Recovery code cannot be derived from the master password |
+| Secret pasted into LLM chat (MCP `add_key` / `rotate_key` / `set_backup_key`) | **Not mitigated by this repo** — the secret enters the MCP client context and may be transmitted to or retained by the model provider, client transcript, or telemetry. Use the CLI (`pushkey add` / `pushkey rotate`, getpass) for production keys; reserve plaintext MCP tools for short-lived dev keys. See "MCP / LLM Channel" below. |
+
+---
+
+## MCP / LLM Channel
+
+Pushkey ships an MCP server (`pushkey_mcp.py`) so AI agents (Claude Code, VS
+Code Copilot, Cursor, etc.) can drive the vault. The MCP server itself runs
+locally and reads/writes only the local encrypted vault. **The LLM driving it
+does not.** Tool arguments enter the MCP client context and, depending on the
+client and provider configuration, may be transmitted to a model provider or
+retained in transcripts or telemetry.
+
+This means plaintext-argument tools have a different threat surface than the
+CLI, even though both ultimately write to the same encrypted vault.
+
+| Tool | Argument shape | Plaintext exposure |
+|------|----------------|--------------------|
+| `list_keys`, `check_health`, `list_projects` | none / filters | none |
+| `get_key(name)` | name only; **plaintext value returned** | secret enters the MCP client context and may be retained by the client, model provider, transcript, or telemetry |
+| `inject_env(project_path, keys)` | names + path | none (writes to local `.env`) |
+| `rotate_to_backup(name)` | name only | none |
+| `unlock_vault(password)` | password / agent token | password enters the MCP client context and may be transmitted or retained depending on the client/provider — prefer scoped agent tokens (`pk_agent_…`) and revoke after use |
+| `add_key(name, value, …)` | **plaintext value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+| `rotate_key(name, new_value)` | **plaintext new_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+| `set_backup_key(name, backup_value)` | **plaintext backup_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+
+### Recommended Policy
+
+- **Dev / throwaway / sandbox keys** — plaintext MCP tools are acceptable.
+  Speed > secrecy when the key will be discarded inside the day.
+- **Long-lived / production keys** — use the CLI:
+  ```
+  pushkey add <NAME>          # getpass prompt, no echo
+  pushkey rotate <NAME>       # getpass prompt, no echo
+  pushkey set-backup <NAME>   # getpass prompt, no echo
+  ```
+  These read the secret via `getpass.getpass()` so it never reaches an LLM
+  provider, the chat transcript, or your shell history.
+
+  For LLM-driven rotation of production keys, pre-stage a backup with the CLI
+  and trigger promotion from chat with `rotate_to_backup(name)` — only the
+  key *name* crosses the wire.
+
+Each plaintext-argument MCP tool now returns a `warning` field reminding the
+agent (and the user) which path was used and which path is preferred for
+production keys.
 
 ---
 

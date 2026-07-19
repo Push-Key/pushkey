@@ -163,6 +163,9 @@ def test_add_key_persists(tmp_path, monkeypatch):
     mcp_mod._unlock("pw")
     result = mcp_mod.add_key("NEW_KEY", "new-value", provider="OpenAI", env="dev")
     assert result["success"] is True
+    assert "warning" in result
+    assert "MCP client context" in result["warning"]
+    assert "pushkey add NEW_KEY" in result["warning"]
 
     vault, _ = load_vault("pw")
     assert "NEW_KEY" in vault
@@ -211,6 +214,10 @@ def test_inject_env_writes_file(tmp_path, monkeypatch):
     mcp_mod._unlock("pw")
     result = mcp_mod.inject_env(str(project_dir), keys=["OPENAI_KEY"])
     assert result["success"] is True
+    assert result["injected_count"] == 1
+    assert result["injected_names"] == ["OPENAI_KEY"]
+    assert "sk-abc" not in repr(result)
+    assert "OPENAI_KEY=sk-abc" not in repr(result)
     env_file = project_dir / ".env"
     assert env_file.exists()
     content = env_file.read_text()
@@ -243,6 +250,8 @@ def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
 
 
 def test_check_health_stale(tmp_path, monkeypatch):
+    from datetime import datetime as real_datetime, timedelta
+
     import pushkey_shared as _s
     monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
     monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
@@ -251,14 +260,23 @@ def test_check_health_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(_s, "LOG_FILE", tmp_path / "pushkey.log")
 
     from pushkey_vault import save_vault
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 19, tzinfo=tz)
+
+    frozen_now = FixedDatetime.now()
+    stale_date = (frozen_now - timedelta(days=91)).strftime("%Y-%m-%d")
+    fresh_date = (frozen_now - timedelta(days=1)).strftime("%Y-%m-%d")
     vault = {
-        "OLD_KEY": {"value": "v", "created": "2020-01-01", "rotated": "2020-01-01",
+        "OLD_KEY": {"value": "v", "created": stale_date, "rotated": stale_date,
                     "provider": "Unknown", "env": "dev", "projects": [], "notes": ""},
-        "NEW_KEY": {"value": "v2", "created": "2026-04-01", "rotated": "2026-04-01",
+        "NEW_KEY": {"value": "v2", "created": fresh_date, "rotated": fresh_date,
                     "provider": "Unknown", "env": "dev", "projects": [], "notes": ""},
     }
     save_vault(vault, "pw")
     mcp_mod = _fresh_mcp()
+    monkeypatch.setattr(mcp_mod, "datetime", FixedDatetime)
     mcp_mod._unlock("pw")
     result = mcp_mod.check_health()
     stale_names = [k["name"] for k in result["stale_keys"]]
@@ -281,6 +299,9 @@ def test_rotate_key_updates_value(tmp_path, monkeypatch):
     mcp_mod._unlock("pw")
     result = mcp_mod.rotate_key("MY_KEY", "new-value")
     assert result["success"] is True
+    assert "warning" in result
+    assert "MCP client context" in result["warning"]
+    assert "pushkey rotate" in result["warning"]
 
     vault, _ = load_vault("pw")
     assert vault["MY_KEY"]["value"] == "new-value"
@@ -359,7 +380,9 @@ def test_set_backup_key_writes_next_value(tmp_path, monkeypatch):
     result = mcp_mod.set_backup_key("OPENAI_KEY", "backup-v2")
     assert result["success"] is True
     assert result["status"] == "backup_ready"
-    assert "warning" not in result  # OpenAI is multi_key
+    assert "warning" in result
+    assert "MCP client context" in result["warning"]
+    assert "local CLI" in result["warning"]
 
     vault, _ = load_vault("pw")
     assert vault["OPENAI_KEY"]["next_value"] == "backup-v2"

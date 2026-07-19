@@ -3,13 +3,21 @@
 import { useEffect, useState } from "react";
 import { Sidebar, type Tab } from "@/components/sidebar";
 import { LoginScreen } from "@/components/login-screen";
+import { DashboardTab } from "@/components/dashboard-tab";
 import { VaultTab } from "@/components/vault-tab";
+import { ProjectsTab } from "@/components/projects-tab";
+import { HealthTab } from "@/components/health-tab";
+import { ForecastTab } from "@/components/forecast-tab";
+import { LifecycleTab } from "@/components/lifecycle-tab";
+import { AuditTab } from "@/components/audit-tab";
+import { AgentsTab } from "@/components/agents-tab";
+import { SettingsTab } from "@/components/settings-tab";
 import { api, type StatusResp } from "@/lib/api";
 import { captureTokenFromUrl } from "@/lib/auth";
 
 export default function Page() {
   const [status, setStatus] = useState<StatusResp | null>(null);
-  const [tab, setTab] = useState<Tab>("vault");
+  const [tab, setTab] = useState<Tab>("dashboard");
   const [tokenReady, setTokenReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,15 +75,15 @@ export default function Page() {
     <div className="flex h-screen">
       <Sidebar active={tab} onSelect={setTab} onLock={lock} keyCount={status.key_count} />
       <main className="flex-1 overflow-auto p-6">
-        {tab === "vault" && <VaultTab />}
-        {tab !== "vault" && (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--color-muted-foreground)]">
-            <div className="rounded-md border bg-[var(--color-card)] px-6 py-4">
-              <div className="font-medium capitalize">{tab}</div>
-              <div className="mt-1 text-xs">Coming in a later phase.</div>
-            </div>
-          </div>
-        )}
+        {tab === "dashboard" && <DashboardTab onNavigate={(t) => setTab(t as Tab)} />}
+        {tab === "vault"     && <VaultTab />}
+        {tab === "projects"  && <ProjectsTab />}
+        {tab === "health"    && <HealthTab />}
+        {tab === "forecast"  && <ForecastTab />}
+        {tab === "lifecycle" && <LifecycleTab />}
+        {tab === "audit"     && <AuditTab />}
+        {tab === "agents"    && <AgentsTab />}
+        {tab === "settings"  && <SettingsTab onLock={lock} />}
       </main>
     </div>
   );

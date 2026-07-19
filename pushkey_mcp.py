@@ -8,6 +8,36 @@ Usage:
 Authentication
     Master password : unlock_vault("my-master-password")
     Agent token     : unlock_vault("pk_agent_...")   # Pro+ only
+
+────────────────────────────────────────────────────────────────────────────
+Plaintext-over-chat policy (read this before using write tools)
+────────────────────────────────────────────────────────────────────────────
+Tool arguments enter the MCP client context and, depending on the client and
+provider configuration, may cross the model-provider boundary or be retained
+in transcripts or telemetry. The vault itself remains local and encrypted.
+
+Safe by argument and output shape:
+    ✅ Metadata/name-only  (list_keys, check_health, rotate_to_backup,
+                            inject_env)
+    ⚠️  Secret-bearing     (get_key) — the returned value enters the MCP
+        output              client context and may be retained by the client,
+                            model provider, transcript, or telemetry
+    ⚠️  Plaintext-secret    (add_key, rotate_key, set_backup_key) —
+        tools                value may be sent to a model provider or retained
+                             in client transcripts or telemetry
+
+Recommended use:
+    • Dev / throwaway / test keys     → plaintext MCP tools are fine, fast
+    • Long-lived / production keys    → use the local CLI (getpass) instead:
+                                          pushkey add  <NAME>
+                                          pushkey rotate <NAME>
+                                          pushkey set-backup <NAME>
+                                        Then drive promotion from chat with
+                                          rotate_to_backup(<NAME>)
+                                        — only the name crosses the wire.
+
+Each plaintext tool returns a `warning` field so the agent can surface this
+choice to the user at call time.
 """
 from mcp.server.fastmcp import FastMCP
 
@@ -149,7 +179,12 @@ def list_keys(env: str = None, provider: str = None, project: str = None) -> dic
 
 @mcp.tool()
 def get_key(name: str) -> dict:
-    """Get the value and metadata of a specific key from the vault by name."""
+    """Return a key's plaintext value and metadata.
+
+    The returned value enters the MCP client context and may be retained by the
+    client, model provider, chat transcript, or telemetry. Use only when that
+    exposure is acceptable; prefer inject_env for local file injection.
+    """
     err = _require_scope("read")
     if err:
         return err
@@ -175,7 +210,16 @@ def add_key(
     notes: str = "",
     overwrite: bool = False,
 ) -> dict:
-    """Add a new key to the vault. Fails if key already exists unless overwrite=True. Requires 'write' scope."""
+    """Add a new key to the vault. Fails if key already exists unless overwrite=True. Requires 'write' scope.
+
+    ⚠️  PLAINTEXT-OVER-CHAT WARNING
+    The `value` argument enters the MCP client context and may be transmitted
+    to a model provider or retained in client transcripts or telemetry.
+    Acceptable for short-lived dev/test keys.
+    For long-lived production keys, prefer the local CLI:  pushkey add <NAME>
+    (uses getpass — secret never leaves the machine). Returned response will
+    include a reminder field so the agent can relay this to the user.
+    """
     err = _require_scope("write")
     if err:
         return err
@@ -198,7 +242,17 @@ def add_key(
         "notes": notes,
     }
     _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
-    return {"success": True, "name": name, "provider": provider}
+    return {
+        "success": True,
+        "name": name,
+        "provider": provider,
+        "warning": (
+            "Key value entered the MCP client context and may be retained by the client, "
+            "model provider, transcript, or telemetry. "
+            "OK for dev/test keys. For production keys, add via local CLI: "
+            f"`pushkey add {name}` (hidden prompt, no LLM exposure)."
+        ),
+    }
 
 
 @mcp.tool()
@@ -235,7 +289,8 @@ def inject_env(project_path: str, keys: list[str] = None) -> dict:
             if "=" in line and not line.startswith("#"):
                 existing_keys.add(line.split("=", 1)[0].strip())
 
-    new_lines = [f"{k}={_sanitize_key_value(vault[k]['value'])}" for k in keys if k not in existing_keys]
+    injected_names = [k for k in keys if k not in existing_keys]
+    new_lines = [f"{k}={_sanitize_key_value(vault[k]['value'])}" for k in injected_names]
     all_lines = existing_lines + new_lines
     env_path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
 
@@ -245,7 +300,14 @@ def inject_env(project_path: str, keys: list[str] = None) -> dict:
         with open(gitignore_path, "a", encoding="utf-8") as f:
             f.write("\n.env\n")
 
-    return {"success": True, "injected": new_lines, "skipped_existing": list(existing_keys & set(keys))}
+    skipped_names = sorted(existing_keys & set(keys))
+    return {
+        "success": True,
+        "injected_count": len(injected_names),
+        "injected_names": injected_names,
+        "skipped_count": len(skipped_names),
+        "skipped_existing": skipped_names,
+    }
 
 
 @mcp.tool()
@@ -287,7 +349,21 @@ def check_health(rotation_threshold_days: int = 90) -> dict:
 
 @mcp.tool()
 def rotate_key(name: str, new_value: str) -> dict:
-    """Replace a key's value and update its rotated timestamp. Requires 'write' scope."""
+    """Replace a key's value and update its rotated timestamp. Requires 'write' scope.
+
+    ⚠️  PLAINTEXT-OVER-CHAT WARNING
+    `new_value` enters the MCP client context and may be transmitted to a model
+    provider or retained in client transcripts or telemetry. Use this path only
+    for short-lived dev/test keys
+    where speed matters more than secrecy.
+
+    For long-lived production keys, prefer one of:
+      • Local CLI:        pushkey rotate <NAME>     (getpass prompt, never sees LLM)
+      • Dual-rotation:    rotate_to_backup(<NAME>)  (only the name crosses the wire,
+                          backup pre-staged via CLI `pushkey set-backup`)
+
+    Returned response includes a `warning` field for the agent to relay.
+    """
     err = _require_scope("write")
     if err:
         return err
@@ -299,7 +375,17 @@ def rotate_key(name: str, new_value: str) -> dict:
     vault[name]["value"] = _sanitize_key_value(new_value)
     vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
     _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
-    return {"success": True, "name": name, "rotated": vault[name]["rotated"]}
+    return {
+        "success": True,
+        "name": name,
+        "rotated": vault[name]["rotated"],
+        "warning": (
+            "New key value entered the MCP client context and may be retained by the "
+            "client, model provider, transcript, or telemetry. "
+            "OK for dev/test keys. For production keys, prefer `pushkey rotate` (CLI, getpass) "
+            "or pre-stage a backup and use rotate_to_backup() so secrets never cross chat."
+        ),
+    }
 
 
 @mcp.tool()
@@ -312,6 +398,13 @@ def set_backup_key(name: str, backup_value: str) -> dict:
     prompted to add a new backup key to keep the rotation cycle going.
 
     Requires 'write' scope and a master password session.
+
+    ⚠️  PLAINTEXT-OVER-CHAT WARNING
+    `backup_value` enters the MCP client context and may be transmitted to a
+    model provider or retained in client transcripts or telemetry. For
+    long-lived production keys, seed the backup via the local
+    CLI instead (no LLM exposure), then use rotate_to_backup() — which only
+    sends the key NAME over the wire, never the secret.
     """
     err = _require_scope("write")
     if err:
@@ -345,8 +438,16 @@ def set_backup_key(name: str, backup_value: str) -> dict:
     except Exception:
         pass
     result = {"success": True, "name": name, "backup_added": vault[name]["next_added"], "status": "backup_ready"}
+    plaintext_warning = (
+        "Backup value entered the MCP client context and may be retained by the client, "
+        "model provider, transcript, or telemetry. "
+        "OK for dev/test keys. For production, seed backups via local CLI to keep "
+        "secrets off the wire, then use rotate_to_backup() (name-only) for promotion."
+    )
     if warning:
-        result["warning"] = warning
+        result["warning"] = f"{warning}  {plaintext_warning}"
+    else:
+        result["warning"] = plaintext_warning
     return result
 
 
