@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta
 import pytest
-from pushkey_providers import detect_provider, days_since, health_status, PROVIDERS
+from pushkey_providers import (
+    PROVIDERS,
+    days_since,
+    days_since_at,
+    detect_provider,
+    health_status,
+    health_status_at,
+)
 
 
 def test_detect_by_name_pattern_openai():
@@ -56,6 +63,11 @@ def test_days_since_invalid_string():
     assert days_since("not-a-date") == float("inf")
 
 
+def test_days_since_at_is_deterministic():
+    now = datetime(2026, 1, 10, 12, 0, 0)
+    assert days_since_at("2026-01-08T12:00:00", now) == 2
+
+
 def test_health_status_healthy():
     info = {"created": datetime.now().isoformat(), "provider": None}
     assert health_status(info) == "healthy"
@@ -84,6 +96,12 @@ def test_health_status_supabase_longer_threshold():
     dt = (datetime.now() - timedelta(days=100)).isoformat()
     info = {"created": dt, "provider": "Supabase"}
     assert health_status(info) == "healthy"
+
+
+def test_health_status_at_uses_injected_time_and_provider_threshold():
+    now = datetime(2026, 1, 10, 12, 0, 0)
+    info = {"created": "2025-12-06T12:00:00", "provider": "HashiCorp Vault"}
+    assert health_status_at(info, now) == "critical"
 
 
 def test_providers_contains_openai():

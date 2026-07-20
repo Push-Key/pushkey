@@ -98,29 +98,42 @@ def provider_supports_multi_key(provider_name: str) -> bool:
     return bool(prov.get("multi_key", True))  # default True — optimistic for unknown providers
 
 
-def days_since(date_str):
+def days_since_at(date_str, now):
+    """Return whole elapsed days using an injected clock."""
     if not date_str:
         return float("inf")
     try:
         dt = datetime.fromisoformat(date_str)
-        return (datetime.now() - dt).days
+        if dt.tzinfo is not None and now.tzinfo is None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        elif dt.tzinfo is None and now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
+        return (now - dt).days
     except Exception:
         return float("inf")
 
 
-def health_status(key_info):
-    age = days_since(key_info.get("rotated") or key_info.get("created"))
+def days_since(date_str):
+    return days_since_at(date_str, datetime.now())
+
+
+def health_status_at(key_info, now):
+    age = days_since_at(key_info.get("rotated") or key_info.get("created"), now)
     provider = key_info.get("provider")
     threshold = 90
     if provider and provider in PROVIDERS:
         threshold = PROVIDERS[provider].get("rotation_days", 90)
-    use_age = days_since(key_info.get("first_used"))
+    use_age = days_since_at(key_info.get("first_used"), now)
     effective_age = min(age, use_age) if use_age != float("inf") else age
     if effective_age > threshold:
         return "critical"
     if effective_age > threshold * 0.67:
         return "warning"
     return "healthy"
+
+
+def health_status(key_info):
+    return health_status_at(key_info, datetime.now())
 
 
 PROVIDERS = _load_providers()
