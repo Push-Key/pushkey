@@ -13,6 +13,7 @@ env/
 .pytest_cache/
 .pytest_tmp/
 .pytest-*/
+.test-tmp/
 
 # IDE
 .vscode/
