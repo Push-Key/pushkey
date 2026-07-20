@@ -96,7 +96,7 @@ from pushkey_crypto import (
 )
 from pushkey_vault import migrate_vault_to_v3
 from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes
-from pushkey_health import write_health_sidecar as _publish_health_sidecar
+from pushkey_health import HealthSidecarError, HealthUnavailableError, write_health_sidecar as _publish_health_sidecar
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
     get_machine_fingerprint,
@@ -123,8 +123,14 @@ def write_health_sidecar(vault):
         revision = getattr(vault, "_pushkey_revision", None)
         if revision is not None:
             _publish_health_sidecar(vault, expected_vault_revision=revision)
-    except Exception:
-        pass
+        return True
+    except HealthSidecarError:
+        # The vault save remains valid; never include sidecar details in the audit log.
+        try:
+            log_event("health_publication_failed")
+        except Exception:
+            pass
+        return False
 
 
 
@@ -1692,22 +1698,32 @@ class LoginFrame(ctk.CTkFrame):
             if new_pw != new_pw2:
                 err_lbl.configure(text="Passwords don't match")
                 return
+            health_warning = False
             try:
                 raw = VAULT_FILE.read_bytes()
                 new_token = rekey_vault(raw, rec_code, new_pw)
                 replace_encrypted_vault_bytes(new_token)
                 log_event("master password reset via recovery key")
-                win.destroy()
-                self.err.configure(
-                    text="Password reset — unlock with your new password",
-                    text_color=C["green"],
-                )
-                self.pw.delete(0, "end")
+            except HealthUnavailableError:
+                # The password reset was committed before sidecar invalidation failed.
+                health_warning = True
+                try:
+                    log_event("master password reset via recovery key; health_publication_failed")
+                except Exception:
+                    pass
             except (ValueError, OSError) as e:
                 if "wrong_recovery_code" in str(e):
                     err_lbl.configure(text="Recovery key incorrect — check your written copy")
                 else:
                     err_lbl.configure(text=f"Error: {e}")
+                return
+            win.destroy()
+            self.err.configure(
+                text=("Password reset. Health status needs refresh" if health_warning
+                      else "Password reset — unlock with your new password"),
+                text_color=C["amber"] if health_warning else C["green"],
+            )
+            self.pw.delete(0, "end")
 
         make_btn(form, "Reset Password", _submit,
                  fg_color=C["accent"], text_color="#FFFFFF",

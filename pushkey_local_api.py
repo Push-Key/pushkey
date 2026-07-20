@@ -52,7 +52,9 @@ from pushkey_vault import (
     rekey_v3_password,
     save_vault,
     replace_encrypted_vault_bytes,
+    VaultBusyError,
 )
+from pushkey_health import HealthUnavailableError
 
 
 AUTOLOCK_SECONDS_DEFAULT = 15 * 60
@@ -1136,6 +1138,8 @@ def create_app() -> FastAPI:
             raise HTTPException(401, "invalid recovery code")
         except (VaultFormatError, VaultIntegrityError):
             raise HTTPException(422, "vault cannot be rekeyed")
+        except (HealthUnavailableError, VaultBusyError):
+            raise HTTPException(503, "health sidecar unavailable")
         except OSError:
             raise HTTPException(500, "vault rekey failed")
         # Force re-unlock
@@ -1173,6 +1177,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "truncated v3 vault")
         try:
             replace_encrypted_vault_bytes(blob)
+        except (HealthUnavailableError, VaultBusyError):
+            raise HTTPException(503, "health sidecar unavailable")
         except OSError:
             raise HTTPException(500, "vault import failed")
         app.state.session.lock()

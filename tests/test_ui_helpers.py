@@ -28,6 +28,34 @@ def test_log_line_age_days_invalid_date_returns_inf():
 import types
 
 
+def test_gui_health_publication_failure_records_sanitized_audit(monkeypatch):
+    from pushkey_health import HealthBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(HealthBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
+def test_gui_health_unsafe_path_records_sanitized_audit(monkeypatch):
+    from pushkey_health import HealthPathError
+
+    events = []
+    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(HealthPathError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
 def test_toggle_expand_opens_key():
     class FakeApp:
         _expanded_key = None

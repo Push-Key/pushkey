@@ -933,6 +933,17 @@ def test_rekey_wrong_recovery_code(client, auth):
     assert r.status_code == 401
 
 
+def test_rekey_reports_health_lock_timeout_without_details(client, auth, fresh_app, monkeypatch):
+    from pushkey_health import HealthBusyError
+
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    monkeypatch.setattr(fresh_app, "rekey_v3_password", lambda *args: (_ for _ in ()).throw(HealthBusyError()))
+    r = client.post("/api/vault/rekey", headers=auth,
+                    json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD", "new_password": "rotated-pass"})
+    assert r.status_code == 503
+    assert r.json()["detail"] == "health sidecar unavailable"
+
+
 # ── backup export / import ────────────────────────────────────────
 def test_backup_export_returns_blob(unlocked_with_keys, auth):
     r = unlocked_with_keys.post("/api/backup/export", headers=auth)
@@ -972,6 +983,17 @@ def test_backup_import_rejects_non_v3(client, auth):
     bad = base64.b64encode(b"NOT_A_VAULT").decode()
     r = client.post("/api/backup/import", headers=auth, json={"blob_b64": bad})
     assert r.status_code == 400
+
+
+def test_backup_import_reports_unsafe_health_path_without_details(client, auth, fresh_app, monkeypatch):
+    import base64
+    from pushkey_health import HealthPathError
+
+    blob = base64.b64encode(b"PK3\x00" + b"x" * 196).decode()
+    monkeypatch.setattr(fresh_app, "replace_encrypted_vault_bytes", lambda *args: (_ for _ in ()).throw(HealthPathError()))
+    r = client.post("/api/backup/import", headers=auth, json={"blob_b64": blob})
+    assert r.status_code == 503
+    assert r.json()["detail"] == "health sidecar unavailable"
 
 
 # ── cloud status ──────────────────────────────────────────────────
