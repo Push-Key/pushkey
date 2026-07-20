@@ -103,6 +103,8 @@ git commit -m "Add bounded shared file locking"
 - Create: `pushkey_health.py`
 - Create: `tests/test_health_sidecar.py`
 - Modify: `tests/conftest.py`
+- Modify: `pushkey_providers.py`
+- Modify: `tests/test_providers.py`
 
 - [ ] **Step 1: Write failing v1 document tests**
 
@@ -136,7 +138,7 @@ Expected: FAIL because `pushkey_health` does not exist.
 
 - [ ] **Step 4: Implement pure schema APIs**
 
-Implement `build_health_document`, `validate_health_document`, `encode_health_document`, and `decode_health_document`. Import `pushkey_shared as _s` only for paths, call provider health policy rather than duplicating GUI thresholds, and raise stable health reason codes without source values.
+Implement `build_health_document`, `validate_health_document`, `encode_health_document`, and `decode_health_document`. Refactor `pushkey_providers` with an injectable-time health-policy helper while preserving existing public behavior; call that helper rather than duplicating GUI thresholds. Import `pushkey_shared as _s` only for paths, and raise stable health reason codes without source values.
 
 - [ ] **Step 5: Implement freshness validation**
 
@@ -153,7 +155,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit schema ownership**
 
 ```powershell
-git add pushkey_health.py tests/test_health_sidecar.py tests/conftest.py
+git add pushkey_health.py pushkey_providers.py tests/test_health_sidecar.py tests/test_providers.py tests/conftest.py
 git commit -m "Add strict health sidecar v1 schema"
 ```
 
