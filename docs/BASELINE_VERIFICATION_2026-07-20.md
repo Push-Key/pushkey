@@ -9,7 +9,7 @@ Baseline tag: `production-readiness-baseline-20260720`
 
 The Phase 0 verification commands complete successfully in an isolated Python
 environment. The previous test "hangs" were command time limits shorter than
-the real cryptographic suite runtime. Verification exposed and fixed four genuine
+the real cryptographic suite runtime. Verification exposed and fixed five genuine
 baseline defects:
 
 - canonical licensing contract tests still used the removed
@@ -18,13 +18,17 @@ baseline defects:
 - the admin frontend used an empty readiness value after session validation,
   which prevented authenticated pages from loading data; and
 - pytest retention settings and a copied read-only integrity manifest left
-  temporary test trees behind on Windows.
+  temporary test trees behind on Windows; and
+- standalone integrity generation could not replace its own read-only manifest
+  on Windows.
 
 The licensing tests now use the administrator session cookie and CSRF contract.
 New cloud account and administrator password hashes use Argon2id. Legacy bcrypt
 hash verification remains available, with bcrypt constrained below 5.0.
 Authenticated admin pages now receive a non-secret readiness sentinel. Passing
 tests remove their temporary directories, while failed tests retain diagnostics.
+Integrity generation temporarily makes an existing manifest writable, replaces
+it, and restores read-only protection.
 
 ## Host and toolchain
 
@@ -116,6 +120,7 @@ setting.
 | Python compileall for `pushkey*.py` and `server/` | Passed |
 | `web-app`: `npm run build` | Passed |
 | `web-app` static integrity generation | Passed, 30 assets |
+| `web-app`: two consecutive `npm run integrity` executions | Passed |
 | `web`: `npm run lint` | Passed after removing one unused parameter warning |
 | `web`: `npm run build` | Passed, 32 pages generated |
 | `git diff --check` | Passed |
