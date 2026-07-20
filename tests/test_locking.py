@@ -134,3 +134,13 @@ def test_bounded_file_lock_enforces_private_mode_for_existing_file(tmp_path):
     os.chmod(lock_path, 0o644)
     with bounded_file_lock(lock_path):
         assert lock_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_bounded_file_lock_raises_when_vault_lock_mode_cannot_be_enforced(tmp_path, monkeypatch):
+    import pushkey_locking
+    lock_path = tmp_path / ".vault.lock"
+    monkeypatch.setattr(pushkey_locking, "_enforce_private_mode", lambda _path: (_ for _ in ()).throw(OSError("chmod")))
+    with pytest.raises(OSError, match="chmod"):
+        with bounded_file_lock(lock_path):
+            pass

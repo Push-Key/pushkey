@@ -248,6 +248,25 @@ def test_health_paths_reject_symlinks(tmp_path, kind):
     assert external.read_text() == "unchanged"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junctions are reparse points")
+def test_health_paths_reject_windows_junction_parent(tmp_path):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    target = tmp_path / "target"; target.mkdir()
+    junction = tmp_path / "junction"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True, text=True, check=False,
+    )
+    if created.returncode:
+        pytest.skip("Windows junction creation is unavailable in this environment")
+    with pytest.raises(HealthPathError, match="health_path_unsafe"):
+        write_health_sidecar({}, junction / "health.json", generated_at=NOW, expected_vault_revision=revision)
+    assert not (target / "health.json").exists()
+
+
 def test_revision_mismatch_prevents_write_and_invalidation(tmp_path):
     import hashlib
     import pushkey_shared as shared
@@ -360,6 +379,37 @@ def test_final_sidecar_mode_failure_aborts_publication(tmp_path, monkeypatch):
     monkeypatch.setattr(pushkey_health.os, "chmod", fail_final_chmod)
     with pytest.raises(HealthUnavailableError, match="health_write_failed"):
         write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_temporary_mode_enforcement_failure_preserves_snapshot(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    original = encode_health_document(valid_document()); path.write_bytes(original)
+    monkeypatch.setattr(pushkey_health, "_enforce_private_mode", lambda _path: (_ for _ in ()).throw(OSError("temp chmod")))
+    with pytest.raises(HealthUnavailableError, match="health_write_failed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob(".health.*.tmp"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_health_lock_mode_enforcement_failure_preserves_snapshot(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_locking
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    original = encode_health_document(valid_document()); path.write_bytes(original)
+    monkeypatch.setattr(pushkey_locking, "_enforce_private_mode", lambda _path: (_ for _ in ()).throw(OSError("lock chmod")))
+    with pytest.raises(HealthUnavailableError, match="health_write_failed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    assert path.read_bytes() == original
 
 
 def test_path_inspection_failure_uses_typed_path_error(tmp_path, monkeypatch):
