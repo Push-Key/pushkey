@@ -13,7 +13,7 @@
 | Completed production phase gates | 1/13, 7.7% |
 | Phase 0 baseline | Complete |
 | CP1 health sidecar design | Complete and approved |
-| CP1 health sidecar implementation | In progress (Task 1: shared bounded lock) |
+| CP1 health sidecar implementation | In progress (Task 1 complete; Task 2: strict health sidecar owner) |
 | Agentic authorization design | Complete and approved |
 | Agentic authorization implementation plan | Complete and approved |
 | Authorization implementation | Not started |
@@ -39,8 +39,8 @@
 
 Execute CP1, the versioned `health.json` v1 sidecar contract:
 
-1. Implement CP1 Task 1: add and verify the shared bounded file lock.
-2. Add the strict health sidecar owner.
+1. CP1 Task 1 complete: shared bounded file lock implemented and verified.
+2. CP1 Task 2: add the strict health sidecar owner.
 3. Publish only approved local-sensitive metadata after plaintext-aware vault saves.
 4. Invalidate stale sidecar data after encrypted vault replacement.
 5. Update loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
@@ -61,8 +61,8 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 ## Resume Procedure
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
-2. Continue CP1 Task 1 with the shared bounded lock implementation and its subprocess tests.
-3. After Task 1 is committed, proceed to the strict health sidecar owner.
+2. Continue CP1 Task 2: implement the strict health sidecar owner.
+3. After Task 2 is committed, proceed to approved local-sensitive metadata publication.
 4. Use a fresh implementation subagent and two independent reviews per completed task.
 5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
 6. Do not begin authorization implementation until CP1 is complete.

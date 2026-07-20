@@ -75,17 +75,44 @@ def test_second_process_times_out_then_acquires_after_release(tmp_path):
     assert lock_path.read_bytes() == b"\0"
 
 
-def test_exception_in_first_holder_does_not_strand_lock(tmp_path):
+def test_exception_in_first_holder_releases_lock_before_process_exit(tmp_path):
     lock_path = tmp_path / "shared.lock"
-    released = _run_lock_process(
-        lock_path,
-        "with bounded_file_lock(lock_path):\n    raise RuntimeError('holder failed')",
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "from pushkey_locking import bounded_file_lock",
+                    "import sys",
+                    "lock_path = Path(r'''%s''')" % lock_path,
+                    "try:",
+                    "    with bounded_file_lock(lock_path):",
+                    "        raise RuntimeError('holder failed')",
+                    "except RuntimeError:",
+                    "    print('released', flush=True)",
+                    "sys.stdin.readline()",
+                ]
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        text=True,
     )
-    assert released.returncode != 0
-
-    acquired = _run_lock_process(lock_path, "with bounded_file_lock(lock_path):\n    print('acquired')")
-    assert acquired.returncode == 0, acquired.stderr
-    assert acquired.stdout.strip() == "acquired"
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == "released"
+    assert child.poll() is None
+    try:
+        acquired = _run_lock_process(lock_path, "with bounded_file_lock(lock_path):\n    print('acquired')")
+        assert acquired.returncode == 0, acquired.stderr
+        assert acquired.stdout.strip() == "acquired"
+    finally:
+        assert child.stdin is not None
+        child.stdin.close()
+        assert child.wait(timeout=5.0) == 0
 
 
 @pytest.mark.parametrize("kwargs", [
