@@ -1,5 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
+import pushkey_providers
 from pushkey_providers import (
     PROVIDERS,
     days_since,
@@ -71,9 +72,19 @@ def test_health_status_aware_timestamp_uses_legacy_invalid_date_behavior():
     assert health_status({"created": "2026-01-10T12:00:00+00:00"}) == "critical"
 
 
-def test_days_since_at_is_deterministic():
-    now = datetime(2026, 1, 10, 12, 0, 0)
-    assert days_since_at("2026-01-08T12:00:00", now) == 2
+@pytest.mark.parametrize(("date_str", "now", "expected"), [
+    ("2026-01-08T12:00:00", datetime(2026, 1, 10, 12, 0, 0), 2),
+    ("2026-01-08T07:00:00-05:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc), 2),
+    ("2026-01-08T09:00:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone(timedelta(hours=3))), 2),
+])
+def test_days_since_at_normalizes_naive_and_aware_values_to_utc(date_str, now, expected):
+    assert days_since_at(date_str, now) == expected
+
+
+@pytest.mark.parametrize("date_str", ["not-a-date", float("nan"), "2026-01-11T12:00:00+00:00"])
+def test_days_since_at_rejects_invalid_and_future_values(date_str):
+    now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    assert days_since_at(date_str, now) == float("inf")
 
 
 def test_health_status_healthy():
@@ -110,6 +121,16 @@ def test_health_status_at_uses_injected_time_and_provider_threshold():
     now = datetime(2026, 1, 10, 12, 0, 0)
     info = {"created": "2025-12-06T12:00:00", "provider": "HashiCorp Vault"}
     assert health_status_at(info, now) == "critical"
+
+
+@pytest.mark.parametrize("metadata", [None, [], "invalid", {"rotation_days": True},
+                          {"rotation_days": 0}, {"rotation_days": -1},
+                          {"rotation_days": float("nan")}, {"rotation_days": "30"}])
+def test_health_status_at_uses_default_threshold_for_malformed_provider_metadata(monkeypatch, metadata):
+    monkeypatch.setattr(pushkey_providers, "PROVIDERS", {"Cached": metadata})
+    now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    info = {"created": "2025-11-01T12:00:00+00:00", "provider": "Cached"}
+    assert health_status_at(info, now) == "warning"
 
 
 def test_providers_contains_openai():
