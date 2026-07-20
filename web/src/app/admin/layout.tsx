@@ -117,7 +117,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         return
       }
       adminApi.me()
-        .then(() => setSecret(""))
+        .then(() => setSecret("session-authenticated"))
         .catch(() => router.replace("/admin/login"))
     }, 0)
     return () => window.clearTimeout(timer)

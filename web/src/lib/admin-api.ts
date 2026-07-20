@@ -204,7 +204,8 @@ export const adminApi = {
       body: JSON.stringify({ action, keys }),
     }),
 
-  async downloadBackup(s: string): Promise<void> {
+  async downloadBackup(_secret: string): Promise<void> {
+    void _secret
     const r = await fetch(`${API}/api/admin/backup`, { credentials: "include", headers: h() })
     if (!r.ok) throw new Error("Backup failed")
     const blob = await r.blob()
