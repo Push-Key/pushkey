@@ -46,6 +46,16 @@ ADMIN = {"X-CSRF-Token": ""}
 
 
 # ── Auth ─────────────────────────────────────────────────────────
+def test_admin_password_hashes_use_argon2id_with_legacy_bcrypt_support(app_module):
+    current_hash = app_module.pwd_ctx.hash("new-admin-pass")
+    legacy_hash = (
+        "$2b$12$1wvUC.77g2YzkuvqwBC7U.LCeVwNGDkd4PhcrNS7lpADnPxOMj9TO"
+    )
+
+    assert current_hash.startswith("$argon2id$")
+    assert app_module.pwd_ctx.verify("legacy-admin-pass", legacy_hash)
+
+
 def test_admin_endpoints_reject_missing_secret(client):
     client.cookies.clear()
     r = client.get("/api/admin/stats")

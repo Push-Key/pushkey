@@ -5,7 +5,7 @@ Zero-knowledge: server stores only the encrypted vault blob.
 It never sees plaintext keys. Auth is email + password (hashed).
 
 Requirements:
-    pip install fastapi uvicorn[standard] passlib[bcrypt] python-jose[cryptography]
+    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt python-jose[cryptography]
 
 Run:
     uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
@@ -75,7 +75,7 @@ USERS_FILE = DATA_DIR / "users.json"
 VAULTS_DIR = DATA_DIR / "vaults"
 VAULTS_DIR.mkdir(exist_ok=True)
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
 
