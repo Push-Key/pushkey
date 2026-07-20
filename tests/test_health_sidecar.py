@@ -1,14 +1,22 @@
 import json
+import os
+import subprocess
+import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from pushkey_health import (
     HealthSchemaError,
+    HealthUnavailableError,
     build_health_document,
     decode_health_document,
     encode_health_document,
     validate_health_document,
+    read_health_sidecar,
+    write_health_sidecar,
+    invalidate_health_sidecar,
 )
 
 
@@ -143,3 +151,159 @@ def test_legacy_requires_canonical_generated_at(timestamp):
 def test_legacy_can_be_disabled():
     with pytest.raises(HealthSchemaError):
         decode_health_document(b'{"KEY": {}}', allow_legacy=False)
+
+
+def test_read_health_sidecar_reads_v1_and_normalizes_legacy(tmp_path):
+    path = tmp_path / "health.json"
+    path.write_bytes(encode_health_document(valid_document()))
+    assert read_health_sidecar(path, now=NOW) == valid_document()
+    path.write_text('{"KEY":{"status":"warning","days_old":2,"provider":"OpenAI"}}')
+    stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(microsecond=0)
+    assert read_health_sidecar(path, now=stamp + timedelta(hours=1))["generated_at"] == stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("contents, reason", [
+    pytest.param(b"x" * (1_048_577), "health_too_large", id="oversize"),
+    pytest.param(b"not json", "health_invalid", id="invalid-json"),
+])
+def test_read_health_sidecar_bounds_and_normalizes_failures(tmp_path, contents, reason):
+    path = tmp_path / "health.json"
+    path.write_bytes(contents)
+    with pytest.raises(HealthUnavailableError, match=reason):
+        read_health_sidecar(path, now=NOW)
+
+
+@pytest.mark.parametrize("timestamp, reason", [
+    (NOW - timedelta(hours=27), "health_stale"),
+    (NOW + timedelta(minutes=6), "health_future"),
+])
+def test_read_health_sidecar_enforces_freshness(tmp_path, timestamp, reason):
+    path = tmp_path / "health.json"
+    document = valid_document(); document["generated_at"] = timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_bytes(encode_health_document(document))
+    with pytest.raises(HealthUnavailableError, match=reason):
+        read_health_sidecar(path, now=NOW)
+
+
+def test_write_health_sidecar_is_atomic_and_strict(tmp_path):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    document = write_health_sidecar({"KEY": {"created": NOW.isoformat()}}, path, generated_at=NOW, expected_vault_revision=revision)
+    assert document == read_health_sidecar(path, now=NOW)
+    assert not list(tmp_path.glob(".health.*.tmp"))
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync", "replace", "verify"])
+def test_write_failures_preserve_prior_snapshot(tmp_path, monkeypatch, failure):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    original = encode_health_document(valid_document()); path.write_bytes(original)
+    if failure == "write":
+        monkeypatch.setattr(pushkey_health.os, "write", lambda *args: (_ for _ in ()).throw(OSError("write")))
+    elif failure == "fsync":
+        monkeypatch.setattr(pushkey_health.os, "fsync", lambda *args: (_ for _ in ()).throw(OSError("fsync")))
+    elif failure == "replace":
+        monkeypatch.setattr(pushkey_health.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("replace")))
+    else:
+        monkeypatch.setattr(pushkey_health, "read_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(HealthUnavailableError("bad")))
+    with pytest.raises(HealthUnavailableError):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    if failure != "verify":
+        assert path.read_bytes() == original
+    assert not list(tmp_path.glob(".health.*.tmp"))
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
+@pytest.mark.parametrize("kind", ["destination", "parent", "lock"])
+def test_health_paths_reject_symlinks(tmp_path, kind):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    external = tmp_path / "external"; external.write_text("unchanged")
+    path = tmp_path / "health.json"
+    try:
+        if kind == "destination":
+            path.symlink_to(external)
+        elif kind == "parent":
+            parent = tmp_path / "linked"; parent.symlink_to(tmp_path, target_is_directory=True); path = parent / "health.json"
+        else:
+            (tmp_path / ".health.lock").symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc.winerror if hasattr(exc, 'winerror') else exc}")
+    with pytest.raises(HealthUnavailableError, match="health_path_unsafe"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    assert external.read_text() == "unchanged"
+
+
+def test_revision_mismatch_prevents_write_and_invalidation(tmp_path):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"new encrypted vault")
+    stale = hashlib.sha256(b"old encrypted vault").digest()
+    path = tmp_path / "health.json"; path.write_bytes(encode_health_document(valid_document()))
+    with pytest.raises(HealthUnavailableError, match="health_vault_changed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=stale)
+    with pytest.raises(HealthUnavailableError, match="health_vault_changed"):
+        invalidate_health_sidecar(path, expected_vault_revision=stale)
+    assert path.exists()
+
+
+def test_revision_change_after_health_lock_aborts_publication(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"old encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+
+    @contextmanager
+    def replace_vault_after_lock(_path):
+        shared.VAULT_FILE.write_bytes(b"new encrypted vault")
+        yield
+
+    monkeypatch.setattr(pushkey_health, "_health_lock", replace_vault_after_lock)
+    with pytest.raises(HealthUnavailableError, match="health_vault_changed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    assert not path.exists()
+
+
+def test_two_process_publishers_leave_a_complete_document(tmp_path):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).hexdigest()
+    path = tmp_path / "health.json"
+    source = (
+        "import hashlib, sys, pushkey_shared as s; "
+        "from pushkey_health import write_health_sidecar; "
+        "from pathlib import Path; "
+        "s.VAULT_DIR=Path(sys.argv[1]); s.VAULT_FILE=s.VAULT_DIR/'vault.enc'; "
+        "write_health_sidecar({'KEY': {'created': '2026-01-10T12:00:00+00:00'}}, Path(sys.argv[2]), "
+        "generated_at='2026-01-10T12:00:00Z', expected_vault_revision=bytes.fromhex(sys.argv[3]))"
+    )
+    commands = [[sys.executable, "-c", source, str(tmp_path), str(path), revision] for _ in range(2)]
+    processes = [subprocess.Popen(command, cwd=os.getcwd()) for command in commands]
+    assert [process.wait(timeout=20) for process in processes] == [0, 0]
+    assert read_health_sidecar(path, now=NOW)["keys"]["KEY"]["status"] == "healthy"
+
+
+def test_invalidate_removes_only_sidecar(tmp_path):
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"; path.write_bytes(encode_health_document(valid_document()))
+    other = tmp_path / "other"; other.write_text("keep")
+    invalidate_health_sidecar(path, expected_vault_revision=revision)
+    assert not path.exists()
+    assert other.read_text() == "keep"

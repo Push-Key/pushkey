@@ -1,13 +1,25 @@
 """Strict public health-sidecar schema and deterministic health projection."""
 import json
+import os
 import re
+import secrets
+import stat
+import tempfile
+from contextlib import contextmanager
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import pushkey_shared as _s
+from pushkey_locking import FileLockTimeout, bounded_file_lock
+from pushkey_vault import _current_encrypted_vault_revision, _vault_write_guard
 from pushkey_providers import health_status_at
 
 
 _MAX_BYTES = 1_048_576
+MAX_HEALTH_BYTES = _MAX_BYTES
+_MAX_AGE = timedelta(hours=26)
+_MAX_FUTURE_SKEW = timedelta(minutes=5)
 _MAX_KEYS = 10_000
 _MAX_DAYS = 365_000
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -27,6 +39,65 @@ class HealthSchemaError(HealthSidecarError):
 
 class HealthUnavailableError(HealthSidecarError):
     pass
+
+
+def _is_link_or_reparse(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _safe_health_paths(path, *, create_parent):
+    path = Path(_s.HEALTH_FILE if path is None else path)
+    parent = path.parent
+    if create_parent:
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HealthUnavailableError("health_path_unsafe") from exc
+    if not parent.is_dir() or _is_link_or_reparse(parent):
+        raise HealthUnavailableError("health_path_unsafe")
+    lock_path = parent / ".health.lock"
+    if _is_link_or_reparse(path) or _is_link_or_reparse(lock_path):
+        raise HealthUnavailableError("health_path_unsafe")
+    return path, lock_path
+
+
+@contextmanager
+def _health_lock(path):
+    _, lock_path = _safe_health_paths(path, create_parent=True)
+    try:
+        with bounded_file_lock(lock_path):
+            _safe_health_paths(path, create_parent=False)
+            yield
+    except FileLockTimeout as exc:
+        raise HealthUnavailableError("health_lock_timeout") from exc
+
+
+def _require_current_revision(expected_vault_revision):
+    if not isinstance(expected_vault_revision, bytes):
+        raise HealthUnavailableError("health_vault_changed")
+    current = _current_encrypted_vault_revision()
+    if not secrets.compare_digest(current, expected_vault_revision):
+        raise HealthUnavailableError("health_vault_changed")
+
+
+def _fsync_parent(path):
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except (OSError, AttributeError):
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _canonical_timestamp(value):
@@ -190,3 +261,114 @@ def decode_health_document(raw, *, allow_legacy=True, legacy_generated_at=None):
     if not allow_legacy:
         raise HealthSchemaError("legacy health documents are disabled")
     return _normalize_legacy(document, legacy_generated_at)
+
+
+def _fresh_document(document, now):
+    generated = _timestamp_datetime(document["generated_at"])
+    if generated < now - _MAX_AGE:
+        raise HealthUnavailableError("health_stale")
+    if generated > now + _MAX_FUTURE_SKEW:
+        raise HealthUnavailableError("health_future")
+    return document
+
+
+def read_health_sidecar(path=None, *, allow_legacy=True, now=None):
+    """Read one bounded public sidecar and return a normalized, fresh v1 document."""
+    path, _ = _safe_health_paths(path, create_parent=False)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_HEALTH_BYTES + 1)
+        if len(raw) > MAX_HEALTH_BYTES:
+            raise HealthUnavailableError("health_too_large")
+        modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(microsecond=0)
+        document = decode_health_document(
+            raw, allow_legacy=allow_legacy, legacy_generated_at=modified.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+    except FileNotFoundError as exc:
+        raise HealthUnavailableError("health_missing") from exc
+    except HealthUnavailableError:
+        raise
+    except (OSError, HealthSchemaError) as exc:
+        raise HealthUnavailableError("health_invalid") from exc
+    current = datetime.now(timezone.utc).replace(microsecond=0) if now is None else _timestamp_datetime(now)
+    return _fresh_document(document, current)
+
+
+def _write_all(fd, raw):
+    offset = 0
+    while offset < len(raw):
+        written = os.write(fd, raw[offset:])
+        if written <= 0:
+            raise OSError("health_write_failed")
+        offset += written
+
+
+def write_health_sidecar(vault, path=None, *, generated_at=None, expected_vault_revision: bytes):
+    """Atomically publish a fresh strict health snapshot for one vault revision."""
+    path, _ = _safe_health_paths(path, create_parent=True)
+    document = build_health_document(vault, generated_at=generated_at)
+    raw = encode_health_document(document)
+    tmp = None
+    try:
+        with _vault_write_guard():
+            _require_current_revision(expected_vault_revision)
+            with _health_lock(path):
+                _require_current_revision(expected_vault_revision)
+                fd, name = tempfile.mkstemp(prefix=".health.", suffix=".tmp", dir=str(path.parent))
+                tmp = Path(name)
+                try:
+                    _write_all(fd, raw)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
+                try:
+                    _safe_health_paths(path, create_parent=False)
+                    os.replace(str(tmp), str(path))
+                except OSError as exc:
+                    raise HealthUnavailableError("health_replace_failed") from exc
+                tmp = None
+                try:
+                    verified = read_health_sidecar(path, allow_legacy=False, now=generated_at)
+                    if verified != document:
+                        raise HealthUnavailableError("health_verification_failed")
+                except Exception as exc:
+                    if isinstance(exc, HealthUnavailableError) and str(exc) == "health_verification_failed":
+                        raise
+                    raise HealthUnavailableError("health_verification_failed") from exc
+                _fsync_parent(path.parent)
+                return verified
+    except HealthUnavailableError:
+        raise
+    except OSError as exc:
+        raise HealthUnavailableError("health_write_failed") from exc
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def invalidate_health_sidecar(path=None, *, expected_vault_revision: bytes):
+    """Remove exactly the health sidecar for the specified current vault revision."""
+    path, _ = _safe_health_paths(path, create_parent=True)
+    try:
+        with _vault_write_guard():
+            _require_current_revision(expected_vault_revision)
+            with _health_lock(path):
+                _require_current_revision(expected_vault_revision)
+                if path.exists():
+                    if _is_link_or_reparse(path):
+                        raise HealthUnavailableError("health_path_unsafe")
+                    path.unlink()
+                if path.exists():
+                    raise HealthUnavailableError("health_verification_failed")
+                _fsync_parent(path.parent)
+    except HealthUnavailableError:
+        raise
+    except OSError as exc:
+        raise HealthUnavailableError("health_write_failed") from exc
