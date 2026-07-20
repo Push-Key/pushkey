@@ -63,6 +63,14 @@ def test_days_since_invalid_string():
     assert days_since("not-a-date") == float("inf")
 
 
+def test_days_since_aware_timestamp_remains_invalid_for_legacy_api():
+    assert days_since("2026-01-10T12:00:00+00:00") == float("inf")
+
+
+def test_health_status_aware_timestamp_uses_legacy_invalid_date_behavior():
+    assert health_status({"created": "2026-01-10T12:00:00+00:00"}) == "critical"
+
+
 def test_days_since_at_is_deterministic():
     now = datetime(2026, 1, 10, 12, 0, 0)
     assert days_since_at("2026-01-08T12:00:00", now) == 2

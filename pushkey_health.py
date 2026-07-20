@@ -109,6 +109,8 @@ def validate_health_document(document):
         raise HealthSchemaError("document must contain exactly the v1 root fields")
     if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise HealthSchemaError("unsupported schema version")
+    if not isinstance(document["generated_at"], str):
+        raise HealthSchemaError("generated_at must be a string")
     generated = _canonical_timestamp(document["generated_at"])
     keys = document["keys"]
     if not isinstance(keys, dict) or len(keys) > _MAX_KEYS:
@@ -118,7 +120,7 @@ def validate_health_document(document):
         if not _valid_name(name) or not isinstance(record, dict) or set(record) != _RECORD_KEYS:
             raise HealthSchemaError("invalid key record")
         status, days_old, provider = record["status"], record["days_old"], record["provider"]
-        if status not in _STATUSES or not isinstance(status, str):
+        if not isinstance(status, str) or status not in _STATUSES:
             raise HealthSchemaError("invalid health status")
         if days_old is not None and (type(days_old) is not int or not 0 <= days_old <= _MAX_DAYS):
             raise HealthSchemaError("invalid days_old")

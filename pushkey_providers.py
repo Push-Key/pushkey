@@ -114,7 +114,13 @@ def days_since_at(date_str, now):
 
 
 def days_since(date_str):
-    return days_since_at(date_str, datetime.now())
+    if not date_str:
+        return float("inf")
+    try:
+        dt = datetime.fromisoformat(date_str)
+        return (datetime.now() - dt).days
+    except Exception:
+        return float("inf")
 
 
 def health_status_at(key_info, now):
@@ -133,7 +139,18 @@ def health_status_at(key_info, now):
 
 
 def health_status(key_info):
-    return health_status_at(key_info, datetime.now())
+    age = days_since(key_info.get("rotated") or key_info.get("created"))
+    provider = key_info.get("provider")
+    threshold = 90
+    if provider and provider in PROVIDERS:
+        threshold = PROVIDERS[provider].get("rotation_days", 90)
+    use_age = days_since(key_info.get("first_used"))
+    effective_age = min(age, use_age) if use_age != float("inf") else age
+    if effective_age > threshold:
+        return "critical"
+    if effective_age > threshold * 0.67:
+        return "warning"
+    return "healthy"
 
 
 PROVIDERS = _load_providers()

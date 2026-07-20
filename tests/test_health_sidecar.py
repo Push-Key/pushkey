@@ -59,6 +59,22 @@ def test_valid_empty_document_round_trips_to_canonical_json():
     assert encode_health_document(document) == b'{"generated_at":"2026-01-10T12:00:00Z","keys":{},"schema_version":1}\n'
 
 
+@pytest.mark.parametrize("generated_at", [NOW, None, 0])
+def test_v1_generated_at_must_be_a_string(generated_at):
+    document = valid_document()
+    document["generated_at"] = generated_at
+    with pytest.raises(HealthSchemaError):
+        validate_health_document(document)
+
+
+@pytest.mark.parametrize("status", [[], {}])
+def test_v1_unhashable_status_raises_schema_error(status):
+    document = valid_document()
+    document["keys"]["OPENAI_API_KEY"]["status"] = status
+    with pytest.raises(HealthSchemaError):
+        validate_health_document(document)
+
+
 @pytest.mark.parametrize("source", [None, "bad-date", float("nan"), "2026-01-10T12:00:01+00:00"])
 def test_build_marks_invalid_or_future_source_dates_unknown(source):
     document = build_health_document({"KEY": {"created": source, "provider": "OpenAI"}}, generated_at=NOW)
