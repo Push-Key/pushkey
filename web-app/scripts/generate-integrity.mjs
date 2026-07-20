@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,9 +53,12 @@ const manifest = {
   },
 };
 const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
-await writeFile(path.join(out, "pushkey-integrity.json"), manifestBytes, {
-  encoding: "utf8", mode: 0o444,
+const manifestPath = path.join(out, "pushkey-integrity.json");
+await chmod(manifestPath, 0o644).catch((error) => {
+  if (error.code !== "ENOENT") throw error;
 });
+await writeFile(manifestPath, manifestBytes, { encoding: "utf8", mode: 0o644 });
+await chmod(manifestPath, 0o444);
 const packagedOut = path.resolve(root, "..", "pushkey_web", "out");
 await rm(packagedOut, { recursive: true, force: true });
 await mkdir(path.dirname(packagedOut), { recursive: true });
