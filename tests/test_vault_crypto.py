@@ -295,6 +295,22 @@ def test_save_vault_validates_ciphertext_before_replace(tmp_path, monkeypatch):
     assert _s.VAULT_FILE.read_bytes() == original
 
 
+def test_vault_replacement_invalidates_health_without_reentering_vault_lock():
+    import pushkey_health
+    import pushkey_shared as _s
+    import pushkey_vault
+    code = generate_recovery_code()
+    save_vault({"K": {"value": "v"}}, "pw", recovery_code=code)
+    vault, vault_key = load_vault("pw")
+    pushkey_health.write_health_sidecar(vault, expected_vault_revision=vault._pushkey_revision)
+    assert _s.HEALTH_FILE.exists()
+    vault["K"]["value"] = "changed"
+    save_vault(vault, "pw", vault_key=vault_key)
+    assert not _s.HEALTH_FILE.exists()
+    with pushkey_vault._vault_write_guard():
+        pushkey_vault._invalidate_health_under_vault_lock(vault._pushkey_revision)
+
+
 @pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_generated_format_fixtures_round_trip(version):
     """Generated fixtures pin the supported binary format markers and loaders."""

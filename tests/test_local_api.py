@@ -945,6 +945,8 @@ def test_backup_export_returns_blob(unlocked_with_keys, auth):
 
 def test_backup_import_replaces_vault(client, auth):
     import base64
+    import hashlib
+    import pushkey_health
     # First seed and export
     _seed_vault("orig-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "orig"}})
     client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
@@ -952,9 +954,14 @@ def test_backup_import_replaces_vault(client, auth):
     # Modify vault: re-init with different password
     _s.VAULT_FILE.unlink()
     _seed_vault("new-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"DIFF": {"value": "v"}})
+    pushkey_health.write_health_sidecar(
+        {}, expected_vault_revision=hashlib.sha256(_s.VAULT_FILE.read_bytes()).digest()
+    )
+    assert _s.HEALTH_FILE.exists()
     # Import original blob
     r = client.post("/api/backup/import", headers=auth, json={"blob_b64": exported})
     assert r.status_code == 200
+    assert not _s.HEALTH_FILE.exists()
     # Original password unlocks, key K is back
     u = client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
     assert u.status_code == 200

@@ -76,6 +76,35 @@ def _current_encrypted_vault_revision() -> bytes:
     return hashlib.sha256(_read_vault_bytes()).digest()
 
 
+def _invalidate_health_under_vault_lock(expected_revision: bytes) -> None:
+    """Invalidate the public snapshot without reacquiring `.vault.lock`."""
+    from pushkey_health import invalidate_health_sidecar_under_vault_lock
+    invalidate_health_sidecar_under_vault_lock(expected_vault_revision=expected_revision)
+
+
+def replace_encrypted_vault_bytes(replacement: bytes) -> None:
+    """Durably replace encrypted vault bytes and invalidate its public sidecar."""
+    import hashlib
+    with _vault_write_guard():
+        _s.ensure_vault_dir()
+        fd, tmp_name = tempfile.mkstemp(prefix=".vault.", suffix=".tmp", dir=str(_s.VAULT_DIR))
+        tmp = type(_s.VAULT_FILE)(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(replacement)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(str(tmp), str(_s.VAULT_FILE))
+            _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
 def _read_vault_bytes() -> bytes:
     try:
         size = _s.VAULT_FILE.stat().st_size
@@ -278,6 +307,8 @@ def rekey_v3_password(recovery_code: str, new_password: str) -> None:
             _create_rolling_backup(existing)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            import hashlib
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
             _prune_rolling_backups()
         finally:
             tmp.unlink(missing_ok=True)
@@ -429,6 +460,7 @@ def save_vault(vault, password, *, vault_key=None, recovery_code=None, expected_
                 _create_rolling_backup(existing_raw)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(written).digest())
             _prune_rolling_backups()
             if isinstance(vault, VaultData):
                 vault._pushkey_revision = hashlib.sha256(written).digest()
@@ -477,6 +509,7 @@ def save_vault_with_key(vault, vault_key: bytes, *, expected_revision=None):
             _create_rolling_backup(existing)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
             _prune_rolling_backups()
             if isinstance(vault, VaultData):
                 vault._pushkey_revision = hashlib.sha256(replacement).digest()

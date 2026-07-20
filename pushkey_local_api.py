@@ -51,6 +51,7 @@ from pushkey_vault import (
     replace_v3_recovery_code,
     rekey_v3_password,
     save_vault,
+    replace_encrypted_vault_bytes,
 )
 
 
@@ -1170,8 +1171,10 @@ def create_app() -> FastAPI:
             raise HTTPException(413, "vault too large")
         if len(blob) < 200:
             raise HTTPException(400, "truncated v3 vault")
-        _s.ensure_vault_dir()
-        _s.VAULT_FILE.write_bytes(blob)
+        try:
+            replace_encrypted_vault_bytes(blob)
+        except OSError:
+            raise HTTPException(500, "vault import failed")
         app.state.session.lock()
         return {"imported": True, "bytes": len(blob)}
 

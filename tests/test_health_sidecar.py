@@ -322,17 +322,24 @@ def test_two_process_publishers_leave_a_complete_document(tmp_path):
         "    generated_at='2026-01-10T12:00:00Z', expected_vault_revision=bytes.fromhex(sys.argv[3]))",
     ])
     commands = [[sys.executable, "-c", source, str(tmp_path), str(path), revision, str(ready / str(index)), str(start)] for index in range(2)]
-    processes = [subprocess.Popen(command, cwd=os.getcwd()) for command in commands]
-    deadline = time.monotonic() + 10
-    while len(list(ready.glob("*"))) != 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert len(list(ready.glob("*"))) == 2
-    start.touch()
-    while any(process.poll() is None for process in processes):
-        if path.exists():
-            assert read_health_sidecar(path, now=NOW)["schema_version"] == 1
-        time.sleep(0.005)
-    assert [process.wait(timeout=20) for process in processes] == [0, 0]
+    processes = [subprocess.Popen(command, cwd=os.getcwd(), stderr=subprocess.PIPE, text=True) for command in commands]
+    try:
+        deadline = time.monotonic() + 10
+        while len(list(ready.glob("*"))) != 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(list(ready.glob("*"))) == 2
+        start.touch()
+        while any(process.poll() is None for process in processes):
+            if path.exists():
+                assert read_health_sidecar(path, now=NOW)["schema_version"] == 1
+            time.sleep(0.005)
+        diagnostics = [process.stderr.read() if process.stderr else "" for process in processes]
+        assert [process.wait(timeout=20) for process in processes] == [0, 0], diagnostics
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
     assert read_health_sidecar(path, now=NOW)["keys"]["KEY"]["status"] == "healthy"
 
 

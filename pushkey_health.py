@@ -6,6 +6,7 @@ import secrets
 import stat
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,16 @@ def _safe_health_paths(path, *, create_parent):
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HealthPathError() from exc
+    # This detects accidental/hostile path substitution.  A same-account
+    # attacker can still race path operations on platforms without dir_fd
+    # support; that cannot be eliminated portably, so checks are repeated.
+    ancestor = parent
+    while True:
+        if _is_link_or_reparse(ancestor):
+            raise HealthPathError()
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
     try:
         parent_is_dir = parent.is_dir()
     except OSError as exc:
@@ -143,6 +154,18 @@ def _verify_temporary_identity(path, identity):
         or (info.st_dev, info.st_ino) != (identity.st_dev, identity.st_ino)
     ):
         raise HealthPathError()
+
+
+def _replace_sidecar(tmp, path):
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            os.replace(str(tmp), str(path))
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def _canonical_timestamp(value):
@@ -374,7 +397,7 @@ def write_health_sidecar(vault, path=None, *, generated_at=None, expected_vault_
                     _require_current_revision(expected_vault_revision)
                     _safe_health_paths(path, create_parent=False)
                     _verify_temporary_identity(tmp, identity)
-                    os.replace(str(tmp), str(path))
+                    _replace_sidecar(tmp, path)
                 except OSError as exc:
                     raise HealthUnavailableError("health_replace_failed") from exc
                 tmp = None
@@ -416,6 +439,26 @@ def invalidate_health_sidecar(path=None, *, expected_vault_revision: bytes):
                 if path.exists():
                     raise HealthUnavailableError("health_verification_failed")
                 _fsync_parent(path.parent)
+    except HealthUnavailableError:
+        raise
+    except OSError as exc:
+        raise HealthUnavailableError("health_write_failed") from exc
+
+
+def invalidate_health_sidecar_under_vault_lock(path=None, *, expected_vault_revision: bytes):
+    """Invalidate under an already-held process vault lock and `.vault.lock`."""
+    path, _ = _safe_health_paths(path, create_parent=True)
+    try:
+        _require_current_revision(expected_vault_revision)
+        with _health_lock(path):
+            _require_current_revision(expected_vault_revision)
+            if path.exists():
+                if _is_link_or_reparse(path):
+                    raise HealthPathError()
+                path.unlink()
+            if path.exists():
+                raise HealthUnavailableError("health_verification_failed")
+            _fsync_parent(path.parent)
     except HealthUnavailableError:
         raise
     except OSError as exc:

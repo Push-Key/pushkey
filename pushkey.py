@@ -95,7 +95,8 @@ from pushkey_crypto import (
     _CONFIG_KEY_CACHE, _config_key,
 )
 from pushkey_vault import migrate_vault_to_v3
-from pushkey_vault import load_vault, save_vault, load_config, save_config
+from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes
+from pushkey_health import write_health_sidecar as _publish_health_sidecar
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
     get_machine_fingerprint,
@@ -117,37 +118,11 @@ from pushkey_providers import (
 
 
 def write_health_sidecar(vault):
+    """Compatibility wrapper for legacy GUI call sites."""
     try:
-        ensure_vault_dir()
-        health = {}
-        for name, info in vault.items():
-            age = days_since(info.get("rotated") or info.get("created"))
-            use_age = days_since(info.get("first_used"))
-            effective_age = min(age, use_age) if use_age != float("inf") else age
-            provider = info.get("provider")
-            threshold = 90
-            if provider and provider in PROVIDERS:
-                threshold = PROVIDERS[provider].get("rotation_days", 90)
-            if effective_age > threshold:
-                status = "critical"
-            elif effective_age > threshold * 0.67:
-                status = "warning"
-            else:
-                status = "healthy"
-            health[name] = {
-                "status": status,
-                "days_old": effective_age if effective_age != float("inf") else None,
-                "provider": provider,
-                "category": info.get("category", "General"),
-                "first_used": info.get("first_used"),
-                "last_used": info.get("last_used"),
-                "created": info.get("created"),
-                "rotated": info.get("rotated"),
-                "rotation_count": info.get("rotation_count", 0),
-            }
-        tmp = HEALTH_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(health, indent=2), encoding="utf-8")
-        os.replace(str(tmp), str(HEALTH_FILE))
+        revision = getattr(vault, "_pushkey_revision", None)
+        if revision is not None:
+            _publish_health_sidecar(vault, expected_vault_revision=revision)
     except Exception:
         pass
 
@@ -1720,9 +1695,7 @@ class LoginFrame(ctk.CTkFrame):
             try:
                 raw = VAULT_FILE.read_bytes()
                 new_token = rekey_vault(raw, rec_code, new_pw)
-                tmp = VAULT_FILE.with_suffix('.tmp')
-                tmp.write_bytes(new_token)
-                os.replace(str(tmp), str(VAULT_FILE))
+                replace_encrypted_vault_bytes(new_token)
                 log_event("master password reset via recovery key")
                 win.destroy()
                 self.err.configure(
