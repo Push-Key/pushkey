@@ -106,7 +106,7 @@ git commit -m "Add bounded shared file locking"
 - Modify: `pushkey_providers.py`
 - Modify: `tests/test_providers.py`
 
-- [ ] **Step 1: Write failing v1 document tests**
+- [x] **Step 1: Write failing v1 document tests**
 
 Test the exact envelope, UTC `generated_at`, sorted compact encoding, valid empty `keys`, and omission of secret values and prohibited metadata.
 
@@ -124,11 +124,11 @@ def test_build_health_document_exposes_only_allowed_fields():
     assert "sk-secret" not in encode_health_document(document).decode()
 ```
 
-- [ ] **Step 2: Write failing malformed-input and legacy tests**
+- [x] **Step 2: Write failing malformed-input and legacy tests**
 
 Cover duplicate keys, unknown fields, booleans used as integers, invalid names, invalid provider, invalid status, oversize bytes, unsupported version, mixed root, each normalization-table row, and legacy mtime-derived `generated_at`.
 
-- [ ] **Step 3: Run schema tests and verify RED**
+- [x] **Step 3: Run schema tests and verify RED**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health_sidecar.py -k "schema or legacy or privacy" -v
@@ -136,15 +136,15 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health
 
 Expected: FAIL because `pushkey_health` does not exist.
 
-- [ ] **Step 4: Implement pure schema APIs**
+- [x] **Step 4: Implement pure schema APIs**
 
 Implement `build_health_document`, `validate_health_document`, `encode_health_document`, and `decode_health_document`. Refactor `pushkey_providers` with an injectable-time health-policy helper while preserving existing public behavior; call that helper rather than duplicating GUI thresholds. Import `pushkey_shared as _s` only for paths, and raise stable health reason codes without source values.
 
-- [ ] **Step 5: Implement freshness validation**
+- [x] **Step 5: Implement freshness validation**
 
 Enforce the 26-hour maximum age and five-minute future skew. Legacy callers supply final file mtime. Treat stale and clock-invalid documents as unavailable, not empty or healthy.
 
-- [ ] **Step 6: Run schema tests and verify GREEN**
+- [x] **Step 6: Run schema tests and verify GREEN**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health_sidecar.py -k "schema or legacy or privacy or freshness" -v
@@ -152,7 +152,7 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit schema ownership**
+- [x] **Step 7: Commit schema ownership**
 
 ```powershell
 git add pushkey_health.py pushkey_providers.py tests/test_health_sidecar.py tests/test_providers.py tests/conftest.py

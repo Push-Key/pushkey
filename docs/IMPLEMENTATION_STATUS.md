@@ -3,7 +3,7 @@
 **Updated:** 2026-07-20
 **Active branch:** `feat/agentic-auth-foundation`
 **Baseline branch:** `feat/pushkey-app` at `5ef2f81`
-**Last verified implementation commit:** `705dd4d`
+**Last verified implementation commit:** `c65dac9`
 
 ## Current Position
 
@@ -13,7 +13,7 @@
 | Completed production phase gates | 1/13, 7.7% |
 | Phase 0 baseline | Complete |
 | CP1 health sidecar design | Complete and approved |
-| CP1 health sidecar implementation | In progress (Task 1 complete; Task 2: strict health sidecar owner) |
+| CP1 health sidecar implementation | In progress (Tasks 1-2 complete; Task 3: atomic publication) |
 | Agentic authorization design | Complete and approved |
 | Agentic authorization implementation plan | Complete and approved |
 | Authorization implementation | Not started |
@@ -39,13 +39,11 @@
 
 Execute CP1, the versioned `health.json` v1 sidecar contract:
 
-1. CP1 Task 1 complete: shared bounded file lock implemented and verified.
-2. CP1 Task 2: add the strict health sidecar owner.
-3. Publish only approved local-sensitive metadata after plaintext-aware vault saves.
-4. Invalidate stale sidecar data after encrypted vault replacement.
-5. Update loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
-6. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
-7. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
+1. CP1 Tasks 1-2 complete: shared locking and strict v1 schema verified.
+2. CP1 Task 3: add atomic publication, encrypted-vault revision checks, and opaque import invalidation.
+3. Integrate loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
+4. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
+5. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
 
 ## Remaining Authorization Gates
 
@@ -61,8 +59,8 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 ## Resume Procedure
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
-2. Continue CP1 Task 2: implement the strict health sidecar owner.
-3. After Task 2 is committed, proceed to approved local-sensitive metadata publication.
+2. Continue CP1 Task 3: implement atomic publication, vault-revision checks, and opaque import invalidation.
+3. Tasks 1-2 completed in commits `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, and `c65dac9`.
 4. Use a fresh implementation subagent and two independent reviews per completed task.
 5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
 6. Do not begin authorization implementation until CP1 is complete.
