@@ -3,7 +3,7 @@
 **Updated:** 2026-07-20
 **Active branch:** `feat/agentic-auth-foundation`
 **Baseline branch:** `feat/pushkey-app` at `5ef2f81`
-**Current HEAD:** `52c7f15`
+**Current HEAD:** `1c3dadc`
 
 ## Current Position
 
@@ -13,7 +13,7 @@
 | Completed production phase gates | 1/13, 7.7% |
 | Phase 0 baseline | Complete |
 | CP1 health sidecar design | Complete and approved |
-| CP1 health sidecar implementation | Not started |
+| CP1 health sidecar implementation | In progress (Task 1: shared bounded lock) |
 | Agentic authorization design | Complete and approved |
 | Agentic authorization implementation plan | Complete and approved |
 | Authorization implementation | Not started |
@@ -39,12 +39,13 @@
 
 Execute CP1, the versioned `health.json` v1 sidecar contract:
 
-1. Add the shared bounded file lock and strict health sidecar owner.
-2. Publish only approved local-sensitive metadata after plaintext-aware vault saves.
-3. Invalidate stale sidecar data after encrypted vault replacement.
-4. Update loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
-5. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
-6. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
+1. Implement CP1 Task 1: add and verify the shared bounded file lock.
+2. Add the strict health sidecar owner.
+3. Publish only approved local-sensitive metadata after plaintext-aware vault saves.
+4. Invalidate stale sidecar data after encrypted vault replacement.
+5. Update loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
+6. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
+7. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
 
 ## Remaining Authorization Gates
 
@@ -60,11 +61,12 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 ## Resume Procedure
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
-2. Read this file, the CP1 design specification, and the CP1 implementation plan.
-3. Use a fresh implementation subagent and two independent reviews per completed task.
-4. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
-5. Do not begin authorization implementation until CP1 is complete.
-6. Preserve the required Git identity: `pushkeydev <pushkeydev@gmail.com>`.
+2. Continue CP1 Task 1 with the shared bounded lock implementation and its subprocess tests.
+3. After Task 1 is committed, proceed to the strict health sidecar owner.
+4. Use a fresh implementation subagent and two independent reviews per completed task.
+5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
+6. Do not begin authorization implementation until CP1 is complete.
+7. Preserve the required Git identity: `pushkeydev <pushkeydev@gmail.com>`.
 
 ## Commit History
 
