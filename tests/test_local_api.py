@@ -511,6 +511,9 @@ def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
     try:
         (project / ".env").symlink_to(target)
     except (OSError, NotImplementedError):
+        import shutil
+
+        shutil.rmtree(tmp_path, ignore_errors=True)
         pytest.skip("symlink creation unavailable")
     unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
     r = unlocked.post(
