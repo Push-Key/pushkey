@@ -100,8 +100,8 @@ Version 1 must never contain:
 - cloud, license, device, or account identifiers.
 
 The file should use owner-only permissions where supported. Failure to tighten
-permissions is surfaced as a sanitized publication error. It does not roll back
-an already committed encrypted-vault mutation.
+permissions follows the platform contract below. It does not roll back an
+already committed encrypted-vault mutation.
 
 ## Version 1 Schema
 
@@ -202,12 +202,18 @@ def validate_health_document(document: object) -> dict: ...
 
 def encode_health_document(document: object) -> bytes: ...
 
-def decode_health_document(raw: bytes, *, allow_legacy: bool = True) -> dict: ...
+def decode_health_document(
+    raw: bytes,
+    *,
+    allow_legacy: bool = True,
+    legacy_generated_at: datetime | None = None,
+) -> dict: ...
 
 def read_health_sidecar(
     path: Path | None = None,
     *,
     allow_legacy: bool = True,
+    now: datetime | None = None,
 ) -> dict: ...
 
 def write_health_sidecar(
@@ -228,15 +234,45 @@ The adjacent cross-process locking primitive may be implemented in the shared
 introduces that module first, the authorization plan changes its CP3 step from
 creation to extension and reuses the same primitive.
 
+`decode_health_document` validates bytes without applying filesystem freshness.
+Legacy bytes require a `legacy_generated_at` argument when callers need a
+normalized v1 envelope. `read_health_sidecar` obtains that value from the
+opened file's final metadata and applies the freshness contract.
+
+## Freshness Contract
+
+A v1 snapshot is current when:
+
+- `generated_at` is no more than 26 hours before the reader's UTC clock; and
+- `generated_at` is no more than five minutes after the reader's UTC clock.
+
+Older snapshots are `health_stale`. Snapshots farther in the future are
+`health_clock_invalid`. Both are unavailable states: VS Code clears health
+decorations, the browser reports unavailable, and the loopback endpoint returns
+HTTP 503. Consumers never continue showing a previously accepted snapshot
+after a freshness failure.
+
+For a legacy file, the final file modification time becomes the normalized
+`generated_at`. A missing, non-finite, out-of-range, or future modification time
+is unavailable. Legacy bytes alone have no freshness claim; tests of
+`decode_health_document` must supply the explicit legacy generation time.
+
+While the desktop vault remains unlocked, it republishes health at least every
+six hours and cancels that timer on lock or shutdown. Unlock and successful
+plaintext-aware saves also republish. This keeps an active desktop snapshot
+within the 26-hour window without writing continuously. CLI, MCP, or local API
+publication remains current for 26 hours unless another successful save or
+desktop unlock refreshes it.
+
 ## Atomic Publication
 
 Publication uses this sequence:
 
 1. Build, validate, and encode the complete document in memory.
 2. Ensure the parent directory exists.
-3. Reject a parent directory, destination, or lock path that is a symlink or
-   Windows reparse point. Platform checks fail closed when identity cannot be
-   established.
+3. Reject a parent directory, destination, or lock path that is a symbolic link
+   or Windows reparse point. Platform checks fail closed when identity cannot
+   be established.
 4. Acquire the adjacent `.health.lock` with a bounded timeout.
 5. Revalidate parent and destination identities after lock acquisition.
 6. Create a unique temporary file in the destination directory with
@@ -253,6 +289,36 @@ Concurrent writers may publish in either order, but readers must observe one
 complete valid snapshot. A failed write before replacement preserves the prior
 snapshot. A post-replacement verification failure is reported and never
 silently described as success.
+
+### Platform Filesystem Guarantees
+
+On POSIX:
+
+- temporary, lock, and final sidecar files are mode `0600`;
+- a failure to create or retain mode `0600` fails publication;
+- symbolic-link checks use non-following metadata operations; and
+- parent-directory `fsync` is required when the platform supports opening a
+  directory descriptor.
+
+On Windows:
+
+- the sidecar, temporary file, and lock inherit the ACL of the existing
+  user-profile `.pushkey` directory;
+- CP1 does not rewrite ACLs or claim that `chmod` creates a POSIX-equivalent
+  owner-only ACL;
+- paths are inspected for `FILE_ATTRIBUTE_REPARSE_POINT` before opening and
+  again before replacement;
+- existing reparse destinations, parents, or lock paths fail publication; and
+- inability to establish reparse status fails publication.
+
+The sidecar is local-sensitive derived metadata, not a security boundary
+against another malicious process already running as the same operating-system
+user. Standard path APIs cannot eliminate every same-account time-of-check to
+time-of-use race on both platforms. CP1 guarantees bounded writes, unique
+temporary files, adjacent locking, no intentional link traversal, repeated
+identity checks, and preservation against ordinary crashes and concurrent
+Pushkey writers. Tests and documentation must not claim stronger hostile-user
+isolation.
 
 ## Publication Integration
 
@@ -289,9 +355,26 @@ Bundled readers support:
 
 Legacy detection is allowed only when the root is an object and none of the
 reserved envelope fields `schema_version`, `generated_at`, or `keys` is
-present. Legacy records are normalized to the v1 in-memory shape and validated
-against the same record limits. Unknown or invalid legacy statuses normalize
-to `unknown`, never healthy.
+present. Legacy input uses this exact normalization:
+
+| Legacy input | Normalized v1 behavior |
+|---|---|
+| More than 10,000 root entries | Reject the whole document. |
+| Ineligible or overlong secret name | Omit that entry. |
+| Non-object record | Reject the whole document. |
+| Missing or invalid `status` | Emit `unknown`. |
+| Valid `healthy`, `warning`, or `critical` status | Preserve it. |
+| `days_old` integer in `0..365000` | Preserve it. |
+| Missing, boolean, invalid, negative, or excessive `days_old` | Emit null. |
+| Printable ASCII `provider` of 1 through 64 bytes | Preserve it. |
+| Missing, invalid, or overlong `provider` | Emit null. |
+| Current extra fields such as `category`, timestamps, or rotation count | Ignore them. |
+| Any reserved envelope root field | Reject as a mixed shape. |
+
+The normalized `generated_at` comes only from the file modification time and
+must pass the freshness contract. Normalized output is validated against the
+strict v1 schema before use. An all-ineligible but otherwise structurally valid
+legacy map becomes a valid empty snapshot.
 
 Unknown schema versions, mixed legacy/envelope shapes, malformed JSON,
 oversized input, duplicate keys, or invalid v1 records are unavailable states.
@@ -366,6 +449,8 @@ Stable internal reason codes include:
 - `health_duplicate_field`;
 - `health_unsupported_version`;
 - `health_schema_invalid`;
+- `health_stale`;
+- `health_clock_invalid`;
 - `health_path_unsafe`;
 - `health_lock_timeout`;
 - `health_write_failed`;
@@ -383,6 +468,7 @@ record contents.
 Create `tests/test_health_sidecar.py` covering:
 
 - deterministic v1 construction and canonical encoding;
+- 26-hour expiry, five-minute future skew, and six-hour desktop refresh;
 - exact health threshold behavior and unknown dates;
 - valid empty vault behavior;
 - omission of ineligible records;
@@ -390,6 +476,7 @@ Create `tests/test_health_sidecar.py` covering:
 - all field types, bounds, enums, unknown fields, and duplicate keys;
 - unsupported versions and mixed legacy/envelope documents;
 - legacy normalization and eventual compatibility warning;
+- legacy modification-time freshness and every normalization-table row;
 - 1 MiB and 10,000-record limits;
 - bool-versus-int rejection and non-finite number rejection;
 - test isolation through `pushkey_shared.HEALTH_FILE`;
