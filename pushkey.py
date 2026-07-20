@@ -95,7 +95,7 @@ from pushkey_crypto import (
     _CONFIG_KEY_CACHE, _config_key,
 )
 from pushkey_vault import migrate_vault_to_v3
-from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes
+from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes, VaultBusyError
 from pushkey_health import HealthSidecarError, HealthUnavailableError, write_health_sidecar as _publish_health_sidecar
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
@@ -124,13 +124,28 @@ def write_health_sidecar(vault):
         if revision is not None:
             _publish_health_sidecar(vault, expected_vault_revision=revision)
         return True
-    except HealthSidecarError:
+    except (HealthSidecarError, VaultBusyError):
         # The vault save remains valid; never include sidecar details in the audit log.
         try:
             log_event("health_publication_failed")
         except Exception:
             pass
         return False
+
+
+def _replace_recovered_vault(new_token: bytes) -> bool:
+    """Replace a recovery-reset vault and report only a safe refresh warning."""
+    try:
+        replace_encrypted_vault_bytes(new_token)
+        log_event("master password reset via recovery key")
+        return False
+    except (HealthUnavailableError, VaultBusyError):
+        # The password reset may be committed before sidecar invalidation fails.
+        try:
+            log_event("master password reset via recovery key; health_publication_failed")
+        except Exception:
+            pass
+        return True
 
 
 
@@ -1702,15 +1717,7 @@ class LoginFrame(ctk.CTkFrame):
             try:
                 raw = VAULT_FILE.read_bytes()
                 new_token = rekey_vault(raw, rec_code, new_pw)
-                replace_encrypted_vault_bytes(new_token)
-                log_event("master password reset via recovery key")
-            except HealthUnavailableError:
-                # The password reset was committed before sidecar invalidation failed.
-                health_warning = True
-                try:
-                    log_event("master password reset via recovery key; health_publication_failed")
-                except Exception:
-                    pass
+                health_warning = _replace_recovered_vault(new_token)
             except (ValueError, OSError) as e:
                 if "wrong_recovery_code" in str(e):
                     err_lbl.configure(text="Recovery key incorrect — check your written copy")

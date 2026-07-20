@@ -164,8 +164,12 @@ git commit -m "Add strict health sidecar v1 schema"
 **Files:**
 - Modify: `pushkey_health.py`
 - Modify: `pushkey_vault.py`
+- Modify: `pushkey.py` and `pushkey_local_api.py` for opaque encrypted-vault replacement invalidation and safe boundary handling.
 - Modify: `tests/test_health_sidecar.py`
 - Modify: `tests/test_vault_crypto.py`
+- Modify: `tests/test_ui_helpers.py` and `tests/test_local_api.py`
+
+**Scope note:** Task 3 was expanded during review to cover GUI recovery reset and local API encrypted backup import/rekey boundaries. These opaque replacement paths must invalidate the sidecar while preserving the established vault-then-health lock ordering and must report safe boundary failures without leaving an unlocked stale session. Normal plaintext-aware publication integration remains Task 4.
 
 - [ ] **Step 1: Write failing filesystem tests**
 

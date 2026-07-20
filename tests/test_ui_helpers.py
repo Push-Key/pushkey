@@ -56,6 +56,31 @@ def test_gui_health_unsafe_path_records_sanitized_audit(monkeypatch):
     assert events == ["health_publication_failed"]
 
 
+def test_gui_health_vault_lock_timeout_records_sanitized_audit(monkeypatch):
+    from pushkey_vault import VaultBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(VaultBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
+def test_recovery_reset_vault_lock_timeout_is_sanitized(monkeypatch):
+    from pushkey_vault import VaultBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "replace_encrypted_vault_bytes", lambda *args: (_ for _ in ()).throw(VaultBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    assert pushkey._replace_recovered_vault(b"replacement") is True
+    assert events == ["master password reset via recovery key; health_publication_failed"]
+
+
 def test_toggle_expand_opens_key():
     class FakeApp:
         _expanded_key = None

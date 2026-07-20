@@ -1139,6 +1139,9 @@ def create_app() -> FastAPI:
         except (VaultFormatError, VaultIntegrityError):
             raise HTTPException(422, "vault cannot be rekeyed")
         except (HealthUnavailableError, VaultBusyError):
+            # A replacement may already be durable when sidecar invalidation
+            # reports a boundary failure. Never retain an older unlocked view.
+            app.state.session.lock()
             raise HTTPException(503, "health sidecar unavailable")
         except OSError:
             raise HTTPException(500, "vault rekey failed")
@@ -1178,6 +1181,8 @@ def create_app() -> FastAPI:
         try:
             replace_encrypted_vault_bytes(blob)
         except (HealthUnavailableError, VaultBusyError):
+            # See rekey: a typed health failure can occur after replacement.
+            app.state.session.lock()
             raise HTTPException(503, "health sidecar unavailable")
         except OSError:
             raise HTTPException(500, "vault import failed")
