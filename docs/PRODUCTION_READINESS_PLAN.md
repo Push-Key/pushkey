@@ -5,6 +5,10 @@
 **Planning baseline:** 2026-07-19  
 **Execution model:** Complete phases consecutively. Do not start a phase until the previous phase's exit gate passes.
 
+**Latest verification:** [2026-07-20 baseline record](BASELINE_VERIFICATION_2026-07-20.md).
+The isolated Windows run collected 335 tests: 334 passed, none failed, and one
+platform-dependent symlink test skipped. Both frontend production builds pass.
+
 ## Goal
 
 Ship a secure, supportable, reproducible Pushkey release whose core vault, CLI,
@@ -71,26 +75,26 @@ Do not:
 
 ---
 
-# Phase 0 — Freeze, Inventory, and Baseline
+# Phase 0, Freeze, Inventory, and Baseline
 
 **Objective:** Turn the current working folder into a known, reproducible starting point.
 
 ## Tasks
 
-- [ ] Create an implementation branch from the current branch.
-- [ ] Inventory every modified and untracked file.
-- [ ] Separate intended product changes from caches, worktrees, generated output, and local configuration.
-- [ ] Review the current CLI REPL, MCP warning, and local web app changes.
-- [ ] Commit intended changes in logical commits.
-- [ ] Remove or ignore unintended generated files.
-- [ ] Preserve all user-authored work; do not discard dirty files without review.
-- [ ] Fix `test_check_health_stale` to use a date relative to the test clock.
-- [ ] Update `test_set_backup_key_writes_next_value` to require the plaintext MCP warning.
-- [ ] Run all Python tests.
-- [ ] Run both frontend builds.
-- [ ] Run Python compilation checks.
-- [ ] Record the exact baseline versions of Python, Node, npm, OS, and dependencies.
-- [ ] Tag the clean baseline as an internal pre-production milestone.
+- [x] Create an implementation branch from the current branch.
+- [x] Inventory every modified and untracked file.
+- [x] Separate intended product changes from caches, worktrees, generated output, and local configuration.
+- [x] Review the current CLI REPL, MCP warning, and local web app changes.
+- [x] Commit intended changes in logical commits.
+- [x] Remove or ignore unintended generated files.
+- [x] Preserve all user-authored work; do not discard dirty files without review.
+- [x] Fix `test_check_health_stale` to use a date relative to the test clock.
+- [x] Update `test_set_backup_key_writes_next_value` to require the plaintext MCP warning.
+- [x] Run all Python tests.
+- [x] Run both frontend builds.
+- [x] Run Python compilation checks.
+- [x] Record the exact baseline versions of Python, Node, npm, OS, and dependencies.
+- [x] Tag the clean baseline as an internal pre-production milestone.
 
 ## Verification
 
@@ -105,14 +109,14 @@ cd ../web-app; npm ci; npm run build
 
 ## Exit Gate
 
-- [ ] Clean working tree
-- [ ] 256/256 or current collected test count passing
-- [ ] Both Next.js production builds passing
-- [ ] No unknown or accidental files in the release baseline
+- [x] Clean working tree
+- [x] Current collected test count completes: 334 passed and 1 justified platform skip
+- [x] Both Next.js production builds passing
+- [x] No unknown or accidental files in the release baseline
 
 ---
 
-# Phase 1 — Architecture and Contract Lock
+# Phase 1, Architecture and Contract Lock
 
 **Objective:** Eliminate duplicate ownership and define the contracts all clients will use.
 
@@ -150,7 +154,7 @@ cd ../web-app; npm ci; npm run build
 
 ---
 
-# Phase 2 — Core Vault, CLI, MCP, and Local API Hardening
+# Phase 2, Core Vault, CLI, MCP, and Local API Hardening
 
 **Objective:** Make every local secret-handling path robust under failure and hostile input.
 
@@ -231,22 +235,22 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ---
 
-# Phase 3 — Production Admin Authentication and Authorization
+# Phase 3, Production Admin Authentication and Authorization
 
 **Objective:** Replace the browser-held global admin secret with accountable, revocable administration.
 
 ## Tasks
 
 - [ ] Define admin user, role, session, MFA, recovery, and audit models.
-- [ ] Store admin password hashes with Argon2id or an approved password hasher.
+- [x] Store newly created admin password hashes with Argon2id while retaining legacy bcrypt verification.
 - [ ] Add individual admin accounts.
 - [ ] Add least-privilege roles and route permissions.
 - [ ] Add MFA enrollment, verification, recovery codes, and reset procedures.
-- [ ] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
+- [x] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
 - [ ] Add refresh rotation and server-side session revocation.
-- [ ] Add CSRF protection for cookie-authenticated mutations.
-- [ ] Remove `X-Admin-Secret` from public browser requests.
-- [ ] Remove admin secrets from `localStorage`.
+- [x] Add CSRF protection for cookie-authenticated mutations.
+- [x] Remove `X-Admin-Secret` from public browser requests.
+- [x] Remove admin secrets from `localStorage`.
 - [ ] Keep a break-glass credential only in the server secret store, not the UI.
 - [ ] Add login throttling, lockout policy, and alerting.
 - [ ] Record actor ID, role, request ID, IP, and target in audit events.
@@ -267,7 +271,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ---
 
-# Phase 4 — Durable Cloud Data and Sync Protocol
+# Phase 4, Durable Cloud Data and Sync Protocol
 
 **Objective:** Replace flat files with transactional storage and conflict-safe encrypted blob storage.
 
@@ -308,7 +312,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ---
 
-# Phase 5 — Cloud API Security and Abuse Controls
+# Phase 5, Cloud API Security and Abuse Controls
 
 **Objective:** Harden authentication, network boundaries, quotas, and failure behavior.
 
@@ -340,7 +344,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ---
 
-# Phase 6 — Frontend Completion and Accessibility
+# Phase 6, Frontend Completion and Accessibility
 
 **Objective:** Finish and verify the local product UI and public/commercial web surfaces.
 
@@ -375,7 +379,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ---
 
-# Phase 7 — Packaging and Reproducible Builds
+# Phase 7, Packaging and Reproducible Builds
 
 **Objective:** Make every supported installation path deliver the same documented product safely.
 
@@ -430,7 +434,7 @@ npm pack --dry-run
 
 ---
 
-# Phase 8 — CI/CD and Supply-Chain Security
+# Phase 8, CI/CD and Supply-Chain Security
 
 **Objective:** Make production quality enforceable on every change and release.
 
@@ -462,7 +466,7 @@ npm pack --dry-run
 
 ---
 
-# Phase 9 — Extensions and Secondary Clients
+# Phase 9, Extensions and Secondary Clients
 
 **Objective:** Either make extensions production-grade or remove them from launch claims.
 
@@ -495,7 +499,7 @@ npm pack --dry-run
 
 ---
 
-# Phase 10 — Operations, Backup, Monitoring, and Incident Readiness
+# Phase 10, Operations, Backup, Monitoring, and Incident Readiness
 
 **Objective:** Ensure the service can be operated and recovered, not merely deployed.
 
@@ -529,7 +533,7 @@ npm pack --dry-run
 
 ---
 
-# Phase 11 — Documentation, Legal, Support, and Commercial Readiness
+# Phase 11, Documentation, Legal, Support, and Commercial Readiness
 
 **Objective:** Align customer promises and internal operations with the verified product.
 
@@ -559,7 +563,7 @@ npm pack --dry-run
 
 ---
 
-# Phase 12 — Independent Security Review and Release Candidate
+# Phase 12, Independent Security Review and Release Candidate
 
 **Objective:** Prove the assembled system is safe and releasable.
 

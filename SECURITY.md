@@ -17,8 +17,8 @@ This document is the canonical reference for the Pushkey vault format. It exists
 ### File Location
 
 ```
-~/.pushkey/vault.enc    — encrypted vault
-~/.pushkey/.salt        — 32-byte random salt (chmod 600)
+~/.pushkey/vault.enc   , encrypted vault
+~/.pushkey/.salt       , 32-byte random salt (chmod 600)
 ```
 
 The salt is created once at vault initialization and never changes. It is used as the KDF input for all password-derived keys.
@@ -35,21 +35,21 @@ All integers are big-endian. All crypto uses `cryptography` (Python) / BoringSSL
 Offset  Length  Field
 ──────  ──────  ──────────────────────────────────────────────────────
 0       4       Magic: 0x504B3300  ("PK3\x00")
-4       32      pw_salt    — random, per-vault, used for master pw KDF
-36      32      rec_salt   — random, per-vault, used for recovery code KDF
-68      12      pw_nonce   — AES-GCM nonce for password slot
-80      48      pw_ct      — AES-GCM(pw_key, vault_key) + 16-byte tag
-128     12      rec_nonce  — AES-GCM nonce for recovery slot
-140     48      rec_ct     — AES-GCM(rec_key, vault_key) + 16-byte tag
-188     12      body_nonce — AES-GCM nonce for vault body
-200     variable body_ct   — AES-GCM(vault_key, UTF-8 JSON) + 16-byte tag
+4       32      pw_salt   , random, per-vault, used for master pw KDF
+36      32      rec_salt  , random, per-vault, used for recovery code KDF
+68      12      pw_nonce  , AES-GCM nonce for password slot
+80      48      pw_ct     , AES-GCM(pw_key, vault_key) + 16-byte tag
+128     12      rec_nonce , AES-GCM nonce for recovery slot
+140     48      rec_ct    , AES-GCM(rec_key, vault_key) + 16-byte tag
+188     12      body_nonce, AES-GCM nonce for vault body
+200     variable body_ct  , AES-GCM(vault_key, UTF-8 JSON) + 16-byte tag
 ```
 
 Total header size: 200 bytes. Body is variable length.
 
 ### Key Derivation
 
-Both the master password path and the recovery code path use the same KDF — Argon2id with independent salts.
+Both the master password path and the recovery code path use the same KDF, Argon2id with independent salts.
 
 **Master password:**
 ```
@@ -180,7 +180,7 @@ The log key is derived from the salt (not the master password):
 log_key = PBKDF2-HMAC-SHA256(b"pushkey-log-key", salt, iterations=100_000)
 ```
 
-This allows audit log inspection without the master password — intentionally. If the master password changes, the log remains readable.
+This allows audit log inspection without the master password, intentionally. If the master password changes, the log remains readable.
 
 Because the salt is stored locally and is not secret, this deterministic key
 only prevents casual plaintext disclosure. An attacker able to read both the
@@ -229,13 +229,13 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 | Disk read by another process | Vault + config + log are encrypted at rest. POSIX installs request mode `0600`; Windows `chmod` does not prove restrictive ACLs, so Windows ACL enforcement/testing remains a production-readiness task. |
 | Weak master password | Argon2id with 64 MB memory cost makes brute-force expensive |
 | Forgotten master password | Recovery code (independent Argon2id slot) |
-| Lost recovery code + forgotten password | No recovery possible — this is by design |
+| Lost recovery code + forgotten password | No recovery possible, this is by design |
 | Vault file tampering | AES-GCM authentication tag detects any modification |
 | Partial write / corruption | Atomic `os.replace()` writes; 3 rolling backups at `vault_backup_*.enc` |
-| Cloud server compromise | Zero-knowledge — server stores only ciphertext |
+| Cloud server compromise | Zero-knowledge, server stores only ciphertext |
 | Key accidentally committed to git | Git scan (Starter+) + `inject` always writes `.gitignore` guard |
 | Master password stolen, no physical access | Recovery code cannot be derived from the master password |
-| Secret pasted into LLM chat (MCP `add_key` / `rotate_key` / `set_backup_key`) | **Not mitigated by this repo** — the secret enters the MCP client context and may be transmitted to or retained by the model provider, client transcript, or telemetry. Use the CLI (`pushkey add` / `pushkey rotate`, getpass) for production keys; reserve plaintext MCP tools for short-lived dev keys. See "MCP / LLM Channel" below. |
+| Secret pasted into LLM chat (MCP `add_key` / `rotate_key` / `set_backup_key`) | **Not mitigated by this repo**, the secret enters the MCP client context and may be transmitted to or retained by the model provider, client transcript, or telemetry. Use the CLI (`pushkey add` / `pushkey rotate`, getpass) for production keys; reserve plaintext MCP tools for short-lived dev keys. See "MCP / LLM Channel" below. |
 
 ---
 
@@ -257,16 +257,16 @@ CLI, even though both ultimately write to the same encrypted vault.
 | `get_key(name)` | name only; **plaintext value returned** | secret enters the MCP client context and may be retained by the client, model provider, transcript, or telemetry |
 | `inject_env(project_path, keys)` | names + path | none (writes to local `.env`) |
 | `rotate_to_backup(name)` | name only | none |
-| `unlock_vault(password)` | password / agent token | password enters the MCP client context and may be transmitted or retained depending on the client/provider — prefer scoped agent tokens (`pk_agent_…`) and revoke after use |
+| `unlock_vault(password)` | password / agent token | password enters the MCP client context and may be transmitted or retained depending on the client/provider, prefer scoped agent tokens (`pk_agent_…`) and revoke after use |
 | `add_key(name, value, …)` | **plaintext value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
 | `rotate_key(name, new_value)` | **plaintext new_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
 | `set_backup_key(name, backup_value)` | **plaintext backup_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
 
 ### Recommended Policy
 
-- **Dev / throwaway / sandbox keys** — plaintext MCP tools are acceptable.
+- **Dev / throwaway / sandbox keys**, plaintext MCP tools are acceptable.
   Speed > secrecy when the key will be discarded inside the day.
-- **Long-lived / production keys** — use the CLI:
+- **Long-lived / production keys**, use the CLI:
   ```
   pushkey add <NAME>          # getpass prompt, no echo
   pushkey rotate <NAME>       # getpass prompt, no echo
@@ -276,7 +276,7 @@ CLI, even though both ultimately write to the same encrypted vault.
   provider, the chat transcript, or your shell history.
 
   For LLM-driven rotation of production keys, pre-stage a backup with the CLI
-  and trigger promotion from chat with `rotate_to_backup(name)` — only the
+  and trigger promotion from chat with `rotate_to_backup(name)`, only the
   key *name* crosses the wire.
 
 Each plaintext-argument MCP tool now returns a `warning` field reminding the
@@ -314,9 +314,9 @@ assets change; packaging performs this step automatically.
 
 The following are proprietary and not part of the open-core security surface:
 
-- `pushkey_tiers.py` — license gate logic
-- `server/` — cloud sync backend (separate private repo)
-- `web/` — admin dashboard
+- `pushkey_tiers.py`, license gate logic
+- `server/`, cloud sync backend (separate private repo)
+- `web/`, admin dashboard
 
 Security findings in these components are still welcome via the email above, but they won't be addressed via public PRs.
 
