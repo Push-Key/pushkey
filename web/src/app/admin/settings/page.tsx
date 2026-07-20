@@ -1,6 +1,6 @@
 "use client"
 import { useEffect, useState } from "react"
-import { CheckCircle, AlertCircle, Settings as SettingsIcon, Mail, Shield, Database, Send, Copy, Check, Download } from "lucide-react"
+import { CheckCircle, AlertCircle, Settings as SettingsIcon, Mail, Shield, Database, Send, Download } from "lucide-react"
 import { adminApi, type AdminSettings } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
 
@@ -42,11 +42,8 @@ export default function SettingsPage() {
   const [testTo, setTestTo] = useState("")
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ sent: boolean; reason?: string } | null>(null)
-  const [secretShown, setSecretShown] = useState(false)
-  const [copiedSecret, setCopiedSecret] = useState(false)
 
   useEffect(() => {
-    if (!secret) return
     adminApi.settings(secret)
       .then(setSettings)
       .catch(() => {})
@@ -65,12 +62,6 @@ export default function SettingsPage() {
     } finally {
       setTesting(false)
     }
-  }
-
-  function copySecret() {
-    navigator.clipboard.writeText(secret)
-    setCopiedSecret(true)
-    setTimeout(() => setCopiedSecret(false), 2000)
   }
 
   if (loading || !settings) {
@@ -141,35 +132,17 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* Admin Secret */}
-        <Section icon={<Shield size={16} />} title="Admin Secret" desc="Shared secret for admin API access. Set via PUSHKEY_ADMIN_SECRET env var.">
+        {/* Admin auth */}
+        <Section icon={<Shield size={16} />} title="Admin Authentication" desc="Cookie sessions with CSRF protection and attributable audit events.">
           <div className="space-y-1">
             <StatusRow
-              ok={settings.admin_secret_set}
-              label="Custom secret"
-              value={settings.admin_secret_set ? "Set (custom)" : "Default — change in production!"}
+              ok={settings.admin_auth === "cookie_session"}
+              label="Auth mode"
+              value={settings.admin_auth}
             />
-            <div className="flex items-center justify-between py-2.5">
-              <span className="text-sm text-white">Current session secret</span>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-sm text-[#94A3B8]">
-                  {secretShown ? secret : "•".repeat(Math.min(secret.length, 12))}
-                </span>
-                <button onClick={() => setSecretShown(!secretShown)} className="text-xs text-sky-400 hover:text-sky-300 transition-colors">
-                  {secretShown ? "Hide" : "Show"}
-                </button>
-                <button onClick={copySecret} className="text-[#94A3B8] hover:text-white transition-colors">
-                  {copiedSecret ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                </button>
-              </div>
-            </div>
+            <StatusRow ok={true} label="Credential source" value="Server-provisioned admin account" />
+            <StatusRow ok={true} label="Browser storage" value="No admin secret in localStorage" />
           </div>
-          {!settings.admin_secret_set && (
-            <div className="mt-4 bg-red-900/20 border border-red-800/40 rounded-lg p-3 text-xs text-red-300">
-              <p className="font-medium mb-1">⚠ Using default secret. Set this before deploying:</p>
-              <pre className="font-mono text-[11px] mt-1">PUSHKEY_ADMIN_SECRET=&quot;YourStrongSecret123!&quot;</pre>
-            </div>
-          )}
         </Section>
 
         {/* App config */}

@@ -41,7 +41,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 try:
-    from fastapi import FastAPI, HTTPException, Depends, Request, Header
+    from fastapi import FastAPI, HTTPException, Depends, Request, Header, Cookie
     from fastapi.responses import JSONResponse, Response
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from fastapi.middleware.cors import CORSMiddleware
@@ -95,15 +95,24 @@ app.add_middleware(
 
 # ── Admin config ─────────────────────────────────────────────────
 LICENSES_FILE = DATA_DIR / "licenses.json"
-ADMIN_SECRET = os.environ.get("PUSHKEY_ADMIN_SECRET", "")
-if not ADMIN_SECRET:
+ADMINS_FILE = DATA_DIR / "admins.json"
+ADMIN_SESSIONS_FILE = DATA_DIR / "admin_sessions.json"
+ADMIN_BOOTSTRAP_EMAIL = os.environ.get("PUSHKEY_ADMIN_EMAIL", "").strip().lower()
+ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
+ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
+ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"))
+ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
+if ADMIN_SESSION_TTL_MIN <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_SESSION_TTL_MIN must be greater than zero")
+if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
     if _DEV_MODE:
-        ADMIN_SECRET = "dev-change-me"
-        print("[pushkey] WARNING: PUSHKEY_ADMIN_SECRET not set — using 'dev-change-me' (dev mode only)")
+        ADMIN_BOOTSTRAP_EMAIL = ADMIN_BOOTSTRAP_EMAIL or "admin@localhost"
+        ADMIN_BOOTSTRAP_PASSWORD = ADMIN_BOOTSTRAP_PASSWORD or "dev-change-me"
+        print("[pushkey] WARNING: admin bootstrap credentials defaulted (dev mode only)")
     else:
         raise SystemExit(
-            "\n[pushkey] FATAL: PUSHKEY_ADMIN_SECRET environment variable is required.\n"
-            "Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "\n[pushkey] FATAL: PUSHKEY_ADMIN_EMAIL and PUSHKEY_ADMIN_PASSWORD are required.\n"
+            "Generate a password: python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
             "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
         )
 _KNOWN_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
@@ -352,13 +361,24 @@ def _load_events() -> list[dict]:
             pass
     return out
 
-def _log_audit(action: str, target: str, details: dict | None = None) -> None:
+def _log_audit(
+    action: str,
+    target: str,
+    details: dict | None = None,
+    actor: dict | None = None,
+    request: Request | None = None,
+) -> None:
     """Record admin action for compliance audit trail."""
     entry = {
         "ts":      _utcnow().isoformat(),
         "action":  action,
         "target":  target,
         "details": details or {},
+        "actor_id": actor.get("id", "system") if actor else "system",
+        "actor_email": actor.get("email", "") if actor else "",
+        "actor_role": actor.get("role", "") if actor else "",
+        "request_id": request.headers.get("x-request-id", "") if request else "",
+        "ip": request.client.host if request and request.client else "",
     }
     with AUDIT_FILE.open("a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -708,9 +728,139 @@ def _mutate_licenses(mutator):
         _save_licenses(licenses)
         return result
 
-def _require_admin(x_admin_secret: str = Header(default="")):
-    if not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
-        raise HTTPException(403, "Forbidden")
+def _load_admins() -> dict:
+    if not ADMINS_FILE.exists():
+        admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
+        data = {
+            admin_id: {
+                "id": admin_id,
+                "email": ADMIN_BOOTSTRAP_EMAIL,
+                "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
+                "role": "owner",
+                "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
+                "created": _utcnow().isoformat(),
+                "disabled": False,
+            }
+        }
+        ADMINS_FILE.write_text(json.dumps(data, indent=2))
+        return data
+    return json.loads(ADMINS_FILE.read_text())
+
+
+def _save_admins(data: dict) -> None:
+    ADMINS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_admin_sessions() -> dict:
+    if not ADMIN_SESSIONS_FILE.exists():
+        return {}
+    return json.loads(ADMIN_SESSIONS_FILE.read_text())
+
+
+def _save_admin_sessions(data: dict) -> None:
+    ADMIN_SESSIONS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _admin_by_email(email: str) -> dict | None:
+    email = email.strip().lower()
+    for admin in _load_admins().values():
+        if admin.get("email", "").lower() == email:
+            return admin
+    return None
+
+
+def _totp_code(secret: str, counter: int) -> str:
+    import struct
+    normalized = secret.replace(" ", "").upper()
+    padded = normalized + "=" * (-len(normalized) % 8)
+    key = base64.b32decode(padded, casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % 1_000_000).zfill(6)
+
+
+def _verify_totp(secret: str, code: str, now: int | None = None) -> bool:
+    if not secret:
+        return True
+    if not code or not code.isdigit():
+        return False
+    step = int((now or time.time()) // 30)
+    return any(hmac.compare_digest(_totp_code(secret, step + drift), code) for drift in (-1, 0, 1))
+
+
+def _issue_admin_session(admin: dict, request: Request) -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    expires_at = (_utcnow() + timedelta(minutes=ADMIN_SESSION_TTL_MIN)).isoformat()
+    sessions[token_hash] = {
+        "admin_id": admin["id"],
+        "csrf_hash": hashlib.sha256(csrf.encode()).hexdigest(),
+        "created": _utcnow().isoformat(),
+        "expires_at": expires_at,
+        "revoked": False,
+        "ip": request.client.host if request.client else "",
+        "last_used": _utcnow().isoformat(),
+    }
+    _save_admin_sessions(sessions)
+    return token, csrf
+
+
+def _set_admin_cookies(response: Response, token: str, csrf: str) -> None:
+    response.set_cookie(
+        "pk_admin_session",
+        token,
+        httponly=True,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="strict",
+        max_age=ADMIN_SESSION_TTL_MIN * 60,
+        path="/",
+    )
+    response.set_cookie(
+        "pk_admin_csrf",
+        csrf,
+        httponly=False,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="strict",
+        max_age=ADMIN_SESSION_TTL_MIN * 60,
+        path="/",
+    )
+
+
+def _clear_admin_cookies(response: Response) -> None:
+    response.delete_cookie("pk_admin_session", path="/")
+    response.delete_cookie("pk_admin_csrf", path="/")
+
+
+def _require_admin(
+    request: Request,
+    pk_admin_session: str = Cookie(default=""),
+    x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+) -> dict:
+    if not pk_admin_session:
+        raise HTTPException(401, "Not authenticated")
+    token_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    session = sessions.get(token_hash)
+    if not session or session.get("revoked"):
+        raise HTTPException(401, "Not authenticated")
+    if session["expires_at"] < _utcnow().isoformat():
+        session["revoked"] = True
+        _save_admin_sessions(sessions)
+        raise HTTPException(401, "Session expired")
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        expected = session.get("csrf_hash", "")
+        actual = hashlib.sha256(x_csrf_token.encode()).hexdigest() if x_csrf_token else ""
+        if not expected or not hmac.compare_digest(expected, actual):
+            raise HTTPException(403, "CSRF check failed")
+    admin = _load_admins().get(session["admin_id"])
+    if not admin or admin.get("disabled"):
+        raise HTTPException(403, "Admin disabled")
+    session["last_used"] = _utcnow().isoformat()
+    _save_admin_sessions(sessions)
+    return {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")}
 
 def _gen_key(tier: str) -> str:
     import secrets as _sec, string as _s
@@ -720,6 +870,54 @@ def _gen_key(tier: str) -> str:
     seg2 = "".join(_sec.choice(chars) for _ in range(16))
     seg3 = "".join(_sec.choice(chars) for _ in range(4))
     return f"{prefix}-{seg1}-{seg2}-{seg3}"
+
+
+@app.post("/api/admin/auth/login")
+async def admin_login(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_check(_AUTH_HITS, f"admin:{ip}", AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+        raise HTTPException(429, "Too many login attempts")
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    mfa_code = body.get("mfa_code", "")
+    admin = _admin_by_email(email) if email else None
+    if not admin or admin.get("disabled") or not pwd_ctx.verify(password, admin["hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    if not _verify_totp(admin.get("mfa_secret", ""), mfa_code):
+        raise HTTPException(401, "Invalid credentials")
+    token, csrf = _issue_admin_session(admin, request)
+    response = JSONResponse({
+        "ok": True,
+        "admin": {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")},
+        "csrf_token": csrf,
+        "mfa_required": bool(admin.get("mfa_secret")),
+    })
+    _set_admin_cookies(response, token, csrf)
+    _log_audit("admin_login", admin["id"], actor=admin, request=request)
+    return response
+
+
+@app.post("/api/admin/auth/logout")
+async def admin_logout(
+    response: Response,
+    actor: dict = Depends(_require_admin),
+    pk_admin_session: str = Cookie(default=""),
+):
+    sessions = _load_admin_sessions()
+    if pk_admin_session:
+        token_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+        if token_hash in sessions:
+            sessions[token_hash]["revoked"] = True
+            _save_admin_sessions(sessions)
+    _clear_admin_cookies(response)
+    _log_audit("admin_logout", actor["id"], actor=actor)
+    return {"ok": True}
+
+
+@app.get("/api/admin/auth/me")
+async def admin_me(actor: dict = Depends(_require_admin)):
+    return {"admin": actor}
 
 
 SMTP_HOST  = os.environ.get("SMTP_HOST", "")
@@ -1732,7 +1930,7 @@ async def admin_settings(_: None = Depends(_require_admin)):
             "configured": bool(SMTP_HOST and SMTP_USER and SMTP_PASS),
         },
         "app_url":             APP_URL,
-        "admin_secret_set":    ADMIN_SECRET != "dev-change-me",
+        "admin_auth":          "cookie_session",
         "data_dir":            str(DATA_DIR),
         "license_count":       len(_load_licenses()),
         "event_count":         len(_load_events()),

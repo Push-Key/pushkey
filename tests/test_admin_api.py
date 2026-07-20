@@ -12,7 +12,9 @@ import pytest
 def app_module(tmp_path, monkeypatch):
     """Import cloud API with a tmp data dir + admin secret."""
     monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PUSHKEY_ADMIN_SECRET", "test-secret")
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
     # Block .env from leaking host SMTP creds into module-level constants
     for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
@@ -30,26 +32,49 @@ def app_module(tmp_path, monkeypatch):
 @pytest.fixture
 def client(app_module):
     from fastapi.testclient import TestClient
-    return TestClient(app_module.app)
+    c = TestClient(app_module.app)
+    r = c.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    })
+    assert r.status_code == 200
+    ADMIN["X-CSRF-Token"] = r.json()["csrf_token"]
+    return c
 
 
-ADMIN = {"X-Admin-Secret": "test-secret"}
+ADMIN = {"X-CSRF-Token": ""}
 
 
 # ── Auth ─────────────────────────────────────────────────────────
 def test_admin_endpoints_reject_missing_secret(client):
+    client.cookies.clear()
     r = client.get("/api/admin/stats")
-    assert r.status_code == 403
+    assert r.status_code == 401
 
 
 def test_admin_endpoints_reject_wrong_secret(client):
-    r = client.get("/api/admin/stats", headers={"X-Admin-Secret": "wrong"})
+    r = client.post("/api/admin/licenses/generate", json={"tier": "pro"}, headers={"X-CSRF-Token": "wrong"})
     assert r.status_code == 403
 
 
 def test_admin_endpoints_accept_correct_secret(client):
     r = client.get("/api/admin/stats", headers=ADMIN)
     assert r.status_code == 200
+
+
+def test_admin_login_sets_session_and_csrf(client):
+    r = client.get("/api/admin/auth/me", headers=ADMIN)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["admin"]["email"] == "admin@example.com"
+    assert body["admin"]["role"] == "owner"
+
+
+def test_admin_logout_revokes_session(client):
+    r = client.post("/api/admin/auth/logout", headers=ADMIN)
+    assert r.status_code == 200
+    r = client.get("/api/admin/stats", headers=ADMIN)
+    assert r.status_code == 401
 
 
 # ── License generation ───────────────────────────────────────────
@@ -266,6 +291,9 @@ def test_audit_log_records_actions(client):
     actions = [e["action"] for e in audit]
     assert "generate_license" in actions
     assert "revoke_license" in actions
+    login = next(e for e in audit if e["action"] == "admin_login")
+    assert login["actor_email"] == "admin@example.com"
+    assert login["actor_role"] == "owner"
 
 
 # ── Tickets ──────────────────────────────────────────────────────
@@ -311,7 +339,7 @@ def test_settings_endpoint(client):
     s = r.json()
     assert "smtp" in s
     assert "version" in s
-    assert s["admin_secret_set"] is True  # we set it via env
+    assert s["admin_auth"] == "cookie_session"
 
 
 def test_test_email_no_smtp(client):
@@ -403,7 +431,9 @@ def test_license_crm_auto_expire_flips_status(client):
 def low_rate_limit_app(tmp_path, monkeypatch):
     """Re-import cloud_api with tight rate limits so tests run fast."""
     monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PUSHKEY_ADMIN_SECRET", "test-secret")
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
     monkeypatch.setenv("AUTH_RATE_MAX", "2")
     monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
