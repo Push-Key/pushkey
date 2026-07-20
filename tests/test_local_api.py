@@ -945,15 +945,22 @@ def test_rekey_reports_health_lock_timeout_without_details(client, auth, fresh_a
 
 
 def test_rekey_health_failure_locks_existing_session(client, auth, fresh_app, monkeypatch):
+    import pushkey_vault
     from pushkey_health import HealthUnavailableError
 
     _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
     assert client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
-    monkeypatch.setattr(fresh_app, "rekey_v3_password", lambda *args: (_ for _ in ()).throw(HealthUnavailableError("health_write_failed")))
+    original = _s.VAULT_FILE.read_bytes()
+    monkeypatch.setattr(
+        pushkey_vault,
+        "_invalidate_health_under_vault_lock",
+        lambda *args: (_ for _ in ()).throw(HealthUnavailableError("health_write_failed")),
+    )
 
     r = client.post("/api/vault/rekey", headers=auth,
                     json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD", "new_password": "rotated-pass"})
     assert r.status_code == 503
+    assert _s.VAULT_FILE.read_bytes() != original
     assert client.get("/api/keys", headers=auth).status_code == 423
 
 
@@ -1011,15 +1018,47 @@ def test_backup_import_reports_unsafe_health_path_without_details(client, auth, 
 
 def test_backup_import_health_failure_locks_existing_session(client, auth, fresh_app, monkeypatch):
     import base64
+    import json
+    import pushkey_vault
     from pushkey_health import HealthUnavailableError
 
     _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
     assert client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
-    blob = base64.b64encode(b"PK3\x00" + b"x" * 196).decode()
-    monkeypatch.setattr(fresh_app, "replace_encrypted_vault_bytes", lambda *args: (_ for _ in ()).throw(HealthUnavailableError("health_write_failed")))
+    replacement = encrypt_data_v3(
+        json.dumps({"_schema": _s.VAULT_SCHEMA_VERSION, "keys": {"IMPORTED": {"value": "v"}}}),
+        "imported-pw",
+        "PUSH-ABCD-EFGH-JKLM-NPQR",
+    )
+    blob = base64.b64encode(replacement).decode()
+    monkeypatch.setattr(
+        pushkey_vault,
+        "_invalidate_health_under_vault_lock",
+        lambda *args: (_ for _ in ()).throw(HealthUnavailableError("health_write_failed")),
+    )
 
     r = client.post("/api/backup/import", headers=auth, json={"blob_b64": blob})
     assert r.status_code == 503
+    assert _s.VAULT_FILE.read_bytes() == replacement
+    assert client.get("/api/keys", headers=auth).status_code == 423
+
+
+def test_recovery_add_health_failure_locks_existing_session(client, auth, fresh_app, monkeypatch):
+    import pushkey_vault
+    from pushkey_health import HealthUnavailableError
+
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    assert client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
+    original = _s.VAULT_FILE.read_bytes()
+    monkeypatch.setattr(fresh_app, "generate_recovery_code", lambda: "PUSH-ABCD-EFGH-JKLM-NPQR")
+    monkeypatch.setattr(
+        pushkey_vault,
+        "_invalidate_health_under_vault_lock",
+        lambda *args: (_ for _ in ()).throw(HealthUnavailableError("health_write_failed")),
+    )
+
+    r = client.post("/api/recovery/add", headers=auth, json={"password": "master-pw"})
+    assert r.status_code == 503
+    assert _s.VAULT_FILE.read_bytes() != original
     assert client.get("/api/keys", headers=auth).status_code == 423
 
 

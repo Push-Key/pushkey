@@ -1122,6 +1122,11 @@ def create_app() -> FastAPI:
             raise HTTPException(401, "wrong password")
         except (VaultFormatError, VaultIntegrityError):
             raise HTTPException(422, "vault cannot be upgraded")
+        except (HealthUnavailableError, VaultBusyError):
+            # A replacement may already be durable when sidecar invalidation
+            # reports a boundary failure. Never retain an older unlocked view.
+            app.state.session.lock()
+            raise HTTPException(503, "health sidecar unavailable")
         except OSError:
             raise HTTPException(500, "vault upgrade failed")
         return {"recovery_code": recovery}
