@@ -295,7 +295,7 @@ def test_static_manifest_rejects_tampered_asset(fresh_app, tmp_path):
     source = fresh_app._static_dir()
     assert source
     copied = tmp_path / "out"
-    shutil.copytree(source, copied)
+    shutil.copytree(source, copied, copy_function=shutil.copyfile)
     manifest = json.loads((copied / "pushkey-integrity.json").read_text(encoding="utf-8"))
     relative = next(iter(manifest["files"]))
     with (copied / relative).open("ab") as handle:

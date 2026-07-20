@@ -38,5 +38,5 @@ namespaces = false
 pushkey_web = ["out/**/*"]
 
 [tool.pytest.ini_options]
-tmp_path_retention_policy = "none"
+tmp_path_retention_policy = "failed"
 addopts = "--basetemp=.pytest_tmp"
