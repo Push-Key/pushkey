@@ -83,7 +83,7 @@ Result:
 - Errors: 0
 - Skipped: 1
 - Warnings: 2
-- Runtime: 279.08 seconds
+- Runtime: 127.61 seconds
 
 The skip is `test_inject_rejects_env_symlink` when Windows symlink creation is
 unavailable. This is a narrow platform condition in the test, not a broad suite
@@ -93,16 +93,16 @@ The slowest recorded durations were:
 
 | Test | Phase | Duration |
 |---|---|---:|
-| `test_status_reports_can_write_false_on_recovery` | setup | 15.82s |
-| `test_normal_saves_retain_exactly_three_rolling_backups` | call | 4.86s |
-| `test_v3_cli_mutations_preserve_recovery_unlock` | call | 4.83s |
-| `test_status_reports_can_write_true_on_password` | setup | 4.28s |
-| `test_vault_starts_locked` | call | 4.17s |
-| `test_failed_normal_replace_does_not_prune_existing_history` | call | 4.14s |
-| `test_project_state_persists_across_disk_reload` | call | 3.85s |
-| `test_master_password_with_special_chars` | call | 3.24s |
-| `test_v3_decrypts_vault_created_with_legacy_pbkdf2` | call | 3.20s |
-| `test_replace_v3_recovery_preserves_data_and_invalidates_old_code` | call | 3.20s |
+| `test_project_state_persists_across_disk_reload` | call | 3.89s |
+| `test_rekey_with_recovery_code` | call | 3.06s |
+| `test_delete_project_clears_assignments` | call | 2.71s |
+| `test_unassign_keys` | call | 2.62s |
+| `test_rekey_wrong_recovery_code` | call | 2.24s |
+| `test_inject_skips_existing_env_keys` | call | 1.93s |
+| `test_rotate_to_backup_promotes_and_clears_slot` | call | 1.88s |
+| `test_unlock_bad_password` | call | 1.88s |
+| `test_gitignore_failure_prevents_env_secret_write` | call | 1.87s |
+| `test_rotate_key_updates_value` | call | 1.86s |
 
 The suite exited normally. No pytest, Uvicorn, or local API process remained.
 The static-manifest cleanup regression test also leaves zero entries under
