@@ -44,11 +44,11 @@
 - Modify: `pyproject.toml`
 - Modify: `build_exe.py`
 
-- [ ] **Step 1: Record CP1 as in progress**
+- [x] **Step 1: Record CP1 as in progress**
 
 Update `docs/IMPLEMENTATION_STATUS.md` with the active commit, CP1 task list, and the fact that implementation begins only after the spec and this plan are approved.
 
-- [ ] **Step 2: Write failing lock tests**
+- [x] **Step 2: Write failing lock tests**
 
 Cover two Python processes holding one adjacent lock path, bounded timeout, release after exception, and both Windows and POSIX code paths.
 
@@ -60,7 +60,7 @@ def test_second_process_times_out_while_first_holds_lock(lock_path):
                 pass
 ```
 
-- [ ] **Step 3: Run lock tests and verify RED**
+- [x] **Step 3: Run lock tests and verify RED**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_locking.py -v
@@ -68,7 +68,7 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_lockin
 
 Expected: FAIL because `pushkey_locking` does not exist.
 
-- [ ] **Step 4: Implement the bounded lock**
+- [x] **Step 4: Implement the bounded lock**
 
 Expose:
 
@@ -82,7 +82,7 @@ def bounded_file_lock(path: Path, *, timeout_seconds: float = 5.0,
 
 Use a one-byte lock with `msvcrt.locking(..., LK_NBLCK, 1)` on Windows and nonblocking `fcntl.flock` on POSIX. Use `time.monotonic()`; never delete a lock file owned by another process.
 
-- [ ] **Step 5: Run lock tests and verify GREEN**
+- [x] **Step 5: Run lock tests and verify GREEN**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_locking.py -v
@@ -90,7 +90,7 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_lockin
 
 Expected: PASS.
 
-- [ ] **Step 6: Add package metadata and commit**
+- [x] **Step 6: Add package metadata and commit**
 
 ```powershell
 git add docs/IMPLEMENTATION_STATUS.md pushkey_locking.py tests/test_locking.py pyproject.toml build_exe.py
