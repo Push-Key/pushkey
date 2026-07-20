@@ -117,11 +117,23 @@ new_pw_ct    = AES-256-GCM.encrypt(new_pw_key, vault_key)
 ### Recovery Code Generation
 
 ```python
-raw  = secrets.token_bytes(13)          # 104 bits
-b32  = base64.b32encode(raw).rstrip("=")[:20].upper()
+raw  = secrets.token_bytes(10)          # exactly 80 bits
+b32  = base64.b32encode(raw).decode().upper()  # exactly 16 characters
 code = f"PUSH-{b32[0:4]}-{b32[4:8]}-{b32[8:12]}-{b32[12:16]}"
-# Effective entropy: ~80 bits (16 base32 chars × 5 bits)
 ```
+
+Effective entropy is exactly 80 bits. Input normalization removes spaces and
+hyphens and converts letters to uppercase, then requires exactly the `PUSH`
+prefix plus 16 RFC 4648 Base32 characters (`A-Z`, `2-7`).
+
+V3 did not originally encode a KDF identifier. Readers therefore try Argon2id
+first and historical PBKDF2 second when Argon2 is installed. New V3 creation
+always requires and uses Argon2id with the fixed documented parameters; PBKDF2
+is decrypt-only compatibility for historical V2/V3 vaults. A future format
+revision must add an authenticated KDF
+identifier and parameters; changing V3's deployed layout would break existing
+vaults. Without Argon2, an Argon2 vault cannot be distinguished from a wrong
+credential and is reported as a typed unsupported-KDF condition.
 
 ---
 
@@ -170,6 +182,13 @@ log_key = PBKDF2-HMAC-SHA256(b"pushkey-log-key", salt, iterations=100_000)
 
 This allows audit log inspection without the master password — intentionally. If the master password changes, the log remains readable.
 
+Because the salt is stored locally and is not secret, this deterministic key
+only prevents casual plaintext disclosure. An attacker able to read both the
+salt and log can derive the log key. Audit-log confidentiality therefore also
+depends on OS account isolation and restrictive file permissions. Entries are
+individually authenticated, but append durability and inter-process locking
+remain separate operational concerns.
+
 ---
 
 ## Config Encryption
@@ -207,7 +226,7 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 
 | Threat | Mitigation |
 |--------|-----------|
-| Disk read by another process | Vault + config + log all encrypted at rest; `chmod 600` on sensitive files |
+| Disk read by another process | Vault + config + log are encrypted at rest. POSIX installs request mode `0600`; Windows `chmod` does not prove restrictive ACLs, so Windows ACL enforcement/testing remains a production-readiness task. |
 | Weak master password | Argon2id with 64 MB memory cost makes brute-force expensive |
 | Forgotten master password | Recovery code (independent Argon2id slot) |
 | Lost recovery code + forgotten password | No recovery possible — this is by design |

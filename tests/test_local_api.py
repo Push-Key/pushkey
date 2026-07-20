@@ -574,6 +574,10 @@ def test_init_creates_vault_when_none(client, auth):
     body = r.json()
     assert body["created"] is True
     assert body["recovery_code"].startswith("PUSH-")
+    assert all(
+        set(part) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        for part in body["recovery_code"].split("-")[1:]
+    )
     assert _s.VAULT_FILE.exists()
     # Can unlock with that password
     u = client.post("/api/unlock", headers=auth, json={"password": "newpass-1234"})

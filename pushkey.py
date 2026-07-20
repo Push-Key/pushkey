@@ -94,6 +94,7 @@ from pushkey_crypto import (
     _log_line_age_days, _migrate_plaintext_log, log_event,
     _CONFIG_KEY_CACHE, _config_key,
 )
+from pushkey_vault import migrate_vault_to_v3
 from pushkey_vault import load_vault, save_vault, load_config, save_config
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
@@ -7304,11 +7305,7 @@ class AppFrame(ctk.CTkFrame):
 
         def _save():
             try:
-                raw = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
-                new_token = add_recovery_key(raw, password, code)
-                tmp = VAULT_FILE.with_suffix('.tmp')
-                tmp.write_bytes(new_token)
-                os.replace(str(tmp), str(VAULT_FILE))
+                migrate_vault_to_v3(password, code)
                 _, self.vault_key = load_vault(password)
                 log_event("recovery key configured")
                 win.destroy()

@@ -22,8 +22,24 @@ from pydantic import BaseModel
 import json
 
 import pushkey_shared as _s
-from pushkey_crypto import _V3_MAGIC, _deserialize_vault, _migrate_vault, decrypt_data_v3
-from pushkey_vault import load_vault
+from pushkey_crypto import (
+    _V3_MAGIC,
+    _deserialize_vault,
+    _migrate_vault,
+    decrypt_data_v3,
+    generate_recovery_code,
+    VaultAuthenticationError,
+    VaultFormatError,
+    VaultIntegrityError,
+)
+from pushkey_vault import (
+    MAX_VAULT_BYTES,
+    load_vault,
+    migrate_vault_to_v3,
+    replace_v3_recovery_code,
+    rekey_v3_password,
+    save_vault,
+)
 
 
 AUTOLOCK_SECONDS_DEFAULT = 15 * 60
@@ -101,13 +117,6 @@ class ImportBody(BaseModel):
 
 def _gen_token() -> str:
     return secrets.token_urlsafe(32)
-
-
-def _gen_recovery_code() -> str:
-    """PUSH-XXXX-XXXX-XXXX-XXXX (Crockford-style alphabet, no I/L/O/U)."""
-    alphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
-    parts = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(4)]
-    return "PUSH-" + "-".join(parts)
 
 
 def _now_iso() -> str:
@@ -716,31 +725,27 @@ def create_app() -> FastAPI:
             raise HTTPException(409, "vault already exists")
         if len(body.password) < 8:
             raise HTTPException(400, "password must be at least 8 chars")
-        recovery = body.recovery_code or _gen_recovery_code()
-        from pushkey_crypto import encrypt_data_v3
-        import json as _json
-        payload = {"_schema": _s.VAULT_SCHEMA_VERSION, "keys": {}}
-        blob = encrypt_data_v3(_json.dumps(payload), body.password, recovery)
-        _s.ensure_vault_dir()
-        _s.VAULT_FILE.write_bytes(blob)
-        try:
-            os.chmod(_s.VAULT_FILE, 0o600)
-        except Exception:
-            pass
+        recovery = body.recovery_code or generate_recovery_code()
+        save_vault({}, body.password, recovery_code=recovery)
         return {"created": True, "recovery_code": recovery}
 
     @app.post("/api/recovery/add")
     def add_recovery(body: AddRecoveryBody, _: None = Depends(require_token)):
         if not _s.VAULT_FILE.exists():
             raise HTTPException(404, "no vault")
-        from pushkey_crypto import add_recovery_key
-        token = _s.VAULT_FILE.read_bytes()
-        recovery = _gen_recovery_code()
+        recovery = generate_recovery_code()
         try:
-            new_blob = add_recovery_key(token, body.password, recovery)
-        except Exception:
+            raw = _s.VAULT_FILE.read_bytes()
+            if raw.startswith(_V3_MAGIC):
+                replace_v3_recovery_code(body.password, recovery)
+            else:
+                migrate_vault_to_v3(body.password, recovery)
+        except VaultAuthenticationError:
             raise HTTPException(401, "wrong password")
-        _s.VAULT_FILE.write_bytes(new_blob)
+        except (VaultFormatError, VaultIntegrityError):
+            raise HTTPException(422, "vault cannot be upgraded")
+        except OSError:
+            raise HTTPException(500, "vault upgrade failed")
         return {"recovery_code": recovery}
 
     @app.post("/api/vault/rekey")
@@ -749,13 +754,14 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "no vault")
         if len(body.new_password) < 8:
             raise HTTPException(400, "password must be at least 8 chars")
-        from pushkey_crypto import rekey_vault
-        token = _s.VAULT_FILE.read_bytes()
         try:
-            new_blob = rekey_vault(token, body.recovery_code, body.new_password)
-        except Exception:
+            rekey_v3_password(body.recovery_code, body.new_password)
+        except VaultAuthenticationError:
             raise HTTPException(401, "invalid recovery code")
-        _s.VAULT_FILE.write_bytes(new_blob)
+        except (VaultFormatError, VaultIntegrityError):
+            raise HTTPException(422, "vault cannot be rekeyed")
+        except OSError:
+            raise HTTPException(500, "vault rekey failed")
         # Force re-unlock
         app.state.session.lock()
         return {"rekeyed": True}
@@ -779,12 +785,16 @@ def create_app() -> FastAPI:
     def backup_import(body: ImportBody, _: None = Depends(require_token)):
         import base64
         try:
-            blob = base64.b64decode(body.blob_b64)
+            blob = base64.b64decode(body.blob_b64, validate=True)
         except Exception:
             raise HTTPException(400, "invalid base64")
         from pushkey_crypto import _V3_MAGIC as _V3
         if not blob.startswith(_V3):
             raise HTTPException(400, "not a v3 vault")
+        if len(blob) > MAX_VAULT_BYTES:
+            raise HTTPException(413, "vault too large")
+        if len(blob) < 200:
+            raise HTTPException(400, "truncated v3 vault")
         _s.ensure_vault_dir()
         _s.VAULT_FILE.write_bytes(blob)
         app.state.session.lock()

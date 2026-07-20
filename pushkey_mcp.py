@@ -102,6 +102,13 @@ def _lock():
     _SESSION.clear()
 
 
+def _save_session_vault(vault) -> None:
+    if _SESSION.get("password") is not None:
+        _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    else:
+        _vault.save_vault_with_key(vault, _SESSION["vault_key"])
+
+
 # Backward-compat alias for tests written before the password/token split.
 def _unlock(password: str) -> dict:
     if password.startswith("pk_agent_"):
@@ -223,8 +230,6 @@ def add_key(
     err = _require_scope("write")
     if err:
         return err
-    if not _SESSION.get("password"):
-        return {"success": False, "error": "write operations require master password auth (agent tokens with write scope need password stored in session — re-unlock with master password)"}
     import pushkey_providers as _prov
     vault = _SESSION["vault"]
     if name in vault and not overwrite:
@@ -241,7 +246,7 @@ def add_key(
         "projects": [],
         "notes": notes,
     }
-    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    _save_session_vault(vault)
     return {
         "success": True,
         "name": name,
@@ -367,14 +372,12 @@ def rotate_key(name: str, new_value: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
-    if not _SESSION.get("password"):
-        return {"success": False, "error": "write operations require master password auth"}
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
     vault[name]["value"] = _sanitize_key_value(new_value)
     vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
-    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    _save_session_vault(vault)
     return {
         "success": True,
         "name": name,
@@ -409,8 +412,6 @@ def set_backup_key(name: str, backup_value: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
-    if not _SESSION.get("password"):
-        return {"success": False, "error": "write operations require master password auth"}
     from pushkey_tiers import can_do
     if not can_do("dual_rotation"):
         return {"success": False, "error": "Dual-key rotation requires Pro or higher. Upgrade at pushkey.dev/pricing."}
@@ -431,7 +432,7 @@ def set_backup_key(name: str, backup_value: str) -> dict:
     vault[name]["next_value"] = _sanitize_key_value(backup_value)
     vault[name]["next_added"] = datetime.now().strftime("%Y-%m-%d")
     vault[name]["dual_rotation"] = True
-    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    _save_session_vault(vault)
     try:
         from pushkey_crypto import log_event
         log_event(f"[mcp] backup key {'added' if was_enabled else 'enabled'}: {name}")
@@ -465,8 +466,6 @@ def rotate_to_backup(name: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
-    if not _SESSION.get("password"):
-        return {"success": False, "error": "write operations require master password auth"}
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
@@ -481,7 +480,7 @@ def rotate_to_backup(name: str) -> dict:
     meta["rotated"] = datetime.now().strftime("%Y-%m-%d")
     meta["next_value"] = None
     meta["next_added"] = None
-    _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+    _save_session_vault(vault)
     try:
         from pushkey_crypto import log_event
         log_event(f"[mcp] backup promoted to active: {name}")
@@ -520,8 +519,6 @@ def assign_key(key_name: str, project_path: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
-    if not _SESSION.get("password"):
-        return {"success": False, "error": "write operations require master password auth"}
     vault = _SESSION["vault"]
     if key_name not in vault:
         return {"success": False, "error": f"key '{key_name}' not found"}
@@ -529,7 +526,7 @@ def assign_key(key_name: str, project_path: str) -> dict:
     projects = vault[key_name].setdefault("projects", [])
     if resolved not in projects:
         projects.append(resolved)
-        _vault.save_vault(vault, _SESSION["password"], vault_key=_SESSION.get("vault_key"))
+        _save_session_vault(vault)
     return {"success": True, "key": key_name, "project": project_path}
 
 

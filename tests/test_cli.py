@@ -12,6 +12,7 @@ import pytest
 import pushkey_shared
 import pushkey_cli as cli
 from pushkey_vault import save_vault
+from pushkey_crypto import _V3_MAGIC, decrypt_data_v3
 
 
 PASSWORD = "cli-test-password"
@@ -49,6 +50,68 @@ def _vault_with_key():
             "rotation_count": 0,
         }
     }
+
+
+def test_cmd_init_noninteractive_creates_v3_without_printing_recovery(monkeypatch, capsys, tmp_path):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+
+    recovery_file = tmp_path / "recovery.txt"
+    cli._cmd_init(str(recovery_file))
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    assert raw.startswith(_V3_MAGIC)
+    output = capsys.readouterr().out
+    recovery = recovery_file.read_text().strip()
+    assert recovery not in output
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    assert json.loads(plaintext)["keys"] == {}
+
+
+def test_cmd_init_interactive_requires_recovery_confirmation(monkeypatch):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+
+    with pytest.raises(SystemExit):
+        cli._cmd_init()
+
+    assert not pushkey_shared.VAULT_FILE.exists()
+
+
+def test_cmd_init_noninteractive_requires_recovery_file(monkeypatch, capsys):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        cli._cmd_init()
+    assert exc.value.code == 2
+    assert "PUSH-" not in capsys.readouterr().out
+    assert not pushkey_shared.VAULT_FILE.exists()
+
+
+def test_v3_cli_mutations_preserve_recovery_unlock(tmp_path):
+    from pushkey_crypto import generate_recovery_code, decrypt_data_v3
+    recovery = generate_recovery_code()
+    save_vault({}, PASSWORD, recovery_code=recovery)
+    vault, vault_key = cli.load_vault(PASSWORD)
+
+    cli.cmd_add(Namespace(name="A", value="one", notes=None), vault, PASSWORD, vault_key)
+    cli.cmd_rotate(Namespace(name="A", new_value="two"), vault, PASSWORD, vault_key)
+    cli.cmd_add(Namespace(name="B", value="three", notes=None), vault, PASSWORD, vault_key)
+    cli.cmd_delete(Namespace(name="B", yes=True), vault, PASSWORD, vault_key)
+    env_file = tmp_path / "input.env"
+    env_file.write_text("C=four\n")
+    cli.cmd_import(Namespace(file=str(env_file)), vault, PASSWORD, vault_key)
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    data = json.loads(plaintext)["keys"]
+    assert data["A"]["value"] == "two"
+    assert data["C"]["value"] == "four"
+    assert "B" not in data
 
 
 # ── add ──────────────────────────────────────────────────────────────────────

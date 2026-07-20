@@ -72,6 +72,27 @@ def test_list_keys_locked():
     assert result.get("error") == "vault_locked"
 
 
+def test_write_scoped_raw_key_session_preserves_both_v3_slots(monkeypatch):
+    import json
+    import pushkey_shared as _s
+    from pushkey_crypto import generate_recovery_code, decrypt_data_v3
+    from pushkey_vault import save_vault, load_vault
+    recovery = generate_recovery_code()
+    save_vault({}, "password", recovery_code=recovery)
+    vault, vault_key = load_vault("password")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._SESSION.update(
+        vault=vault, vault_key=vault_key, password=None, scopes=["read", "write"]
+    )
+    assert mcp_mod.add_key("AGENT_KEY", "one")["success"]
+    assert mcp_mod.rotate_key("AGENT_KEY", "two")["success"]
+    raw = _s.VAULT_FILE.read_bytes()
+    by_password, _ = decrypt_data_v3(raw, password="password")
+    by_recovery, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    assert json.loads(by_password)["keys"]["AGENT_KEY"]["value"] == "two"
+    assert json.loads(by_recovery) == json.loads(by_password)
+
+
 def test_list_keys_returns_metadata(tmp_path, monkeypatch):
     import pushkey_shared as _s
     monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)

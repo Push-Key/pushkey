@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pushkey_shared as _s
-from pushkey_crypto import log_event
+from pushkey_crypto import generate_recovery_code, log_event
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
 from pushkey_vault import load_vault, save_vault
 
@@ -52,11 +52,11 @@ def _get_password(args):
 def _open_vault(args):
     password = _get_password(args)
     _s.ensure_vault_dir()
-    vault, _vault_key = load_vault(password)
+    vault, vault_key = load_vault(password)
     if vault is None:
         print("Error: wrong master password", file=sys.stderr)
         sys.exit(1)
-    return vault, password
+    return vault, password, vault_key
 
 
 _ENV_LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
@@ -88,7 +88,7 @@ def _ensure_gitignore(project_dir):
 
 # ── commands ──────────────────────────────────────────────────────────────────
 
-def cmd_add(args, vault, password):
+def cmd_add(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name in vault:
         print(f"Error: '{name}' already exists. Use 'rotate' to update.", file=sys.stderr)
@@ -105,13 +105,13 @@ def cmd_add(args, vault, password):
         "notes": args.notes or "",
         "rotation_count": 0,
     }
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: added {name}")
     suffix = f" [{provider}]" if provider else ""
     print(f"Added {name}{suffix}")
 
 
-def cmd_get(args, vault, password):
+def cmd_get(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
@@ -129,7 +129,7 @@ def cmd_get(args, vault, password):
         print(value)
 
 
-def cmd_list(args, vault, password):
+def cmd_list(args, vault, password, vault_key=None):
     rows = []
     for name, info in sorted(vault.items()):
         status = health_status(info)
@@ -163,7 +163,7 @@ def cmd_list(args, vault, password):
         print(f"{r['name']:<{w_name}}  {r['provider']:<{w_prov}}  {r['age']:>6}  {icon.get(r['status'], '?')} {r['status']}")
 
 
-def cmd_rotate(args, vault, password):
+def cmd_rotate(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
@@ -182,12 +182,12 @@ def cmd_rotate(args, vault, password):
     info["value"] = new_val
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: rotated {name}")
     print(f"Rotated {name}")
 
 
-def cmd_delete(args, vault, password):
+def cmd_delete(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
@@ -202,12 +202,12 @@ def cmd_delete(args, vault, password):
             print("Cancelled.")
             return
     del vault[name]
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: deleted {name}")
     print(f"Deleted {name}")
 
 
-def cmd_status(args, vault, password):
+def cmd_status(args, vault, password, vault_key=None):
     counts = {"healthy": 0, "warning": 0, "critical": 0}
     for info in vault.values():
         counts[health_status(info)] += 1
@@ -218,7 +218,7 @@ def cmd_status(args, vault, password):
     print(f"  ✗ critical:  {counts['critical']}")
 
 
-def cmd_inject(args, vault, password):
+def cmd_inject(args, vault, password, vault_key=None):
     project = Path(getattr(args, "project", None) or Path.cwd()).resolve()
     if not project.is_dir():
         print(f"Error: '{project}' is not a directory", file=sys.stderr)
@@ -268,7 +268,7 @@ def cmd_inject(args, vault, password):
     print(f"Wrote {len(keys_to_write)} key(s) to {env_path}")
 
 
-def cmd_import(args, vault, password):
+def cmd_import(args, vault, password, vault_key=None):
     path = Path(args.file)
     if not path.exists():
         print(f"Error: '{path}' not found", file=sys.stderr)
@@ -302,7 +302,7 @@ def cmd_import(args, vault, password):
         added += 1
 
     if added:
-        save_vault(vault, password)
+        save_vault(vault, password, vault_key=vault_key)
         log_event(f"cli: imported {added} keys from {path.name}")
     print(f"Imported {added} key(s), skipped {skipped} existing")
 
@@ -347,7 +347,11 @@ def main():
     p_import = sub.add_parser("import", help="Bulk import keys from a .env file")
     p_import.add_argument("file", help="Path to .env file")
 
-    sub.add_parser("init", help="Initialize a new vault")
+    p_init = sub.add_parser("init", help="Initialize a new vault")
+    p_init.add_argument(
+        "--recovery-file",
+        help="Required for non-interactive init; recovery code is written atomically",
+    )
     sub.add_parser("app", help="Launch web UI in browser")
 
     args = parser.parse_args()
@@ -356,12 +360,12 @@ def main():
         return _repl(args)
 
     if args.command == "init":
-        return _cmd_init()
+        return _cmd_init(args.recovery_file)
 
     if args.command == "app":
         return _cmd_app(blocking=True)
 
-    vault, password = _open_vault(args)
+    vault, password, vault_key = _open_vault(args)
 
     {
         "add":    cmd_add,
@@ -372,12 +376,38 @@ def main():
         "status": cmd_status,
         "inject": cmd_inject,
         "import": cmd_import,
-    }[args.command](args, vault, password)
+    }[args.command](args, vault, password, vault_key)
 
 
 # ── init ──────────────────────────────────────────────────────────────────────
 
-def _cmd_init():
+def _stdin_is_interactive():
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def _write_recovery_file(path, recovery_code):
+    destination = Path(path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(str(destination), flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as handle:
+            handle.write(recovery_code + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(destination, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def _cmd_init(recovery_file=None):
     _s.ensure_vault_dir()
     if _s.VAULT_FILE.exists():
         print(f"{C_RED}Vault already exists at {_s.VAULT_FILE}{C_RESET}", file=sys.stderr)
@@ -394,7 +424,48 @@ def _cmd_init():
     if pw1 != pw2:
         print(f"{C_RED}Passwords do not match.{C_RESET}", file=sys.stderr)
         sys.exit(1)
-    save_vault({}, pw1)
+    recovery_code = generate_recovery_code()
+    recovery_destination = None
+    if _stdin_is_interactive():
+        print(
+            "\nRecovery code (store this offline; it is the only way to reset "
+            "a forgotten password):"
+        )
+        print(recovery_code)
+        try:
+            confirmation = input("Type I SAVED IT to create the vault: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            confirmation = ""
+        if confirmation != "I SAVED IT":
+            print("Aborted: recovery code was not confirmed.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        if not recovery_file:
+            print(
+                "Non-interactive initialization requires --recovery-file; "
+                "the recovery code will not be printed.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        recovery_destination = _write_recovery_file(recovery_file, recovery_code)
+        print(f"Recovery code written to {recovery_destination}")
+    try:
+        save_vault({}, pw1, recovery_code=recovery_code)
+    except Exception:
+        if recovery_destination is not None:
+            recovery_destination.unlink(missing_ok=True)
+            try:
+                parent_fd = os.open(
+                    str(recovery_destination.parent),
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+            except OSError:
+                pass
+        raise
     log_event("cli: vault initialized")
     print(f"{C_GREEN}Vault created at {_s.VAULT_FILE}{C_RESET}")
 
@@ -670,7 +741,7 @@ def _repl_copy(vault, name):
     threading.Timer(30, lambda: _copy_to_clipboard("")).start()
 
 
-def _repl_add(vault, password):
+def _repl_add(vault, password, vault_key=None):
     try:
         name = input("  Key name: ").strip().upper()
         if not name:
@@ -694,12 +765,12 @@ def _repl_add(vault, password):
         "provider": provider, "env": "all", "projects": [],
         "notes": notes, "rotation_count": 0,
     }
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: added {name}")
     print(f"  {C_GREEN}✓ Added {name}{C_RESET}")
 
 
-def _repl_rotate(vault, password, name):
+def _repl_rotate(vault, password, name, vault_key=None):
     if name not in vault:
         print(f"{C_RED}Unknown key. Try: list{C_RESET}")
         return
@@ -719,13 +790,13 @@ def _repl_rotate(vault, password, name):
     info["value"] = new_val.strip()
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: rotated {name}")
     age_str = f"{int(old_age)}d" if old_age != float("inf") else "?"
     print(f"  {C_GREEN}✓ Rotated. Was {age_str} old.{C_RESET}")
 
 
-def _repl_delete(vault, password, name):
+def _repl_delete(vault, password, name, vault_key=None):
     if name not in vault:
         print(f"{C_RED}Unknown key. Try: list{C_RESET}")
         return
@@ -738,7 +809,7 @@ def _repl_delete(vault, password, name):
         print("  Cancelled.")
         return
     del vault[name]
-    save_vault(vault, password)
+    save_vault(vault, password, vault_key=vault_key)
     log_event(f"cli: deleted {name}")
     print(f"  {C_GREEN}✓ Deleted {name}{C_RESET}")
 
@@ -859,17 +930,17 @@ def _repl(args):
                 else:
                     _repl_copy(vault, rest[0].upper())
             elif cmd == "add":
-                _repl_add(vault, password)
+                _repl_add(vault, password, _vk)
             elif cmd == "rotate":
                 if not rest:
                     print(f"{C_RED}Usage: rotate NAME{C_RESET}")
                 else:
-                    _repl_rotate(vault, password, rest[0].upper())
+                    _repl_rotate(vault, password, rest[0].upper(), _vk)
             elif cmd == "delete":
                 if not rest:
                     print(f"{C_RED}Usage: delete NAME{C_RESET}")
                 else:
-                    _repl_delete(vault, password, rest[0].upper())
+                    _repl_delete(vault, password, rest[0].upper(), _vk)
             elif cmd == "inject":
                 _repl_inject(vault, password, rest[0] if rest else None)
             elif cmd == "app":
