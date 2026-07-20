@@ -171,11 +171,11 @@ git commit -m "Add strict health sidecar v1 schema"
 
 **Scope note:** Task 3 was expanded during review to cover GUI recovery reset and local API encrypted backup import/rekey boundaries. These opaque replacement paths must invalidate the sidecar while preserving the established vault-then-health lock ordering and must report safe boundary failures without leaving an unlocked stale session. Normal plaintext-aware publication integration remains Task 4.
 
-- [ ] **Step 1: Write failing filesystem tests**
+- [x] **Step 1: Write failing filesystem tests**
 
 Cover 1 MiB bound, unique temporary files, interruption before replacement, write/flush/replace/verification failure, symlink destination, symlink parent, symlink lock path, POSIX `0600` enforcement, Windows junction/reparse behavior with explicit privilege-sensitive skips, process concurrency, revision mismatch before and after `.health.lock`, and opaque import invalidation.
 
-- [ ] **Step 2: Run atomic-publication tests and verify RED**
+- [x] **Step 2: Run atomic-publication tests and verify RED**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health_sidecar.py -k "write or lock or replace or invalidation or concurrent" -v
@@ -183,23 +183,23 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health
 
 Expected: FAIL because sidecar publication is not implemented.
 
-- [ ] **Step 3: Refactor vault locking without changing vault behavior**
+- [x] **Step 3: Refactor vault locking without changing vault behavior**
 
 Make `pushkey_vault` use `bounded_file_lock(_s.VAULT_DIR / ".vault.lock")`. Expose narrowly scoped internal contexts for the established lock order; do not let callers acquire `.health.lock` before vault locks.
 
-- [ ] **Step 4: Implement atomic sidecar write**
+- [x] **Step 4: Implement atomic sidecar write**
 
 Use an existing directory resolved through `pushkey_shared`, reject links/reparse points as specified, create a unique same-directory temporary file, flush and fsync, atomically replace, read back through the bounded strict reader, and fsync the parent where supported.
 
-- [ ] **Step 5: Bind publishing to the encrypted vault revision**
+- [x] **Step 5: Bind publishing to the encrypted vault revision**
 
 After a successful plaintext-aware vault write, use the SHA-256 ciphertext revision attached to `VaultData`. Reacquire vault locks, verify revision before and after health-lock acquisition, then publish. Raise `health_vault_changed` rather than writing an obsolete snapshot.
 
-- [ ] **Step 6: Implement opaque replacement invalidation**
+- [x] **Step 6: Implement opaque replacement invalidation**
 
 For encrypted backup import and every other direct encrypted-vault replacement, retain vault locks, acquire `.health.lock`, remove only `health.json`, verify absence, and fsync the parent. A subsequent unlock repopulates the sidecar.
 
-- [ ] **Step 7: Run focused tests and verify GREEN**
+- [x] **Step 7: Run focused tests and verify GREEN**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_locking.py tests\test_health_sidecar.py tests\test_vault_crypto.py -v
@@ -207,7 +207,7 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_lockin
 
 Expected: PASS with only justified platform skips.
 
-- [ ] **Step 8: Commit safe publication**
+- [x] **Step 8: Commit safe publication**
 
 ```powershell
 git add pushkey_locking.py pushkey_health.py pushkey_vault.py tests/test_locking.py tests/test_health_sidecar.py tests/test_vault_crypto.py

@@ -3,7 +3,7 @@
 **Updated:** 2026-07-20
 **Active branch:** `feat/agentic-auth-foundation`
 **Baseline branch:** `feat/pushkey-app` at `5ef2f81`
-**Last verified implementation commit:** `a699ec9`
+**Last verified implementation commit:** `dda86bd`
 
 ## Current Position
 
@@ -13,7 +13,7 @@
 | Completed production phase gates | 1/13, 7.7% |
 | Phase 0 baseline | Complete |
 | CP1 health sidecar design | Complete and approved |
-| CP1 health sidecar implementation | In progress (Task 3 boundary fixes complete; awaiting final acceptance) |
+| CP1 health sidecar implementation | In progress (Tasks 1-3 complete; Task 4 next) |
 | Agentic authorization design | Complete and approved |
 | Agentic authorization implementation plan | Complete and approved |
 | Authorization implementation | Not started |
@@ -40,8 +40,8 @@
 Execute CP1, the versioned `health.json` v1 sidecar contract:
 
 1. CP1 Tasks 1-2 complete: shared locking and strict v1 schema verified.
-2. CP1 Task 3 implementation and boundary fixes through `a699ec9` are complete; final acceptance remains pending this quality follow-up.
-3. Integrate loopback HTTP, VS Code, and browser consumers for v1 plus temporary legacy read compatibility.
+2. CP1 Task 3 implementation and boundary fixes through `dda86bd` are complete and accepted.
+3. Continue CP1 Task 4: integrate normal post-save publication, loopback HTTP, and consumer-safe failure handling.
 4. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
 5. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
 
@@ -59,8 +59,8 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 ## Resume Procedure
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
-2. Complete the outstanding Task 3 quality follow-up and final acceptance, then continue CP1 Task 4 integration.
-3. Tasks 1-3 implementation commits include `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, `c65dac9`, `8b6f8d2`, `4ea91ac`, `d4f8367`, `0a1d63b`, `8ece4e5`, and `a699ec9`.
+2. Continue CP1 Task 4 integration after the accepted Task 3 boundary implementation.
+3. Tasks 1-3 implementation commits include `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, `c65dac9`, `8b6f8d2`, `4ea91ac`, `d4f8367`, `0a1d63b`, `8ece4e5`, `a699ec9`, and `dda86bd`.
 4. Use a fresh implementation subagent and two independent reviews per completed task.
 5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
 6. Do not begin authorization implementation until CP1 is complete.
@@ -77,8 +77,7 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 - Local API rekey and backup import map typed health invalidation and vault-lock
   failures to `503 health sidecar unavailable`.
 - Local API recovery-code addition now locks the active session and returns the
-  same sanitized `503` when post-replacement sidecar invalidation fails. Task 3
-  remains awaiting final acceptance.
+  same sanitized `503` when post-replacement sidecar invalidation fails.
 - Corrective post-commit replacement coverage:
   `python -m pytest tests/test_local_api.py -k "rekey_health_failure_locks_existing_session or backup_import_health_failure_locks_existing_session or recovery_add_health_failure_locks_existing_session or rekey_with_recovery_code or backup_import_replaces_vault" -v`
   produced `5 passed, 90 deselected` with two FastAPI deprecation warnings.
