@@ -221,6 +221,7 @@ def write_health_sidecar(
     path: Path | None = None,
     *,
     generated_at: datetime | None = None,
+    expected_vault_revision: bytes,
 ) -> dict: ...
 
 def invalidate_health_sidecar(path: Path | None = None) -> None: ...
@@ -269,26 +270,42 @@ desktop unlock refreshes it.
 Publication uses this sequence:
 
 1. Build, validate, and encode the complete document in memory.
-2. Ensure the parent directory exists.
-3. Reject a parent directory, destination, or lock path that is a symbolic link
+2. Acquire the process-local vault write lock and then `.vault.lock`.
+3. Compare the current encrypted vault revision with
+   `expected_vault_revision`; abort with `health_vault_changed` on mismatch.
+4. Ensure the parent directory exists.
+5. Reject a parent directory, destination, or lock path that is a symbolic link
    or Windows reparse point. Platform checks fail closed when identity cannot
    be established.
-4. Acquire the adjacent `.health.lock` with a bounded timeout.
-5. Revalidate parent and destination identities after lock acquisition.
-6. Create a unique temporary file in the destination directory with
+6. Acquire the adjacent `.health.lock` with a bounded timeout while retaining
+   the vault locks.
+7. Revalidate the vault revision, parent, and destination identities after
+   health-lock acquisition.
+8. Create a unique temporary file in the destination directory with
    `mkstemp` and restrictive permissions.
-7. Write bounded bytes, flush, and `fsync` the file.
-8. Revalidate the parent, destination, and temporary file identities.
-9. Atomically replace `health.json`.
-10. Reopen with a bounded read and validate the exact v1 document.
-11. `fsync` the parent directory where supported.
-12. Remove only the exact temporary file owned by this invocation.
-13. Release the lock.
+9. Write bounded bytes, flush, and `fsync` the file.
+10. Revalidate the vault revision, parent, destination, and temporary file
+    identities.
+11. Atomically replace `health.json`.
+12. Reopen with a bounded read and validate the exact v1 document.
+13. `fsync` the parent directory where supported.
+14. Remove only the exact temporary file owned by this invocation.
+15. Release locks in reverse order.
 
 Concurrent writers may publish in either order, but readers must observe one
 complete valid snapshot. A failed write before replacement preserves the prior
 snapshot. A post-replacement verification failure is reported and never
 silently described as success.
+
+Every operation that publishes or invalidates health uses one lock order:
+
+1. process-local vault write lock;
+2. cross-process `.vault.lock`;
+3. cross-process `.health.lock`.
+
+No health operation acquires these locks in reverse order. This order and the
+two vault-revision comparisons prevent an obsolete in-memory snapshot from
+publishing after a newer encrypted-vault replacement.
 
 ### Platform Filesystem Guarantees
 
@@ -323,9 +340,12 @@ isolation.
 ## Publication Integration
 
 Normal plaintext-aware vault saves call the sidecar publisher after the
-encrypted vault commit succeeds and after the vault write lock is released.
-This prevents lock-order cycles and keeps the sidecar derived rather than part
-of the encrypted-vault transaction.
+encrypted vault commit succeeds. The save returns or attaches the SHA-256
+revision of the committed encrypted vault bytes. Publication then reacquires
+the vault locks in the global order, verifies that exact revision before and
+after acquiring `.health.lock`, and only then replaces the sidecar. The
+sidecar remains derived rather than part of encrypted-vault transaction
+success.
 
 Publication failure follows these rules:
 
@@ -338,9 +358,13 @@ Publication failure follows these rules:
 - no exception or warning contains a secret name or value.
 
 Encrypted-byte replacement paths that cannot inspect the imported vault must
-invalidate the existing sidecar before declaring import complete. Successful
-next unlock republishes v1. This avoids serving names and health from the vault
-that was replaced.
+invalidate the existing sidecar before declaring import complete. Invalidation
+occurs while retaining the vault locks after the encrypted replacement and
+then acquiring `.health.lock` in the global order. It removes `health.json`,
+flushes the parent directory where supported, and releases the locks only
+after absence is verified. An older publisher either completed before the
+replacement and is then invalidated, or observes a revision mismatch and
+cannot recreate stale names. Successful next unlock republishes v1.
 
 Rekey and recovery-slot updates that preserve vault contents do not require a
 new health snapshot unless they already have the decrypted vault available.
@@ -451,6 +475,7 @@ Stable internal reason codes include:
 - `health_schema_invalid`;
 - `health_stale`;
 - `health_clock_invalid`;
+- `health_vault_changed`;
 - `health_path_unsafe`;
 - `health_lock_timeout`;
 - `health_write_failed`;
@@ -486,6 +511,8 @@ Create `tests/test_health_sidecar.py` covering:
 - replace and post-write verification failures;
 - prior-snapshot preservation before replacement;
 - two synchronized processes publishing complete valid snapshots;
+- publication racing encrypted replacement never restoring stale names;
+- revision mismatch before and after health-lock acquisition;
 - symlink destination rejection;
 - symlink parent rejection; and
 - Windows junction/reparse tests with explicit platform skips when privileges
