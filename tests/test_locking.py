@@ -125,3 +125,12 @@ def test_bounded_file_lock_rejects_non_positive_timings(tmp_path, kwargs):
     with pytest.raises(ValueError):
         with bounded_file_lock(tmp_path / "shared.lock", **kwargs):
             pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_bounded_file_lock_enforces_private_mode_for_existing_file(tmp_path):
+    lock_path = tmp_path / "shared.lock"
+    lock_path.write_bytes(b"\0")
+    os.chmod(lock_path, 0o644)
+    with bounded_file_lock(lock_path):
+        assert lock_path.stat().st_mode & 0o777 == 0o600

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +10,8 @@ import pytest
 
 from pushkey_health import (
     HealthSchemaError,
+    HealthPathError,
+    HealthBusyError,
     HealthUnavailableError,
     build_health_document,
     decode_health_document,
@@ -175,7 +178,7 @@ def test_read_health_sidecar_bounds_and_normalizes_failures(tmp_path, contents, 
 
 @pytest.mark.parametrize("timestamp, reason", [
     (NOW - timedelta(hours=27), "health_stale"),
-    (NOW + timedelta(minutes=6), "health_future"),
+    (NOW + timedelta(minutes=6), "health_clock_invalid"),
 ])
 def test_read_health_sidecar_enforces_freshness(tmp_path, timestamp, reason):
     path = tmp_path / "health.json"
@@ -283,16 +286,33 @@ def test_two_process_publishers_leave_a_complete_document(tmp_path):
     shared.VAULT_FILE.write_bytes(b"encrypted vault")
     revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).hexdigest()
     path = tmp_path / "health.json"
-    source = (
-        "import hashlib, sys, pushkey_shared as s; "
-        "from pushkey_health import write_health_sidecar; "
-        "from pathlib import Path; "
-        "s.VAULT_DIR=Path(sys.argv[1]); s.VAULT_FILE=s.VAULT_DIR/'vault.enc'; "
-        "write_health_sidecar({'KEY': {'created': '2026-01-10T12:00:00+00:00'}}, Path(sys.argv[2]), "
-        "generated_at='2026-01-10T12:00:00Z', expected_vault_revision=bytes.fromhex(sys.argv[3]))"
-    )
-    commands = [[sys.executable, "-c", source, str(tmp_path), str(path), revision] for _ in range(2)]
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    start = tmp_path / "start"
+    source = "\n".join([
+        "import sys, time",
+        "import pushkey_shared as s",
+        "from pathlib import Path",
+        "from pushkey_health import write_health_sidecar",
+        "s.VAULT_DIR = Path(sys.argv[1])",
+        "s.VAULT_FILE = s.VAULT_DIR / 'vault.enc'",
+        "Path(sys.argv[4]).touch()",
+        "while not Path(sys.argv[5]).exists():",
+        "    time.sleep(0.005)",
+        "write_health_sidecar({'KEY': {'created': '2026-01-10T12:00:00+00:00'}}, Path(sys.argv[2]),",
+        "    generated_at='2026-01-10T12:00:00Z', expected_vault_revision=bytes.fromhex(sys.argv[3]))",
+    ])
+    commands = [[sys.executable, "-c", source, str(tmp_path), str(path), revision, str(ready / str(index)), str(start)] for index in range(2)]
     processes = [subprocess.Popen(command, cwd=os.getcwd()) for command in commands]
+    deadline = time.monotonic() + 10
+    while len(list(ready.glob("*"))) != 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(list(ready.glob("*"))) == 2
+    start.touch()
+    while any(process.poll() is None for process in processes):
+        if path.exists():
+            assert read_health_sidecar(path, now=NOW)["schema_version"] == 1
+        time.sleep(0.005)
     assert [process.wait(timeout=20) for process in processes] == [0, 0]
     assert read_health_sidecar(path, now=NOW)["keys"]["KEY"]["status"] == "healthy"
 
@@ -307,3 +327,55 @@ def test_invalidate_removes_only_sidecar(tmp_path):
     invalidate_health_sidecar(path, expected_vault_revision=revision)
     assert not path.exists()
     assert other.read_text() == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_final_sidecar_permissions_and_parent_fsync_are_required(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    monkeypatch.setattr(pushkey_health, "_fsync_parent", lambda _path: (_ for _ in ()).throw(OSError("dir fsync")))
+    with pytest.raises(HealthUnavailableError, match="health_write_failed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are unavailable")
+def test_final_sidecar_mode_failure_aborts_publication(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    path = tmp_path / "health.json"
+    real_chmod = pushkey_health.os.chmod
+
+    def fail_final_chmod(target, mode):
+        if os.fspath(target) == os.fspath(path):
+            raise OSError("final chmod")
+        real_chmod(target, mode)
+
+    monkeypatch.setattr(pushkey_health.os, "chmod", fail_final_chmod)
+    with pytest.raises(HealthUnavailableError, match="health_write_failed"):
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+
+
+def test_path_inspection_failure_uses_typed_path_error(tmp_path, monkeypatch):
+    import pushkey_health
+    monkeypatch.setattr(pushkey_health.Path, "lstat", lambda _self: (_ for _ in ()).throw(OSError("no stat")))
+    with pytest.raises(HealthPathError, match="health_path_unsafe"):
+        read_health_sidecar(tmp_path / "health.json", now=NOW)
+
+
+def test_health_lock_timeout_uses_typed_busy_error(tmp_path, monkeypatch):
+    import hashlib
+    import pushkey_health
+    import pushkey_shared as shared
+    from pushkey_locking import FileLockTimeout
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    monkeypatch.setattr(pushkey_health, "bounded_file_lock", lambda _path: (_ for _ in ()).throw(FileLockTimeout()))
+    with pytest.raises(HealthBusyError, match="health_lock_timeout"):
+        write_health_sidecar({}, tmp_path / "health.json", generated_at=NOW, expected_vault_revision=revision)
