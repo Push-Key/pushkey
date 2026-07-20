@@ -12,7 +12,9 @@ import pytest
 @pytest.fixture
 def app_module(tmp_path, monkeypatch):
     monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PUSHKEY_ADMIN_SECRET", "test-secret")
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
     for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
         monkeypatch.setenv(name, "")
@@ -28,10 +30,17 @@ def app_module(tmp_path, monkeypatch):
 def client(app_module):
     from fastapi.testclient import TestClient
 
-    return TestClient(app_module.app)
-
-
-ADMIN = {"X-Admin-Secret": "test-secret"}
+    test_client = TestClient(app_module.app)
+    response = test_client.post(
+        "/api/admin/auth/login",
+        json={
+            "email": "admin@example.com",
+            "password": "admin-pass-123",
+        },
+    )
+    assert response.status_code == 200
+    test_client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+    return test_client
 
 
 def _issue(client, tier="pro", **overrides):
@@ -39,7 +48,6 @@ def _issue(client, tier="pro", **overrides):
     body.update(overrides)
     response = client.post(
         "/api/admin/licenses/issue",
-        headers=ADMIN,
         json=body,
     )
     assert response.status_code == 200
@@ -203,7 +211,7 @@ def test_admin_revoke_cannot_lose_concurrent_activation(
         )
         assert save_started.wait(5)
         revocation = pool.submit(
-            client.post, f"/api/admin/licenses/{key}/revoke", headers=ADMIN
+            client.post, f"/api/admin/licenses/{key}/revoke"
         )
         allow_save.set()
         assert activation.result().status_code == 200
