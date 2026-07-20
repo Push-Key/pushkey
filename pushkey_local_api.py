@@ -13,11 +13,23 @@ from __future__ import annotations
 import os
 import secrets
 import time
-from typing import Optional
+import asyncio
+import threading
+import hashlib
+import base64
+import tempfile
+import stat
+import copy
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Optional, Literal
+from urllib.parse import urlsplit
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 import json
 
@@ -43,76 +55,91 @@ from pushkey_vault import (
 
 
 AUTOLOCK_SECONDS_DEFAULT = 15 * 60
+MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+MAX_HEADER_BYTES = 32 * 1024
+MAX_SINGLE_HEADER_BYTES = 8 * 1024
+REQUEST_TIMEOUT_SECONDS = 15.0
+SESSION_IDLE_SECONDS = 30 * 60
+SESSION_ABSOLUTE_SECONDS = 8 * 60 * 60
+MAX_SESSIONS = 8
+SERVER_IDLE_SECONDS = 60 * 60
+LOOPBACK_HOST = "127.0.0.1"
+LOCAL_API_VERSION = "1"
+from pushkey_web._manifest import EXPECTED_MANIFEST_SHA256, WEB_APP_VERSION
 
 
-class UnlockBody(BaseModel):
-    password: Optional[str] = None
-    recovery_code: Optional[str] = None
+class StrictBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class KeyCreate(BaseModel):
-    name: str
-    value: str
-    provider: Optional[str] = None
-    env: str = "dev"
-    notes: str = ""
+class UnlockBody(StrictBody):
+    password: Optional[str] = Field(default=None, min_length=1, max_length=4096)
+    recovery_code: Optional[str] = Field(default=None, min_length=1, max_length=256)
+
+
+class KeyCreate(StrictBody):
+    name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    value: str = Field(min_length=1, max_length=65536)
+    provider: Optional[str] = Field(default=None, max_length=128)
+    env: Literal["dev", "test", "staging", "prod", "all"] = "dev"
+    notes: str = Field(default="", max_length=4096)
     overwrite: bool = False
 
 
-class KeyUpdate(BaseModel):
-    provider: Optional[str] = None
-    env: Optional[str] = None
-    notes: Optional[str] = None
+class KeyUpdate(StrictBody):
+    provider: Optional[str] = Field(default=None, max_length=128)
+    env: Optional[Literal["dev", "test", "staging", "prod", "all"]] = None
+    notes: Optional[str] = Field(default=None, max_length=4096)
 
 
-class RotateBody(BaseModel):
-    new_value: str
+class RotateBody(StrictBody):
+    new_value: str = Field(min_length=1, max_length=65536)
 
 
-class BackupBody(BaseModel):
-    backup_value: str
+class BackupBody(StrictBody):
+    backup_value: str = Field(min_length=1, max_length=65536)
 
 
-class ProjectCreate(BaseModel):
-    path: str
-    name: Optional[str] = None
+class ProjectCreate(StrictBody):
+    path: str = Field(min_length=1, max_length=4096)
+    name: Optional[str] = Field(default=None, max_length=256)
 
 
-class ProjectAssign(BaseModel):
-    keys: list[str]
+class ProjectAssign(StrictBody):
+    keys: list[str] = Field(max_length=512)
 
 
-class InjectBody(BaseModel):
-    keys: Optional[list[str]] = None
-    env: str = "all"
+class InjectBody(StrictBody):
+    keys: Optional[list[str]] = Field(default=None, max_length=512)
+    env: Literal["dev", "test", "staging", "prod", "all"] = "all"
 
 
-class ProviderDetect(BaseModel):
-    name: str
-    value: str = ""
+class ProviderDetect(StrictBody):
+    name: str = Field(min_length=1, max_length=256)
+    value: str = Field(default="", max_length=65536)
 
 
-class AgentCreate(BaseModel):
-    name: str
-    scopes: list[str]
+class AgentCreate(StrictBody):
+    name: str = Field(min_length=1, max_length=128)
+    scopes: list[Literal["read", "write", "inject", "rotate"]] = Field(min_length=1, max_length=4)
 
 
-class InitBody(BaseModel):
-    password: str
-    recovery_code: Optional[str] = None
+class InitBody(StrictBody):
+    password: str = Field(min_length=8, max_length=4096)
+    recovery_code: Optional[str] = Field(default=None, max_length=256)
 
 
-class AddRecoveryBody(BaseModel):
-    password: str
+class AddRecoveryBody(StrictBody):
+    password: str = Field(min_length=1, max_length=4096)
 
 
-class RekeyBody(BaseModel):
-    recovery_code: str
-    new_password: str
+class RekeyBody(StrictBody):
+    recovery_code: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=4096)
 
 
-class ImportBody(BaseModel):
-    blob_b64: str
+class ImportBody(StrictBody):
+    blob_b64: str = Field(min_length=1, max_length=3 * 1024 * 1024)
 
 
 def _gen_token() -> str:
@@ -166,6 +193,7 @@ class _Session:
         self.password = None
         self.auth_method = "none"
         self.unlocked_at = 0.0
+        self.last_activity = 0.0
 
 
 def _load_with_recovery(recovery_code: str) -> tuple:
@@ -201,34 +229,226 @@ def _static_dir() -> Optional[str]:
     candidates = [
         Path(__file__).parent / "web-app" / "out",
         Path(getattr(__import__("sys"), "_MEIPASS", "")) / "web-app" / "out" if hasattr(__import__("sys"), "_MEIPASS") else None,
+        Path(__file__).parent / "pushkey_web" / "out",
     ]
+    try:
+        from importlib.resources import files
+        candidates.append(Path(str(files("pushkey_web").joinpath("out"))))
+    except (ImportError, ModuleNotFoundError, TypeError):
+        pass
     for c in candidates:
         if c and c.is_dir() and (c / "index.html").exists():
             return str(c)
     return None
 
 
+def _verify_static_manifest(static: str) -> dict:
+    """Fail closed unless every bundled frontend asset matches its SHA-256."""
+    root = Path(static)
+    manifest_path = root / "pushkey-integrity.json"
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != EXPECTED_MANIFEST_SHA256:
+            raise ValueError("manifest trust anchor mismatch")
+        manifest = json.loads(manifest_bytes)
+        if manifest.get("web_app_version") != WEB_APP_VERSION:
+            raise ValueError("version mismatch")
+        expected = manifest["files"]
+        actual = {
+            p.relative_to(root).as_posix()
+            for p in root.rglob("*")
+            if p.is_file() and p.name != manifest_path.name
+        }
+        if actual != set(expected):
+            raise ValueError("asset inventory mismatch")
+        for relative, digest in expected.items():
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError("invalid digest")
+            if hashlib.sha256((root / relative).read_bytes()).hexdigest() != digest:
+                raise ValueError(f"asset digest mismatch: {relative}")
+        return manifest
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("bundled web app integrity verification failed") from exc
+
+
+def _canonical_project_path(raw: str, *, must_exist: bool = True) -> str:
+    """Return a canonical absolute project directory, rejecting ambiguous paths."""
+    if not raw or "\x00" in raw or any(ord(ch) < 32 for ch in raw):
+        raise HTTPException(400, "invalid project path")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(400, "project path must be absolute")
+    try:
+        resolved = path.resolve(strict=must_exist)
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "invalid project path") from None
+    if must_exist and not resolved.is_dir():
+        raise HTTPException(400, "project directory not found")
+    return str(resolved)
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool(attrs & reparse)
+
+
+def _project_identity(project: Path) -> tuple[int, int]:
+    info = project.stat()
+    return (info.st_dev, info.st_ino)
+
+
+def _assert_project_target(
+    project: Path, registered: str, target: Path, expected_identity: tuple[int, int]
+) -> None:
+    if _canonical_project_path(str(project)) != registered:
+        raise HTTPException(409, "project path changed during write")
+    if _is_link_or_reparse(project) or _is_link_or_reparse(target):
+        raise HTTPException(400, "refusing link or reparse-point project target")
+    if target.parent.resolve(strict=True) != Path(registered):
+        raise HTTPException(400, "project target escapes registered directory")
+    if _project_identity(project) != expected_identity:
+        raise HTTPException(409, "project directory identity changed during write")
+
+
+def _atomic_project_write(
+    registered: str, filename: str, data: bytes, expected_identity: Optional[tuple[int, int]] = None
+) -> None:
+    """Write a fixed project file without following links or exposing partial data."""
+    project = Path(registered)
+    target = project / filename
+    identity = expected_identity or _project_identity(project)
+    _assert_project_target(project, registered, target, identity)
+    fd, temporary = tempfile.mkstemp(prefix=f".{filename}.pushkey-", dir=project)
+    temp_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb", closefd=True) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _assert_project_target(project, registered, target, identity)
+        if _is_link_or_reparse(temp_path):
+            raise HTTPException(409, "temporary project target changed")
+        os.replace(temp_path, target)
+        _assert_project_target(project, registered, target, identity)
+        try:
+            directory_fd = os.open(
+                str(project),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _canonicalize_registered_projects(cfg: dict, vault: Optional[dict] = None) -> bool:
+    """Migrate legacy project keys to canonical paths without creating new access."""
+    projects = cfg.get("projects", {})
+    if not isinstance(projects, dict):
+        return False
+    changed = False
+    migrated: dict = {}
+    replacements: dict[str, str] = {}
+    for raw, meta in projects.items():
+        try:
+            canonical = _canonical_project_path(raw)
+        except HTTPException:
+            canonical = raw
+        if canonical in migrated:
+            raise HTTPException(409, "canonical project path collision")
+        migrated[canonical] = meta
+        if canonical != raw:
+            replacements[raw] = canonical
+            changed = True
+    if changed:
+        cfg["projects"] = migrated
+        if vault:
+            for entry in vault.values():
+                if not isinstance(entry, dict):
+                    continue
+                assigned = entry.get("projects")
+                if isinstance(assigned, list):
+                    entry["projects"] = [replacements.get(item, item) for item in assigned]
+    return changed
+
+
+def _allowed_authorities(port: int) -> set[str]:
+    if not port:
+        # TestClient has no bound socket; explicit test authorities only.
+        return {"testserver", "127.0.0.1:5173"}
+    return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    app.state.started_at = time.monotonic()
+    try:
+        yield
+    finally:
+        app.state.session.lock()
+        app.state.sessions.clear()
+        app.state.bootstrap_token = None
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Pushkey Local API", docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.token = _resolve_token()
+    app = FastAPI(title="Pushkey Local API", docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=_lifespan)
+    app.state.bootstrap_token = _resolve_token()
+    # Compatibility attribute for callers that inspect it; never log this value.
+    app.state.token = app.state.bootstrap_token
+    app.state.sessions: dict[str, dict[str, float]] = {}
+    app.state.auth_lock = threading.RLock()
+    app.state.project_lock = threading.RLock()
     app.state.session = _Session()
+    app.state.last_http_activity = time.monotonic()
+    app.state.csp = (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "style-src-attr 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError):
+        # Never echo Pydantic's rejected input: it may contain a password/key.
+        fields = [
+            ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+            for error in exc.errors()
+        ]
+        return JSONResponse(status_code=400, content={"detail": "invalid request", "fields": fields})
 
     port = _resolve_port()
-    allowed_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"] if port else []
+    allowed_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"] if port else ["http://testserver"]
+    allowed_authorities = _allowed_authorities(port)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins or ["http://127.0.0.1", "http://localhost"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        allow_methods=["GET", "POST", "DELETE", "PATCH"],
         allow_headers=["Authorization", "Content-Type"],
+        max_age=0,
     )
 
     def require_token(authorization: str = Header(default="")) -> None:
         if not authorization.startswith("Bearer "):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer")
         provided = authorization[7:].strip()
-        if not secrets.compare_digest(provided, app.state.token):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
+        now = time.monotonic()
+        with app.state.auth_lock:
+            record = app.state.sessions.get(provided)
+            if record and record["idle_expires"] > now and record["absolute_expires"] > now:
+                record["idle_expires"] = min(now + SESSION_IDLE_SECONDS, record["absolute_expires"])
+                return
+            if record is not None:
+                app.state.sessions.pop(provided, None)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid bearer")
 
     def require_unlocked() -> _Session:
         sess: _Session = app.state.session
@@ -238,12 +458,88 @@ def create_app() -> FastAPI:
         return sess
 
     @app.middleware("http")
-    async def origin_pin(request: Request, call_next):
-        # Reject cross-origin browser requests outright. CLI/curl have no Origin and pass.
+    async def local_boundary(request: Request, call_next):
+        raw_headers = request.scope.get("headers", ())
+        if (
+            sum(len(name) + len(value) for name, value in raw_headers) > MAX_HEADER_BYTES
+            or any(len(name) + len(value) > MAX_SINGLE_HEADER_BYTES for name, value in raw_headers)
+        ):
+            return _json_error(431, "request headers too large")
+        host = request.headers.get("host", "")
+        if host not in allowed_authorities:
+            return _json_error(400, "invalid host")
         origin = request.headers.get("origin")
-        if origin and not (origin.startswith("http://127.0.0.1") or origin.startswith("http://localhost")):
-            return _json_error(403, "forbidden origin")
-        return await call_next(request)
+        if origin:
+            parsed = urlsplit(origin)
+            origin_authority = parsed.netloc
+            if parsed.scheme != "http" or origin_authority not in allowed_authorities or parsed.path not in ("", "/"):
+                return _json_error(403, "forbidden origin")
+        if request.method not in {"GET", "HEAD", "OPTIONS", "POST", "PATCH", "DELETE"}:
+            return _json_error(405, "method not allowed")
+        content_length = request.headers.get("content-length")
+        try:
+            if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return _json_error(413, "request body too large")
+        except ValueError:
+            return _json_error(400, "invalid content-length")
+        if request.method in {"POST", "PATCH"}:
+            try:
+                body = await asyncio.wait_for(request.body(), timeout=REQUEST_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                return _json_error(408, "request body timed out")
+            if len(body) > MAX_REQUEST_BODY_BYTES:
+                return _json_error(413, "request body too large")
+        try:
+            response = await call_next(request)
+        except Exception:
+            raise
+        if request.url.path != "/healthz":
+            app.state.last_http_activity = time.monotonic()
+        response.headers.update({
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": app.state.csp,
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        })
+        return response
+
+    @app.get("/healthz")
+    def healthz():
+        return {"status": "ok", "api_version": LOCAL_API_VERSION}
+
+    @app.post("/api/bootstrap")
+    def bootstrap(authorization: str = Header(default="")):
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer")
+        provided = authorization[7:].strip()
+        with app.state.auth_lock:
+            expected = app.state.bootstrap_token
+            if not expected or not secrets.compare_digest(provided, expected):
+                raise HTTPException(401, "invalid or consumed bootstrap token")
+            app.state.bootstrap_token = None
+            app.state.token = None
+            if len(app.state.sessions) >= MAX_SESSIONS:
+                oldest = min(app.state.sessions, key=lambda token: app.state.sessions[token]["created"])
+                app.state.sessions.pop(oldest, None)
+            session_token = _gen_token()
+            now = time.monotonic()
+            app.state.sessions[session_token] = {
+                "created": now,
+                "idle_expires": now + SESSION_IDLE_SECONDS,
+                "absolute_expires": now + SESSION_ABSOLUTE_SECONDS,
+            }
+        app.state.last_http_activity = now
+        return {"token": session_token, "expires_in": SESSION_IDLE_SECONDS}
+
+    @app.post("/api/logout")
+    def logout(authorization: str = Header(default=""), _: None = Depends(require_token)):
+        token = authorization[7:].strip()
+        with app.state.auth_lock:
+            app.state.sessions.pop(token, None)
+            app.state.session.lock()
+        return {"logged_out": True}
 
     # ── routes ───────────────────────────────────────────────────────────────
 
@@ -274,8 +570,10 @@ def create_app() -> FastAPI:
             else:
                 vault, vault_key = _load_with_recovery(body.recovery_code or "")
                 secret = body.recovery_code
-        except ValueError as e:
-            raise HTTPException(500, f"vault error: {e}")
+        except (ValueError, VaultAuthenticationError):
+            raise HTTPException(401, "invalid credentials") from None
+        except (VaultFormatError, VaultIntegrityError):
+            raise HTTPException(422, "vault is corrupted or unsupported") from None
         if vault is None:
             raise HTTPException(401, "invalid credentials")
         method = "password" if body.password else "recovery"
@@ -284,7 +582,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/lock")
     def post_lock(_: None = Depends(require_token)):
-        app.state.session.lock()
+        with app.state.auth_lock:
+            app.state.session.lock()
+            app.state.sessions.clear()
         return {"locked": True}
 
     @app.get("/api/keys")
@@ -341,6 +641,45 @@ def create_app() -> FastAPI:
     def _save(sess: _Session) -> None:
         from pushkey_vault import save_vault as _save_vault
         _save_vault(sess.vault, sess.password, vault_key=sess.vault_key)
+
+    def _restore_bytes(path: Path, original: Optional[bytes]) -> None:
+        if original is None:
+            path.unlink(missing_ok=True)
+            return
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+        tmp = Path(temporary)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _persist_project_state(sess: _Session, mutate, *, save_when=lambda _result: True):
+        """Apply a config/vault mutation and roll both encrypted files back on failure."""
+        from pushkey_vault import load_config, save_config
+        with app.state.project_lock:
+            cfg = load_config()
+            original_cfg = copy.deepcopy(cfg)
+            original_vault = copy.deepcopy(sess.vault)
+            cfg_bytes = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
+            vault_bytes = _s.VAULT_FILE.read_bytes() if _s.VAULT_FILE.exists() else None
+            try:
+                result = mutate(cfg, sess.vault)
+                if save_when(result):
+                    save_config(cfg)
+                    _save(sess)
+                return cfg, result
+            except Exception:
+                sess.vault.clear()
+                sess.vault.update(original_vault)
+                cfg.clear()
+                cfg.update(original_cfg)
+                _restore_bytes(_s.CONFIG_FILE, cfg_bytes)
+                _restore_bytes(_s.VAULT_FILE, vault_bytes)
+                raise
 
     def _now_date() -> str:
         from datetime import datetime
@@ -435,12 +774,24 @@ def create_app() -> FastAPI:
 
     @app.get("/api/projects")
     def list_projects(sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
-        from pushkey_vault import load_config
-        cfg = load_config()
+        from pushkey_vault import load_config, save_config
+        vault_view = sess.vault
+        if sess.can_write:
+            cfg, _ = _persist_project_state(
+                sess,
+                lambda current_cfg, current_vault:
+                    _canonicalize_registered_projects(current_cfg, current_vault),
+                save_when=bool,
+            )
+        else:
+            with app.state.project_lock:
+                cfg = copy.deepcopy(load_config())
+                vault_view = copy.deepcopy(sess.vault)
+            _canonicalize_registered_projects(cfg, vault_view)
         projects = cfg.get("projects", {})
         result = []
         for path, meta in projects.items():
-            assigned = [n for n, m in sess.vault.items()
+            assigned = [n for n, m in vault_view.items()
                         if isinstance(m, dict) and path in (m.get("projects") or [])]
             result.append({
                 "path": path,
@@ -453,72 +804,85 @@ def create_app() -> FastAPI:
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectCreate, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
-        cfg = load_config()
-        cfg.setdefault("projects", {})
-        if body.path in cfg["projects"]:
-            raise HTTPException(409, "project exists")
-        cfg["projects"][body.path] = {
-            "name": body.name or body.path.rstrip("/\\").split("/")[-1].split("\\")[-1],
-            "created": _now_date(),
-        }
-        save_config(cfg)
-        return {"path": body.path, "name": cfg["projects"][body.path]["name"]}
+        canonical = _canonical_project_path(body.path)
+        def mutate_create(current_cfg, current_vault):
+            _canonicalize_registered_projects(current_cfg, current_vault)
+            current_cfg.setdefault("projects", {})
+            if canonical in current_cfg["projects"]:
+                raise HTTPException(409, "project exists")
+            current_cfg["projects"][canonical] = {
+                "name": body.name or Path(canonical).name,
+                "created": _now_date(),
+            }
+        cfg, _ = _persist_project_state(sess, mutate_create)
+        return {"path": canonical, "name": cfg["projects"][canonical]["name"]}
 
     @app.delete("/api/projects", status_code=204)
-    def delete_project(path: str, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def delete_project(path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
-        cfg = load_config()
-        if path not in cfg.get("projects", {}):
-            raise HTTPException(404, "project not found")
-        del cfg["projects"][path]
-        save_config(cfg)
-        # cleanup assignments
-        for entry in sess.vault.values():
-            if isinstance(entry, dict):
-                projs = entry.get("projects") or []
-                if path in projs:
-                    projs.remove(path)
-                    entry["projects"] = projs
-        _save(sess)
+        path = _canonical_project_path(path)
+        def mutate_delete(current_cfg, current_vault):
+            _canonicalize_registered_projects(current_cfg, current_vault)
+            if path not in current_cfg.get("projects", {}):
+                raise HTTPException(404, "project not found")
+            del current_cfg["projects"][path]
+            for entry in current_vault.values():
+                if isinstance(entry, dict):
+                    projs = entry.get("projects") or []
+                    if path in projs:
+                        projs.remove(path)
+                        entry["projects"] = projs
+        _persist_project_state(sess, mutate_delete)
 
     @app.post("/api/projects/assign")
-    def assign_keys(body: ProjectAssign, path: str, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def assign_keys(body: ProjectAssign, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config
-        cfg = load_config()
-        if path not in cfg.get("projects", {}):
-            raise HTTPException(404, "project not found")
-        missing = [k for k in body.keys if k not in sess.vault or not isinstance(sess.vault[k], dict)]
-        if missing:
-            raise HTTPException(400, f"keys not in vault: {missing}")
-        for k in body.keys:
-            projs = sess.vault[k].setdefault("projects", [])
-            if path not in projs:
-                projs.append(path)
-        _save(sess)
+        path = _canonical_project_path(path)
+        def mutate_assign(current_cfg, current_vault):
+            _canonicalize_registered_projects(current_cfg, current_vault)
+            if path not in current_cfg.get("projects", {}):
+                raise HTTPException(404, "project not found")
+            missing = [k for k in body.keys if k not in current_vault or not isinstance(current_vault[k], dict)]
+            if missing:
+                raise HTTPException(400, f"keys not in vault: {missing}")
+            for key in body.keys:
+                projects = current_vault[key].setdefault("projects", [])
+                if path not in projects:
+                    projects.append(path)
+        _persist_project_state(sess, mutate_assign)
         return {"path": path, "assigned": body.keys}
 
     @app.post("/api/projects/unassign")
-    def unassign_keys(body: ProjectAssign, path: str, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
-        for k in body.keys:
-            entry = sess.vault.get(k)
-            if isinstance(entry, dict):
-                projs = entry.get("projects") or []
-                if path in projs:
-                    projs.remove(path)
-                    entry["projects"] = projs
-        _save(sess)
+    def unassign_keys(body: ProjectAssign, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+        path = _canonical_project_path(path)
+        from pushkey_vault import load_config
+        def mutate_unassign(current_cfg, current_vault):
+            _canonicalize_registered_projects(current_cfg, current_vault)
+            if path not in current_cfg.get("projects", {}):
+                raise HTTPException(404, "project not found")
+            for key in body.keys:
+                entry = current_vault.get(key)
+                if isinstance(entry, dict):
+                    projects = entry.get("projects") or []
+                    if path in projects:
+                        projects.remove(path)
+                        entry["projects"] = projects
+        _persist_project_state(sess, mutate_unassign)
         return {"path": path, "unassigned": body.keys}
 
     @app.post("/api/projects/inject")
-    def inject_project(body: InjectBody, path: str, write: bool = True, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
-        from pathlib import Path
+    def inject_project(body: InjectBody, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config
-        cfg = load_config()
+        path = _canonical_project_path(path)
+        cfg, _ = _persist_project_state(
+            sess,
+            lambda current_cfg, current_vault:
+                _canonicalize_registered_projects(current_cfg, current_vault),
+            save_when=bool,
+        )
         if path not in cfg.get("projects", {}):
             raise HTTPException(404, "project not found")
         proj = Path(path)
-        if not proj.is_dir():
-            raise HTTPException(400, f"directory not found: {path}")
 
         if body.keys is None:
             keys = [n for n, m in sess.vault.items()
@@ -534,6 +898,8 @@ def create_app() -> FastAPI:
         keys = [k for k in keys if env_match(sess.vault[k].get("env", "all"))]
 
         env_path = proj / ".env"
+        if env_path.is_symlink():
+            raise HTTPException(400, "refusing to write through .env symlink")
         existing_lines: list[str] = []
         existing_keys: set[str] = set()
         if env_path.exists():
@@ -546,13 +912,22 @@ def create_app() -> FastAPI:
         skipped = [k for k in keys if k in existing_keys]
 
         if write:
-            all_lines = existing_lines + new_lines
-            env_path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
+            identity = _project_identity(proj)
             gitignore = proj / ".gitignore"
+            _assert_project_target(proj, path, env_path, identity)
+            _assert_project_target(proj, path, gitignore, identity)
             content = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
             if ".env" not in content.splitlines():
-                with open(gitignore, "a", encoding="utf-8") as f:
-                    f.write("\n.env\n")
+                _atomic_project_write(
+                    path,
+                    ".gitignore",
+                    (content.rstrip("\n") + "\n.env\n").encode("utf-8"),
+                    identity,
+                )
+            all_lines = existing_lines + new_lines
+            _atomic_project_write(
+                path, ".env", ("\n".join(all_lines) + "\n").encode("utf-8"), identity
+            )
         return {"injected": new_lines, "skipped_existing": skipped, "env_file": str(env_path), "wrote": write}
 
     # ── providers ─────────────────────────────────────────────────────────
@@ -594,7 +969,7 @@ def create_app() -> FastAPI:
     # ── Phase 3: advanced ops ────────────────────────────────────────────
 
     @app.get("/api/health")
-    def get_health(threshold_days: int = 90, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_health(threshold_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         from datetime import datetime
         now = datetime.now()
@@ -634,7 +1009,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/forecast")
-    def get_forecast(window_days: int = 90, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_forecast(window_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         from datetime import datetime, timedelta
         now = datetime.now()
@@ -701,7 +1076,7 @@ def create_app() -> FastAPI:
     # ── audit ─────────────────────────────────────────────────────────────
 
     @app.get("/api/audit")
-    def get_audit(limit: int = 200, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_audit(limit: int = Query(default=200, ge=1, le=1000), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
         from pushkey_crypto import _log_decrypt_all
         lines = _log_decrypt_all()
         if limit > 0:
@@ -816,6 +1191,16 @@ def create_app() -> FastAPI:
     # ── Static frontend (bundled web-app/out) ─────────────────────────
     static = _static_dir()
     if static:
+        manifest = _verify_static_manifest(static)
+        script_hashes = " ".join(f"'sha256-{value}'" for value in manifest.get("csp", {}).get("scripts", []))
+        style_hashes = " ".join(f"'sha256-{value}'" for value in manifest.get("csp", {}).get("styles", []))
+        attr_hashes = " ".join(f"'sha256-{value}'" for value in manifest.get("csp", {}).get("style_attributes", []))
+        app.state.csp = (
+            f"default-src 'self'; script-src 'self' {script_hashes}; "
+            f"style-src 'self' {style_hashes}; style-src-attr 'unsafe-hashes' {attr_hashes}; "
+            "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        )
         from fastapi.staticfiles import StaticFiles
         app.mount("/", StaticFiles(directory=static, html=True), name="static")
 
@@ -838,12 +1223,60 @@ def _json_error(code: int, msg: str):
 app = create_app()
 
 
-def main() -> None:
+def run_server() -> None:
     import uvicorn
     port = _resolve_port() or 0
-    token = app.state.token
-    print(f"[pushkey] local API ready  token={token}  port={port or 'auto'}")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    if port and not (1 <= port <= 65535):
+        raise SystemExit("invalid PUSHKEY_LOCAL_PORT")
+    if LOOPBACK_HOST not in {"127.0.0.1", "::1"}:
+        raise SystemExit("local API must bind to loopback")
+    print(f"[pushkey] local API ready on {LOOPBACK_HOST}:{port or 'auto'}")
+    config = uvicorn.Config(
+        app,
+        host=LOOPBACK_HOST,
+        port=port,
+        access_log=False,
+        proxy_headers=False,
+        server_header=False,
+        limit_concurrency=32,
+        backlog=32,
+        timeout_keep_alive=2,
+        timeout_graceful_shutdown=5,
+        h11_max_incomplete_event_size=MAX_HEADER_BYTES,
+    )
+    server = uvicorn.Server(config)
+    try:
+        parent_pid = int(os.environ.get("PUSHKEY_PARENT_PID", "0") or 0)
+        if parent_pid < 0:
+            raise ValueError
+    except ValueError:
+        parent_pid = 0
+
+    def monitor_lifecycle() -> None:
+        while not server.should_exit:
+            time.sleep(2)
+            idle = time.monotonic() - app.state.last_http_activity
+            parent_gone = False
+            if parent_pid:
+                try:
+                    os.kill(parent_pid, 0)
+                except OSError:
+                    parent_gone = True
+            if parent_gone or idle > SERVER_IDLE_SECONDS:
+                server.should_exit = True
+
+    watcher = threading.Thread(target=monitor_lifecycle, name="pushkey-local-lifecycle", daemon=True)
+    watcher.start()
+    try:
+        server.run()
+    finally:
+        app.state.session.lock()
+        app.state.sessions.clear()
+        app.state.bootstrap_token = None
+
+
+def main() -> None:
+    run_server()
 
 
 if __name__ == "__main__":

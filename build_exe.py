@@ -12,6 +12,8 @@ SUBMODULES = [
     "pushkey_tiers",
     "pushkey_providers",
     "pushkey_icons",
+    "pushkey_local_api",
+    "pushkey_agent_tokens",
 ]
 
 
@@ -47,6 +49,10 @@ def build_gui(root):
 def build_cli(root):
     cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--console", "--name", "pushkey-cli"]
     cmd += _common_flags(root)
+    web_out = root / "web-app" / "out"
+    if not (web_out / "pushkey-integrity.json").exists():
+        raise RuntimeError("web app integrity manifest missing")
+    cmd += ["--add-data", f"{web_out};web-app/out"]
     cmd.append(str(root / "pushkey_cli.py"))
     print(f"Building CLI: {' '.join(cmd)}")
     return subprocess.run(cmd, cwd=root).returncode
@@ -54,6 +60,13 @@ def build_cli(root):
 
 def build():
     root = Path(__file__).parent
+    web_build = subprocess.run(
+        ["npm", "run", "build"],
+        cwd=root / "web-app",
+        shell=sys.platform == "win32",
+    )
+    if web_build.returncode != 0:
+        return web_build.returncode
     rc = build_gui(root)
     if rc != 0:
         return rc

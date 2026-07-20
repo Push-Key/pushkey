@@ -13,7 +13,7 @@ import { AuditTab } from "@/components/audit-tab";
 import { AgentsTab } from "@/components/agents-tab";
 import { SettingsTab } from "@/components/settings-tab";
 import { api, type StatusResp } from "@/lib/api";
-import { captureTokenFromUrl } from "@/lib/auth";
+import { bootstrapSession } from "@/lib/auth";
 
 export default function Page() {
   const [status, setStatus] = useState<StatusResp | null>(null);
@@ -22,8 +22,9 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    captureTokenFromUrl();
-    setTokenReady(true);
+    bootstrapSession()
+      .catch(() => null)
+      .finally(() => setTokenReady(true));
   }, []);
 
   const refreshStatus = async () => {

@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 4173",
-    "build": "next build",
+    "build": "next build && node scripts/generate-integrity.mjs",
+    "integrity": "node scripts/generate-integrity.mjs",
     "start": "next start",
     "lint": "next lint"
   },

@@ -1,6 +1,6 @@
 "use client";
 
-import { getToken } from "./auth";
+import { clearToken, getToken } from "./auth";
 
 const BASE = (typeof window !== "undefined"
   ? `${window.location.protocol}//${window.location.host}`
@@ -41,6 +41,7 @@ async function request<T = unknown>(
   let json: unknown = undefined;
   try { json = text ? JSON.parse(text) : undefined; } catch { /* not json */ }
   if (!res.ok) {
+    if (res.status === 401) clearToken();
     const detail = (json as { detail?: string })?.detail ?? text ?? res.statusText;
     throw new ApiError(res.status, String(detail));
   }

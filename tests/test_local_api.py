@@ -4,6 +4,7 @@ Phase 1: status, unlock, lock, keys read-only, token auth, autolock.
 """
 import importlib
 import json
+import os
 import sys
 import time
 
@@ -30,8 +31,13 @@ def client(fresh_app):
 
 
 @pytest.fixture
-def auth():
-    return {"Authorization": "Bearer test-launch-token"}
+def auth(client):
+    response = client.post(
+        "/api/bootstrap",
+        headers={"Authorization": "Bearer test-launch-token"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
 def _seed_vault(password: str, recovery: str, keys: dict) -> None:
@@ -112,7 +118,7 @@ def test_lock_clears_session(client, auth):
     r = client.post("/api/lock", headers=auth)
     assert r.status_code == 200
     assert r.json() == {"locked": True}
-    assert client.get("/api/status", headers=auth).json()["locked"] is True
+    assert client.get("/api/status", headers=auth).status_code == 401
 
 
 # ── keys read-only ────────────────────────────────────────────────
@@ -189,6 +195,125 @@ def test_foreign_origin_rejected(client, auth):
 def test_localhost_origin_allowed(client, auth):
     r = client.get("/api/status", headers={**auth, "Origin": "http://127.0.0.1:5173"})
     assert r.status_code == 200
+
+
+def test_origin_prefix_attack_rejected(client, auth):
+    r = client.get("/api/status", headers={
+        **auth, "Origin": "http://127.0.0.1:5173.evil.example"
+    })
+    assert r.status_code == 403
+
+
+def test_dns_rebinding_host_rejected(client, auth):
+    r = client.get("/api/status", headers={**auth, "Host": "evil.example"})
+    assert r.status_code == 400
+
+
+def test_healthz_is_unauthenticated(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_bootstrap_is_single_use_and_issues_session(client):
+    bootstrap = {"Authorization": "Bearer test-launch-token"}
+    first = client.post("/api/bootstrap", headers=bootstrap)
+    assert first.status_code == 200
+    session = {"Authorization": f"Bearer {first.json()['token']}"}
+    assert client.get("/api/status", headers=session).status_code == 200
+    assert client.post("/api/bootstrap", headers=bootstrap).status_code == 401
+    assert client.get("/api/status", headers=bootstrap).status_code == 401
+
+
+def test_launch_token_never_authenticates_regular_routes(client):
+    launch = {"Authorization": "Bearer test-launch-token"}
+    assert client.get("/api/status", headers=launch).status_code == 401
+
+
+def test_logout_revokes_session(client, auth):
+    assert client.post("/api/logout", headers=auth).status_code == 200
+    assert client.get("/api/status", headers=auth).status_code == 401
+
+
+def test_session_absolute_expiry(client, auth, fresh_app):
+    token = auth["Authorization"][7:]
+    fresh_app.app.state.sessions[token]["absolute_expires"] = time.monotonic() - 1
+    assert client.get("/api/status", headers=auth).status_code == 401
+
+
+def test_session_map_is_bounded(client, fresh_app):
+    first_launch = {"Authorization": "Bearer test-launch-token"}
+    assert client.post("/api/bootstrap", headers=first_launch).status_code == 200
+    # Directly seed old sessions to exercise bounded cleanup at exchange.
+    now = time.monotonic()
+    fresh_app.app.state.sessions = {
+        f"s{i}": {"created": now + i, "idle_expires": now + 100, "absolute_expires": now + 100}
+        for i in range(fresh_app.MAX_SESSIONS)
+    }
+    fresh_app.app.state.bootstrap_token = "second-launch"
+    r = client.post("/api/bootstrap", headers={"Authorization": "Bearer second-launch"})
+    assert r.status_code == 200
+    assert len(fresh_app.app.state.sessions) == fresh_app.MAX_SESSIONS
+
+
+def test_concurrent_bootstrap_only_one_succeeds(client):
+    from concurrent.futures import ThreadPoolExecutor
+    headers = {"Authorization": "Bearer test-launch-token"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(
+            lambda _: client.post("/api/bootstrap", headers=headers).status_code,
+            range(2),
+        ))
+    assert sorted(statuses) == [200, 401]
+
+
+def test_oversize_request_rejected(client, auth):
+    r = client.post(
+        "/api/unlock",
+        headers={**auth, "Content-Length": str(2 * 1024 * 1024 + 1)},
+        content=b"{}",
+    )
+    assert r.status_code == 413
+
+
+def test_oversize_header_rejected(client, auth):
+    r = client.get("/api/status", headers={**auth, "X-Padding": "x" * 9000})
+    assert r.status_code == 431
+
+
+def test_security_headers_present(client):
+    r = client.get("/healthz")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    csp = r.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in csp
+    assert "script-src 'self' 'sha256-" in csp
+
+
+def test_static_manifest_rejects_tampered_asset(fresh_app, tmp_path):
+    import shutil
+    source = fresh_app._static_dir()
+    assert source
+    copied = tmp_path / "out"
+    shutil.copytree(source, copied)
+    manifest = json.loads((copied / "pushkey-integrity.json").read_text(encoding="utf-8"))
+    relative = next(iter(manifest["files"]))
+    with (copied / relative).open("ab") as handle:
+        handle.write(b"tampered")
+    with pytest.raises(RuntimeError, match="integrity"):
+        fresh_app._verify_static_manifest(str(copied))
+
+
+def test_manifest_covers_every_static_asset(fresh_app):
+    from pathlib import Path
+    static = Path(fresh_app._static_dir())
+    manifest = fresh_app._verify_static_manifest(str(static))
+    actual = {
+        p.relative_to(static).as_posix()
+        for p in static.rglob("*")
+        if p.is_file() and p.name != "pushkey-integrity.json"
+    }
+    assert set(manifest["files"]) == actual
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -361,6 +486,193 @@ def test_create_project_duplicate(unlocked, auth, tmp_path):
     unlocked.post("/api/projects", headers=auth, json={"path": p})
     r = unlocked.post("/api/projects", headers=auth, json={"path": p})
     assert r.status_code == 409
+
+
+def test_create_project_rejects_relative_path(unlocked, auth):
+    r = unlocked.post("/api/projects", headers=auth, json={"path": "../escape"})
+    assert r.status_code == 400
+
+
+def test_inject_rejects_unregistered_directory(unlocked, auth, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    r = unlocked.post(
+        "/api/projects/inject", headers=auth,
+        params={"path": str(outside)}, json={},
+    )
+    assert r.status_code == 404
+
+
+def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = tmp_path / "outside.env"
+    target.write_text("SAFE=1\n", encoding="utf-8")
+    try:
+        (project / ".env").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    r = unlocked.post(
+        "/api/projects/inject", headers=auth,
+        params={"path": str(project)}, json={},
+    )
+    assert r.status_code == 400
+    assert target.read_text(encoding="utf-8") == "SAFE=1\n"
+
+
+def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch, fresh_app):
+    project = tmp_path / "project"
+    project.mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    unlocked.post(
+        "/api/projects/assign", headers=auth, params={"path": str(project)},
+        json={"keys": ["OPENAI_API_KEY"]},
+    )
+    original = fresh_app._atomic_project_write
+
+    def fail_ignore(registered, filename, data, expected_identity=None):
+        if filename == ".gitignore":
+            raise OSError("simulated disk failure")
+        return original(registered, filename, data, expected_identity)
+
+    monkeypatch.setattr(fresh_app, "_atomic_project_write", fail_ignore)
+    with pytest.raises(OSError, match="disk failure"):
+        unlocked.post(
+            "/api/projects/inject", headers=auth,
+            params={"path": str(project)}, json={},
+        )
+    assert not (project / ".env").exists()
+
+
+def test_project_state_persists_across_disk_reload(unlocked, auth, tmp_path):
+    from pushkey_vault import load_config, load_vault
+    project = tmp_path / "persist"
+    project.mkdir()
+    path = str(project.resolve())
+    assert unlocked.post("/api/projects", headers=auth, json={"path": path}).status_code == 201
+    assert unlocked.post(
+        "/api/projects/assign", headers=auth, params={"path": path},
+        json={"keys": ["OPENAI_API_KEY"]},
+    ).status_code == 200
+    assert path in load_config()["projects"]
+    assert path in load_vault("master-pw")[0]["OPENAI_API_KEY"]["projects"]
+    assert unlocked.post(
+        "/api/projects/unassign", headers=auth, params={"path": path},
+        json={"keys": ["OPENAI_API_KEY"]},
+    ).status_code == 200
+    assert path not in load_vault("master-pw")[0]["OPENAI_API_KEY"]["projects"]
+    assert unlocked.delete("/api/projects", headers=auth, params={"path": path}).status_code == 204
+    assert path not in load_config()["projects"]
+
+
+def test_canonical_collision_rejected_without_data_loss(unlocked, auth, tmp_path):
+    from pushkey_vault import load_config, save_config
+    project = tmp_path / "collision"
+    project.mkdir()
+    canonical = str(project.resolve())
+    alias = canonical + os.sep + "."
+    save_config({"projects": {
+        canonical: {"name": "first"},
+        alias: {"name": "second"},
+    }})
+    before = _s.CONFIG_FILE.read_bytes()
+    r = unlocked.get("/api/projects", headers=auth)
+    assert r.status_code == 409
+    assert _s.CONFIG_FILE.read_bytes() == before
+    assert len(load_config()["projects"]) == 2
+
+
+def test_project_transaction_rolls_back_config_and_session(unlocked, auth, tmp_path, monkeypatch):
+    import pushkey_vault
+    project = tmp_path / "rollback"
+    project.mkdir()
+    before_config = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
+    before_vault = _s.VAULT_FILE.read_bytes()
+    original = pushkey_vault.save_vault
+
+    def fail_vault(*args, **kwargs):
+        raise OSError("simulated vault save failure")
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", fail_vault)
+    with pytest.raises(OSError, match="vault save failure"):
+        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    assert (_s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None) == before_config
+    assert _s.VAULT_FILE.read_bytes() == before_vault
+    monkeypatch.setattr(pushkey_vault, "save_vault", original)
+
+
+def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from pushkey_vault import load_config
+    projects = [tmp_path / "concurrent-a", tmp_path / "concurrent-b"]
+    for project in projects:
+        project.mkdir()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(
+            lambda project: unlocked.post(
+                "/api/projects", headers=auth, json={"path": str(project)}
+            ),
+            projects,
+        ))
+    assert [response.status_code for response in responses] == [201, 201]
+    stored = load_config()["projects"]
+    assert all(str(project.resolve()) in stored for project in projects)
+
+
+def test_failed_transaction_cannot_rollback_later_success(
+    unlocked, auth, tmp_path, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import pushkey_vault
+    from pushkey_vault import load_config
+
+    failing = tmp_path / "failure"
+    succeeding = tmp_path / "success"
+    failing.mkdir()
+    succeeding.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    original = pushkey_vault.save_vault
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def controlled_save(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            entered.set()
+            assert release.wait(5)
+            raise OSError("transaction A failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", controlled_save)
+
+    def failure_request():
+        return unlocked.post(
+            "/api/projects", headers=auth, json={"path": str(failing)}
+        )
+
+    def success_request():
+        return unlocked.post(
+            "/api/projects", headers=auth, json={"path": str(succeeding)}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        failed_future = pool.submit(failure_request)
+        assert entered.wait(5)
+        success_future = pool.submit(success_request)
+        release.set()
+        with pytest.raises(OSError, match="transaction A failed"):
+            failed_future.result()
+        assert success_future.result().status_code == 201
+
+    stored = load_config()["projects"]
+    assert str(failing.resolve()) not in stored
+    assert str(succeeding.resolve()) in stored
 
 
 def test_assign_keys_to_project(unlocked, auth, tmp_path):

@@ -310,6 +310,9 @@ def cmd_import(args, vault, password, vault_key=None):
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--local-api-server":
+        from pushkey_local_api import run_server
+        return run_server()
     parser = argparse.ArgumentParser(
         prog="pushkey",
         description="Pushkey - encrypted API key manager",
@@ -482,8 +485,9 @@ def _port_in_use(port):
 
 
 def _cmd_app(blocking=False):
+    frozen = bool(getattr(sys, "frozen", False))
     api_path = Path(__file__).parent / "pushkey_local_api.py"
-    if not api_path.exists():
+    if not frozen and not api_path.exists():
         print(f"{C_RED}pushkey_local_api.py not found alongside CLI{C_RESET}", file=sys.stderr)
         if blocking:
             sys.exit(1)
@@ -501,13 +505,23 @@ def _cmd_app(blocking=False):
         return None
 
     token = secrets.token_urlsafe(24)
-    env = {**os.environ, "PUSHKEY_LOCAL_PORT": str(port), "PUSHKEY_LAUNCH_TOKEN": token}
-    proc = subprocess.Popen([sys.executable, str(api_path)], env=env)
+    env = {
+        **os.environ,
+        "PUSHKEY_LOCAL_PORT": str(port),
+        "PUSHKEY_LAUNCH_TOKEN": token,
+        "PUSHKEY_PARENT_PID": str(os.getpid()),
+    }
+    command = (
+        [sys.executable, "--local-api-server"]
+        if frozen
+        else [sys.executable, str(api_path)]
+    )
+    proc = subprocess.Popen(command, env=env)
 
     ready = False
     for _ in range(20):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=0.5)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
             ready = True
             break
         except Exception:
@@ -523,12 +537,14 @@ def _cmd_app(blocking=False):
             sys.exit(1)
         return None
 
-    url = f"http://127.0.0.1:{port}/?t={token}"
+    # URL fragments are never sent in HTTP requests or access logs. The web app
+    # exchanges this one-time bootstrap credential for an in-memory session.
+    url = f"http://127.0.0.1:{port}/#t={token}"
     try:
         webbrowser.open(url)
     except Exception:
         pass
-    print(f"  {C_CYAN}->{C_RESET} {url}")
+    print(f"  {C_CYAN}->{C_RESET} http://127.0.0.1:{port}/")
 
     if blocking:
         try:

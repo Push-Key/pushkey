@@ -285,6 +285,31 @@ production keys.
 
 ---
 
+## Local Web Application Boundary
+
+`pushkey app` binds IPv4 loopback (`127.0.0.1`) only. A high-entropy launch
+credential is placed in the URL fragment, which browsers do not send to HTTP
+servers. The frontend exchanges it exactly once at `/api/bootstrap`, removes
+the fragment after success, and keeps the resulting bounded session bearer in
+`sessionStorage`. Launch credentials never authenticate other API routes.
+
+The API validates the exact `Host` and parsed `Origin`, caps headers and bodies,
+disables access logging, and revokes sessions on lock, logout, expiry, and
+shutdown. Project writes are restricted to canonical registered directories,
+reject links/reparse points, and use same-directory fsync plus atomic replace.
+Directory identity is rechecked around every replace. A malicious process
+running as the same OS user may still win a kernel-level rename race on
+Windows; eliminating that residual risk requires native handle-relative
+Windows filesystem operations and is outside this Python implementation.
+
+Production builds generate `web-app/out/pushkey-integrity.json`. It inventories
+every static asset by SHA-256 and records the exact inline CSP hashes. The local
+API verifies that manifest before serving any UI and fails closed on missing,
+extra, or modified files. Run `npm run build` in `web-app` whenever frontend
+assets change; packaging performs this step automatically.
+
+---
+
 ## What Is NOT In Scope for This Repo
 
 The following are proprietary and not part of the open-core security surface:

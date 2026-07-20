@@ -12,6 +12,8 @@ authors = [{name = "Author", email = "author@example.com"}]
 requires-python = ">=3.9"
 dependencies = [
     "cryptography>=41.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
     "graphifyy @ git+https://github.com/safishamsi/graphify.git#egg=graphifyy",
 ]
 
@@ -25,7 +27,15 @@ pushkey = "pushkey_cli:main"
 pushkey-gui = "pushkey:main"
 
 [tool.setuptools]
-py-modules = ["pushkey", "pushkey_cli", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers"]
+py-modules = ["pushkey", "pushkey_cli", "pushkey_local_api", "pushkey_mcp", "pushkey_agent_tokens", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers", "pushkey_icons"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["pushkey_web"]
+namespaces = false
+
+[tool.setuptools.package-data]
+pushkey_web = ["out/**/*"]
 
 [tool.pytest.ini_options]
 tmp_path_retention_policy = "none"

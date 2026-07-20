@@ -356,3 +356,30 @@ def test_cmd_inject_updates_existing_env(tmp_path, capsys):
     content = env_file.read_text()
     assert "OPENAI_API_KEY=sk-test123" in content
     assert "OTHER=keep" in content
+def test_frozen_app_launcher_reexecutes_binary(monkeypatch):
+    import pushkey_cli as cli
+
+    calls = {}
+
+    class Process:
+        def __init__(self, command, env):
+            calls["command"] = command
+            calls["env"] = env
+
+        def kill(self):
+            pass
+
+    class Response:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_port_in_use", lambda _port: False)
+    monkeypatch.setattr(cli.subprocess, "Popen", Process)
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(cli.webbrowser, "open", lambda _url: True)
+    monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
+
+    cli._cmd_app(blocking=False)
+
+    assert calls["command"] == [cli.sys.executable, "--local-api-server"]
+    assert calls["env"]["PUSHKEY_PARENT_PID"] == str(cli.os.getpid())
