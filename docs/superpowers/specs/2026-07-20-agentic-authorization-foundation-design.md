@@ -115,7 +115,7 @@ selectors:
   "selectors": {
     "project_ids": ["project_billing_api"],
     "secret_patterns": ["STRIPE_TEST_*"],
-    "environments": ["development"],
+    "environments": ["dev"],
     "path_identity_ids": ["path_01"],
     "interfaces": ["mcp"],
     "audiences": ["pushkey-local"]
@@ -149,6 +149,16 @@ Selector matching uses these rules:
   rejected; and
 - duplicate or conflicting grants do not widen access beyond the union of
   independently complete grant matches.
+
+The canonical environment names are `dev`, `test`, `staging`, `prod`, and
+`all`. Issuance rejects other environment entries except the explicit `"*"`
+wildcard. Values within one selector array are alternatives; selector
+dimensions are combined conjunctively. `"*"` must be the only entry in its
+array and is the only wildcard for exact-match selector dimensions. For a
+dimension that is not applicable to an action or request, only an explicit
+`"*"` in that grant matches; a concrete selector may not be ignored. For
+example, a project-constrained metadata grant cannot be used for an unfiltered
+global metadata request.
 
 Each protected adapter operation has one action identifier and permission:
 
@@ -286,24 +296,48 @@ issuance rather than being stored as inactive grants.
 
 ### Policy evaluator
 
-`pushkey_policy.py` will be pure and deterministic. It receives named resource
-metadata, never secret values:
+`pushkey_policy.py` will be pure and deterministic. Adapters and resource
+resolvers convert requests into concrete, non-secret resource contexts before
+calling it. The evaluator never accepts caller-supplied authorization patterns
+or secret values:
 
 ```text
 evaluate_authorization(
     identity,
     credential_metadata,
     action,
-    project_id,
-    canonical_path_identity,
-    environment,
-    secret_selectors,
+    resource_contexts,
     interface,
     audience,
     request_context,
     executable_context=None,
 )
 ```
+
+`resource_contexts` is a non-empty immutable collection. Every context contains
+all of these keys:
+
+```json
+{
+  "resource_type": "secret",
+  "resource_phase": "current",
+  "secret_name": "STRIPE_TEST_KEY",
+  "environment": "dev",
+  "project_id": "project_billing_api",
+  "path_identity_id": "path_01"
+}
+```
+
+Values are `null` only when the action-applicability table says the dimension
+does not apply. Missing keys, a non-applicable concrete grant selector, or a
+null value for a required dimension deny. Vault requests and unfiltered policy
+or audit requests use a single context with their corresponding
+`resource_type` and null resource dimensions. Filtered policy or audit requests
+populate every resource dimension used by the filter. List and health adapters
+resolve each candidate to a concrete context and expose only candidates allowed
+by the evaluator. Multi-secret mutations provide one context per affected
+secret. Updates provide both `current` and `requested` contexts when an
+authorized field changes, and every context must match independently.
 
 It returns:
 
@@ -582,7 +616,13 @@ The authorization service denies protected operations for:
 - unsupported obligations;
 - required approval without a valid approval service and artifact;
 - legacy translation failure; and
-- mandatory audit persistence failure.
+- mandatory authorization-journal persistence failure before a protected
+  operation.
+
+The audit log is an idempotent projection of the authoritative authorization
+journal. A post-operation projection failure follows the
+`audit_projection_pending` contract and is not reported as an authorization
+denial or operation failure.
 
 Error responses expose stable reason codes and safe operator guidance. They do
 not expose token hashes, wrapped keys, secret values, policy internals useful
@@ -595,6 +635,12 @@ Before the first v2 rewrite, Pushkey creates one immutable sibling backup named
 creation, restrictive permissions, file flush, and parent-directory flush where
 supported. Migration aborts without changing the source if backup creation or
 verification fails.
+
+Migration acquires the same adjacent cross-process token-store lock used by
+stateful authorization and performs the translated-store rewrite by atomic
+replacement. The lock and replacement primitives are introduced with CP3 and
+reused by CP5. Authenticated-use and explicit migrations therefore cannot race
+each other or overwrite a concurrent token lifecycle mutation.
 
 Legacy records without `schema_version: 2` are translated on authenticated use
 or explicit migration:
@@ -669,6 +715,11 @@ Authorization audit events contain:
 - use reservation number;
 - operation outcome; and
 - migration warnings.
+
+The encrypted authorization journal is the authoritative record for operation
+intent and outcome. The encrypted audit log contains the redacted, idempotent
+projection of that record keyed by operation ID. Projection retry must never
+rerun the protected operation.
 
 Audit events never contain token plaintext, secret plaintext, wrapped vault
 keys, master passwords, or unredacted command output.
