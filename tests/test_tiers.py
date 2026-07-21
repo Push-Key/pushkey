@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
+import io
+import urllib.error
 import pushkey_shared
 import pushkey_tiers as tiers
 
@@ -157,6 +159,41 @@ def test_maybe_heartbeat_downgrades_on_server_failure_beyond_grace(monkeypatch):
     assert tiers._LICENSE_CACHE.get("_server_unreachable") is True
 
 
+def test_heartbeat_reconciles_authoritative_tier_and_expiry(monkeypatch):
+    tiers.save_license({"tier": "pro", "license_key": "PRO-OPAQUE"})
+    monkeypatch.setattr(
+        tiers,
+        "server_heartbeat",
+        lambda key: {
+            "ok": True,
+            "tier": "starter",
+            "status": "active",
+            "expires_at": "2030-01-01T00:00:00",
+            "token": "rotated",
+        },
+    )
+    tiers.maybe_heartbeat()
+    license_data = tiers.load_license()
+    assert license_data["tier"] == "starter"
+    assert license_data["expires"] == "2030-01-01T00:00:00"
+
+
+def test_heartbeat_revocation_immediately_updates_effective_license(monkeypatch):
+    tiers.save_license({"tier": "pro", "license_key": "PRO-OPAQUE"})
+    monkeypatch.setattr(
+        tiers,
+        "server_heartbeat",
+        lambda key: {
+            "ok": False,
+            "error": "License revoked",
+            "status_code": 403,
+        },
+    )
+    tiers.maybe_heartbeat()
+    assert tiers.load_license()["tier"] == "free"
+    assert tiers.load_license()["status"] == "revoked"
+
+
 # ── generate + activate (offline path) ──────────────────────────────────────
 
 def test_generate_license_key_valid_checksum():
@@ -175,12 +212,17 @@ def test_activate_license_bad_format_returns_false():
     assert "format" in msg.lower() or "invalid" in msg.lower()
 
 
-def test_activate_license_bad_checksum_returns_false():
+def test_activate_license_defers_key_validation_to_server(monkeypatch):
     key = tiers.generate_license_key("pro")
     tampered = key[:-1] + ("X" if key[-1] != "X" else "Y")
+    monkeypatch.setattr(
+        tiers,
+        "server_activate",
+        lambda *a, **k: (False, "License not found", {"status_code": 404}),
+    )
     ok, msg = tiers.activate_license(tampered)
     assert ok is False
-    assert "checksum" in msg.lower()
+    assert "not found" in msg.lower()
 
 
 def test_activate_license_unknown_tier_code_returns_false():
@@ -198,3 +240,113 @@ def test_activate_license_server_unreachable_returns_false(monkeypatch):
     ok, msg = tiers.activate_license(key)
     assert ok is False
     assert "server" in msg.lower() or "reach" in msg.lower()
+
+
+def test_server_post_preserves_http_error_detail(monkeypatch):
+    error = urllib.error.HTTPError(
+        "https://example.test/v1/activate",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(b'{"detail":"Device limit reached"}'),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: (_ for _ in ()).throw(error))
+    result = tiers._server_post("/v1/activate", {"license_key": "PRO-OPAQUE"})
+    assert result["status_code"] == 409
+    assert result["error"] == "Device limit reached"
+
+
+def test_activate_license_uses_server_authoritative_entitlement(monkeypatch):
+    key = tiers.generate_license_key("pro", expires="2099-01-01T00:00:00")
+    monkeypatch.setattr(
+        tiers,
+        "server_activate",
+        lambda *a, **k: (
+            True,
+            "",
+            {
+                "ok": True,
+                "tier": "starter",
+                "status": "active",
+                "expires_at": "2030-01-01T00:00:00",
+                "token": "signed-token",
+                "devices_used": 1,
+                "devices_max": 1,
+            },
+        ),
+    )
+
+    ok, _ = tiers.activate_license(key)
+
+    assert ok is True
+    license_data = tiers.load_license()
+    assert license_data["tier"] == "starter"
+    assert license_data["expires"] == "2030-01-01T00:00:00"
+    assert tiers.load_token()["tier"] == "starter"
+
+
+@pytest.mark.parametrize(
+    "bad_field,bad_value",
+    [
+        ("tier", "unknown"),
+        ("status", "revoked"),
+        ("expires_at", "not-a-date"),
+        ("token", ""),
+    ],
+)
+def test_malformed_successful_heartbeat_preserves_known_good_state(
+    monkeypatch, bad_field, bad_value
+):
+    original_license = {
+        "tier": "pro", "license_key": "PRO-OPAQUE", "status": "active"
+    }
+    tiers.save_license(original_license)
+    tiers.save_token({
+        "token": "known-good",
+        "tier": "pro",
+        "refreshed_at": (datetime.now() - timedelta(days=2)).isoformat(),
+    })
+    response = {
+        "ok": True,
+        "tier": "starter",
+        "status": "active",
+        "expires_at": "2030-01-01T00:00:00",
+        "token": "rotated",
+    }
+    response[bad_field] = bad_value
+    monkeypatch.setattr(tiers, "server_heartbeat", lambda _key: response)
+
+    tiers.maybe_heartbeat()
+
+    assert tiers.load_license() == original_license
+    assert tiers.load_token()["token"] == "known-good"
+
+
+def test_heartbeat_token_write_failure_rolls_back_both_files(monkeypatch):
+    original_license = {
+        "tier": "pro", "license_key": "PRO-OPAQUE", "status": "active"
+    }
+    tiers.save_license(original_license)
+    tiers.save_token({
+        "token": "known-good",
+        "tier": "pro",
+        "refreshed_at": (datetime.now() - timedelta(days=2)).isoformat(),
+    })
+    old_license_bytes = pushkey_shared.LICENSE_FILE.read_bytes()
+    old_token_bytes = pushkey_shared.TOKEN_FILE.read_bytes()
+    monkeypatch.setattr(tiers, "server_heartbeat", lambda _key: {
+        "ok": True,
+        "tier": "starter",
+        "status": "active",
+        "expires_at": "2030-01-01T00:00:00",
+        "token": "rotated",
+    })
+    monkeypatch.setattr(
+        tiers, "save_token", lambda _data: (_ for _ in ()).throw(OSError("disk full"))
+    )
+
+    tiers.maybe_heartbeat()
+
+    assert pushkey_shared.LICENSE_FILE.read_bytes() == old_license_bytes
+    assert pushkey_shared.TOKEN_FILE.read_bytes() == old_token_bytes
+    assert tiers.load_license() == original_license

@@ -12,6 +12,9 @@ venv/
 env/
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp_*/
+.pytest-*/
+.test-tmp/
 
 # IDE
 .vscode/
@@ -20,6 +23,7 @@ env/
 *.swo
 .claude/settings.local.json
 .claude/settings.json
+.claude/scheduled_tasks.lock
 
 # OS
 .DS_Store

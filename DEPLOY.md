@@ -1,8 +1,8 @@
 # Pushkey Deployment Guide
 
 Two services to deploy:
-1. **Cloud API** (FastAPI / Python) — license backend + admin endpoints
-2. **Admin frontend** (Next.js) — admin console UI
+1. **Cloud API** (FastAPI / Python). License backend and admin endpoints.
+2. **Admin frontend** (Next.js). Admin console UI.
 
 ---
 
@@ -16,8 +16,11 @@ fly auth login
 fly launch --copy-config           # uses fly.toml
 fly volumes create pushkey_data --size 1
 fly secrets set \
-    PUSHKEY_ADMIN_SECRET="YourStrongSecret" \
+    PUSHKEY_ADMIN_EMAIL="admin@example.com" \
+    PUSHKEY_ADMIN_PASSWORD="$(openssl rand -base64 36)" \
     PUSHKEY_JWT_SECRET="$(openssl rand -hex 32)" \
+    PUSHKEY_ADMIN_SESSION_TTL_MIN="30" \
+    PUSHKEY_ADMIN_COOKIE_SECURE="true" \
     SMTP_HOST="smtp.gmail.com" \
     SMTP_PORT="587" \
     SMTP_USER="you@example.com" \
@@ -34,8 +37,10 @@ fly deploy
 railway login
 railway init
 railway add --service pushkey-api
-railway variables set PUSHKEY_ADMIN_SECRET="YourStrongSecret"
-# … repeat for each var in .env.example
+railway variables set PUSHKEY_ADMIN_EMAIL="admin@example.com"
+railway variables set PUSHKEY_ADMIN_PASSWORD="<generated-password>"
+railway variables set PUSHKEY_JWT_SECRET="<generated-64-hex-secret>"
+# Repeat for each required variable in .env.example.
 railway up
 ```
 
@@ -103,12 +108,15 @@ For other providers (SendGrid, Mailgun, AWS SES), use their SMTP relay credentia
 ## 5. First-time setup checklist
 
 - [ ] Cloud API deployed with all env vars set
-- [ ] `PUSHKEY_ADMIN_SECRET` rotated from default
-- [ ] SMTP working — verify via `/admin/settings` test-send
+- [ ] `PUSHKEY_ADMIN_EMAIL` identifies the bootstrap administrator
+- [ ] `PUSHKEY_ADMIN_PASSWORD` is randomly generated and stored only in the platform secret store
+- [ ] `PUSHKEY_ADMIN_COOKIE_SECURE=true` and both services use HTTPS
+- [ ] SMTP working. Verify via `/admin/settings` test-send
 - [ ] Custom domain pointing to API (e.g. `api.pushkey.app`)
 - [ ] Admin frontend deployed with correct `NEXT_PUBLIC_ADMIN_API_URL`
 - [ ] CORS `ADMIN_ORIGIN` matches admin frontend URL
-- [ ] Volume mounted at `/data` so `licenses.json` and `events.jsonl` persist
+- [ ] Volume mounted at `/data` so JSON compatibility storage persists
+- [ ] Exactly one API worker and one machine are running until Phase 4 database migration
 - [ ] Desktop app rebuilt with `PUSHKEY_SERVER` baked in
 - [ ] Generate a test license, activate from desktop, verify heartbeat lands
 
@@ -117,9 +125,11 @@ For other providers (SendGrid, Mailgun, AWS SES), use their SMTP relay credentia
 ## 6. Backup
 
 Volume contains:
-- `licenses.json` — all customer license records (CRM data)
-- `users.json` — registered cloud sync users
-- `events.jsonl` — append-only event log
-- `vaults/*.enc` — encrypted vault blobs (zero-knowledge — server can't read)
+- `licenses.json`. All customer license records and device state.
+- `admins.json`. Bootstrap administrator record with a password hash.
+- `admin_sessions.json`. Revocable administrator sessions.
+- `users.json`. Registered cloud sync users.
+- `events.jsonl`. Append-only event log.
+- `vaults/*.enc`. Encrypted vault blobs. The server cannot decrypt them.
 
 Schedule daily volume snapshots via your platform's snapshot feature.

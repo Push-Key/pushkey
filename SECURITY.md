@@ -17,8 +17,8 @@ This document is the canonical reference for the Pushkey vault format. It exists
 ### File Location
 
 ```
-~/.pushkey/vault.enc    — encrypted vault
-~/.pushkey/.salt        — 32-byte random salt (chmod 600)
+~/.pushkey/vault.enc   , encrypted vault
+~/.pushkey/.salt       , 32-byte random salt (chmod 600)
 ```
 
 The salt is created once at vault initialization and never changes. It is used as the KDF input for all password-derived keys.
@@ -35,21 +35,21 @@ All integers are big-endian. All crypto uses `cryptography` (Python) / BoringSSL
 Offset  Length  Field
 ──────  ──────  ──────────────────────────────────────────────────────
 0       4       Magic: 0x504B3300  ("PK3\x00")
-4       32      pw_salt    — random, per-vault, used for master pw KDF
-36      32      rec_salt   — random, per-vault, used for recovery code KDF
-68      12      pw_nonce   — AES-GCM nonce for password slot
-80      48      pw_ct      — AES-GCM(pw_key, vault_key) + 16-byte tag
-128     12      rec_nonce  — AES-GCM nonce for recovery slot
-140     48      rec_ct     — AES-GCM(rec_key, vault_key) + 16-byte tag
-188     12      body_nonce — AES-GCM nonce for vault body
-200     variable body_ct   — AES-GCM(vault_key, UTF-8 JSON) + 16-byte tag
+4       32      pw_salt   , random, per-vault, used for master pw KDF
+36      32      rec_salt  , random, per-vault, used for recovery code KDF
+68      12      pw_nonce  , AES-GCM nonce for password slot
+80      48      pw_ct     , AES-GCM(pw_key, vault_key) + 16-byte tag
+128     12      rec_nonce , AES-GCM nonce for recovery slot
+140     48      rec_ct    , AES-GCM(rec_key, vault_key) + 16-byte tag
+188     12      body_nonce, AES-GCM nonce for vault body
+200     variable body_ct  , AES-GCM(vault_key, UTF-8 JSON) + 16-byte tag
 ```
 
 Total header size: 200 bytes. Body is variable length.
 
 ### Key Derivation
 
-Both the master password path and the recovery code path use the same KDF — Argon2id with independent salts.
+Both the master password path and the recovery code path use the same KDF, Argon2id with independent salts.
 
 **Master password:**
 ```
@@ -117,11 +117,23 @@ new_pw_ct    = AES-256-GCM.encrypt(new_pw_key, vault_key)
 ### Recovery Code Generation
 
 ```python
-raw  = secrets.token_bytes(13)          # 104 bits
-b32  = base64.b32encode(raw).rstrip("=")[:20].upper()
+raw  = secrets.token_bytes(10)          # exactly 80 bits
+b32  = base64.b32encode(raw).decode().upper()  # exactly 16 characters
 code = f"PUSH-{b32[0:4]}-{b32[4:8]}-{b32[8:12]}-{b32[12:16]}"
-# Effective entropy: ~80 bits (16 base32 chars × 5 bits)
 ```
+
+Effective entropy is exactly 80 bits. Input normalization removes spaces and
+hyphens and converts letters to uppercase, then requires exactly the `PUSH`
+prefix plus 16 RFC 4648 Base32 characters (`A-Z`, `2-7`).
+
+V3 did not originally encode a KDF identifier. Readers therefore try Argon2id
+first and historical PBKDF2 second when Argon2 is installed. New V3 creation
+always requires and uses Argon2id with the fixed documented parameters; PBKDF2
+is decrypt-only compatibility for historical V2/V3 vaults. A future format
+revision must add an authenticated KDF
+identifier and parameters; changing V3's deployed layout would break existing
+vaults. Without Argon2, an Argon2 vault cannot be distinguished from a wrong
+credential and is reported as a typed unsupported-KDF condition.
 
 ---
 
@@ -168,7 +180,14 @@ The log key is derived from the salt (not the master password):
 log_key = PBKDF2-HMAC-SHA256(b"pushkey-log-key", salt, iterations=100_000)
 ```
 
-This allows audit log inspection without the master password — intentionally. If the master password changes, the log remains readable.
+This allows audit log inspection without the master password, intentionally. If the master password changes, the log remains readable.
+
+Because the salt is stored locally and is not secret, this deterministic key
+only prevents casual plaintext disclosure. An attacker able to read both the
+salt and log can derive the log key. Audit-log confidentiality therefore also
+depends on OS account isolation and restrictive file permissions. Entries are
+individually authenticated, but append durability and inter-process locking
+remain separate operational concerns.
 
 ---
 
@@ -207,15 +226,87 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 
 | Threat | Mitigation |
 |--------|-----------|
-| Disk read by another process | Vault + config + log all encrypted at rest; `chmod 600` on sensitive files |
+| Disk read by another process | Vault + config + log are encrypted at rest. POSIX installs request mode `0600`; Windows `chmod` does not prove restrictive ACLs, so Windows ACL enforcement/testing remains a production-readiness task. |
 | Weak master password | Argon2id with 64 MB memory cost makes brute-force expensive |
 | Forgotten master password | Recovery code (independent Argon2id slot) |
-| Lost recovery code + forgotten password | No recovery possible — this is by design |
+| Lost recovery code + forgotten password | No recovery possible, this is by design |
 | Vault file tampering | AES-GCM authentication tag detects any modification |
 | Partial write / corruption | Atomic `os.replace()` writes; 3 rolling backups at `vault_backup_*.enc` |
-| Cloud server compromise | Zero-knowledge — server stores only ciphertext |
+| Cloud server compromise | Zero-knowledge, server stores only ciphertext |
 | Key accidentally committed to git | Git scan (Starter+) + `inject` always writes `.gitignore` guard |
 | Master password stolen, no physical access | Recovery code cannot be derived from the master password |
+| Secret pasted into LLM chat (MCP `add_key` / `rotate_key` / `set_backup_key`) | **Not mitigated by this repo**, the secret enters the MCP client context and may be transmitted to or retained by the model provider, client transcript, or telemetry. Use the CLI (`pushkey add` / `pushkey rotate`, getpass) for production keys; reserve plaintext MCP tools for short-lived dev keys. See "MCP / LLM Channel" below. |
+
+---
+
+## MCP / LLM Channel
+
+Pushkey ships an MCP server (`pushkey_mcp.py`) so AI agents (Claude Code, VS
+Code Copilot, Cursor, etc.) can drive the vault. The MCP server itself runs
+locally and reads/writes only the local encrypted vault. **The LLM driving it
+does not.** Tool arguments enter the MCP client context and, depending on the
+client and provider configuration, may be transmitted to a model provider or
+retained in transcripts or telemetry.
+
+This means plaintext-argument tools have a different threat surface than the
+CLI, even though both ultimately write to the same encrypted vault.
+
+| Tool | Argument shape | Plaintext exposure |
+|------|----------------|--------------------|
+| `list_keys`, `check_health`, `list_projects` | none / filters | none |
+| `get_key(name)` | name only; **plaintext value returned** | secret enters the MCP client context and may be retained by the client, model provider, transcript, or telemetry |
+| `inject_env(project_path, keys)` | names + path | none (writes to local `.env`) |
+| `rotate_to_backup(name)` | name only | none |
+| `unlock_vault(password)` | password / agent token | password enters the MCP client context and may be transmitted or retained depending on the client/provider, prefer scoped agent tokens (`pk_agent_…`) and revoke after use |
+| `add_key(name, value, …)` | **plaintext value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+| `rotate_key(name, new_value)` | **plaintext new_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+| `set_backup_key(name, backup_value)` | **plaintext backup_value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
+
+### Recommended Policy
+
+- **Dev / throwaway / sandbox keys**, plaintext MCP tools are acceptable.
+  Speed > secrecy when the key will be discarded inside the day.
+- **Long-lived / production keys**, use the CLI:
+  ```
+  pushkey add <NAME>          # getpass prompt, no echo
+  pushkey rotate <NAME>       # getpass prompt, no echo
+  pushkey set-backup <NAME>   # getpass prompt, no echo
+  ```
+  These read the secret via `getpass.getpass()` so it never reaches an LLM
+  provider, the chat transcript, or your shell history.
+
+  For LLM-driven rotation of production keys, pre-stage a backup with the CLI
+  and trigger promotion from chat with `rotate_to_backup(name)`, only the
+  key *name* crosses the wire.
+
+Each plaintext-argument MCP tool now returns a `warning` field reminding the
+agent (and the user) which path was used and which path is preferred for
+production keys.
+
+---
+
+## Local Web Application Boundary
+
+`pushkey app` binds IPv4 loopback (`127.0.0.1`) only. A high-entropy launch
+credential is placed in the URL fragment, which browsers do not send to HTTP
+servers. The frontend exchanges it exactly once at `/api/bootstrap`, removes
+the fragment after success, and keeps the resulting bounded session bearer in
+`sessionStorage`. Launch credentials never authenticate other API routes.
+
+The API validates the exact `Host` and parsed `Origin`, caps headers and bodies,
+disables access logging, and revokes sessions on lock, logout, expiry, and
+shutdown. Project writes are restricted to canonical registered directories,
+reject links/reparse points, and use same-directory fsync plus atomic replace.
+Directory identity is rechecked around every replace. A malicious process
+running as the same OS user may still win a kernel-level rename race on
+Windows; eliminating that residual risk requires native handle-relative
+Windows filesystem operations and is outside this Python implementation.
+
+Production builds generate `web-app/out/pushkey-integrity.json`. It inventories
+every static asset by SHA-256 and records the exact inline CSP hashes. The local
+API verifies that manifest before serving any UI and fails closed on missing,
+extra, or modified files. Run `npm run build` in `web-app` whenever frontend
+assets change; packaging performs this step automatically.
 
 ---
 
@@ -223,9 +314,9 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 
 The following are proprietary and not part of the open-core security surface:
 
-- `pushkey_tiers.py` — license gate logic
-- `server/` — cloud sync backend (separate private repo)
-- `web/` — admin dashboard
+- `pushkey_tiers.py`, license gate logic
+- `server/`, cloud sync backend (separate private repo)
+- `web/`, admin dashboard
 
 Security findings in these components are still welcome via the email above, but they won't be addressed via public PRs.
 

@@ -85,6 +85,11 @@ export interface AuditEntry {
   action: string
   target: string
   details: Record<string, unknown>
+  actor_id?: string
+  actor_email?: string
+  actor_role?: string
+  request_id?: string
+  ip?: string
 }
 
 export interface AdminSettings {
@@ -97,20 +102,28 @@ export interface AdminSettings {
     configured: boolean
   }
   app_url: string
-  admin_secret_set: boolean
+  admin_auth: string
   data_dir: string
   license_count: number
   event_count: number
   version: string
 }
 
-function h(secret: string): HeadersInit {
-  return { "Content-Type": "application/json", "X-Admin-Secret": secret }
+function csrfToken(): string {
+  if (typeof document === "undefined") return ""
+  return document.cookie
+    .split("; ")
+    .find(row => row.startsWith("pk_admin_csrf="))
+    ?.split("=")[1] ?? ""
 }
 
-async function call<T>(secret: string, path: string, init: RequestInit = {}): Promise<T> {
-  const r = await fetch(`${API}${path}`, { ...init, headers: h(secret) })
-  if (r.status === 403) throw new Error("UNAUTHORIZED")
+function h(): HeadersInit {
+  return { "Content-Type": "application/json", "X-CSRF-Token": decodeURIComponent(csrfToken()) }
+}
+
+async function call<T>(_secret: string, path: string, init: RequestInit = {}): Promise<T> {
+  const r = await fetch(`${API}${path}`, { ...init, credentials: "include", headers: h() })
+  if (r.status === 401 || r.status === 403) throw new Error("UNAUTHORIZED")
   if (!r.ok) throw new Error(await r.text())
   const ct = r.headers.get("content-type") ?? ""
   if (!ct.includes("application/json")) return undefined as T
@@ -118,6 +131,23 @@ async function call<T>(secret: string, path: string, init: RequestInit = {}): Pr
 }
 
 export const adminApi = {
+  async login(payload: { email: string; password: string; mfa_code?: string }) {
+    const r = await fetch(`${API}/api/admin/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) throw new Error("UNAUTHORIZED")
+    return r.json() as Promise<{ ok: boolean; csrf_token: string; admin: { id: string; email: string; role: string } }>
+  },
+
+  me: () =>
+    call<{ admin: { id: string; email: string; role: string } }>("", "/api/admin/auth/me"),
+
+  logout: () =>
+    call<{ ok: boolean }>("", "/api/admin/auth/logout", { method: "POST" }),
+
   stats: (s: string) =>
     call<AdminStats>(s, "/api/admin/stats"),
 
@@ -174,8 +204,9 @@ export const adminApi = {
       body: JSON.stringify({ action, keys }),
     }),
 
-  async downloadBackup(s: string): Promise<void> {
-    const r = await fetch(`${API}/api/admin/backup`, { headers: h(s) })
+  async downloadBackup(_secret: string): Promise<void> {
+    void _secret
+    const r = await fetch(`${API}/api/admin/backup`, { credentials: "include", headers: h() })
     if (!r.ok) throw new Error("Backup failed")
     const blob = await r.blob()
     const url  = URL.createObjectURL(blob)
@@ -225,7 +256,7 @@ export const adminApi = {
     if (filters?.status && filters.status !== "All") params.set("status", filters.status)
     if (filters?.search)                              params.set("search", filters.search)
     const qs  = params.toString() ? `?${params}` : ""
-    const r   = await fetch(`${API}/api/admin/export${qs}`, { headers: h(s) })
+    const r   = await fetch(`${API}/api/admin/export${qs}`, { credentials: "include", headers: h() })
     if (!r.ok) throw new Error("Export failed")
     const blob = await r.blob()
     const url  = URL.createObjectURL(blob)

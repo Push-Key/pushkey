@@ -3,6 +3,7 @@ import pytest
 from pathlib import Path
 
 import pushkey
+import pushkey_shared
 
 
 def test_encrypt_special_characters(tmp_path, monkeypatch):
@@ -92,6 +93,7 @@ def test_master_password_with_special_chars(tmp_path, monkeypatch):
     }
 
     for pwd in special_passwords:
+        pushkey_shared.VAULT_FILE.unlink(missing_ok=True)
         pushkey.save_vault(test_vault, pwd)
         loaded, _ = pushkey.load_vault(pwd)
         assert "TEST_KEY" in loaded

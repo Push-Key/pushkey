@@ -1,0 +1,673 @@
+# Pushkey Production Readiness Task List and Implementation Plan
+
+**Status:** Draft execution plan  
+**Target:** Production-ready Pushkey v3  
+**Planning baseline:** 2026-07-19  
+**Execution model:** Complete phases consecutively. Do not start a phase until the previous phase's exit gate passes.
+
+**Latest verification:** [2026-07-20 baseline record](BASELINE_VERIFICATION_2026-07-20.md).
+The isolated Windows run collected 335 tests: 334 passed, none failed, and one
+platform-dependent symlink test skipped. Both frontend production builds pass.
+
+## Goal
+
+Ship a secure, supportable, reproducible Pushkey release whose core vault, CLI,
+local web app, MCP integration, cloud sync, licensing, website, packaging, and
+operations can be trusted with production secrets.
+
+“Production ready” in this plan means:
+
+- A clean, reproducible source baseline
+- One canonical cloud backend and one documented API contract
+- No known critical or high security findings
+- Transactional durable storage with tested backup and restoration
+- Automated tests for every critical user journey
+- Reproducible, signed, checksummed release artifacts
+- Monitored production deployment with rollback and incident procedures
+- Accurate documentation, legal policies, and support ownership
+
+## Product Decisions to Lock
+
+These decisions must be recorded before implementation begins:
+
+- [ ] Primary client: CLI + local web app
+- [ ] Legacy Tk desktop status: maintenance-only or supported first-class client
+- [ ] Canonical cloud backend: consolidate into `pushkey_cloud_api.py`
+- [ ] Legacy `server/` disposition: migrate required behavior, then archive/remove
+- [ ] Initial release scope: individual/local-first plus optional zero-knowledge sync
+- [ ] Deferred scope: team collaboration, SSO, GitHub webhooks, automated provider rotation
+- [ ] Supported platforms and architectures
+- [ ] Supported Python and Node versions
+- [ ] Public open-core boundary versus private commercial repository
+
+## Allowed APIs and Existing Patterns
+
+Implementation should reuse these verified project patterns instead of inventing
+parallel behavior:
+
+| Area | Existing source of truth |
+|---|---|
+| Vault encryption and migration | `pushkey_crypto.py`, `pushkey_vault.py`, `SECURITY.md` |
+| Shared filesystem locations | `pushkey_shared.py` |
+| Provider/health calculation | `pushkey_providers.py` |
+| CLI commands and REPL | `pushkey_cli.py` |
+| MCP operations and warning policy | `pushkey_mcp.py`, `AGENTS.md`, `SECURITY.md` |
+| Local browser API contract | `web-app/src/lib/api.ts`, `pushkey_local_api.py` |
+| Cloud admin route inventory | `web/src/lib/admin-api.ts`, `pushkey_cloud_api.py` |
+| License client contract | `pushkey_tiers.py` |
+| Device activation concepts | `server/main.py` activation/heartbeat implementations |
+| Static local app export | `web-app/next.config.ts` |
+| Web lint configuration | `web/eslint.config.mjs` |
+| Test isolation | `tests/conftest.py` |
+| Deployment seed | `Dockerfile`, `fly.toml`, `railway.toml`, `DEPLOY.md` |
+| Release asset names | `npm/scripts/install.js` |
+| Public/private allowlist seed | `PUBLIC_REPO_FILES.md` |
+
+Do not:
+
+- Add another backend, vault format, or API namespace.
+- Store a master password or production admin credential in browser storage.
+- pass production secrets through plaintext MCP arguments.
+- Add direct `~/.pushkey` paths outside `pushkey_shared.py`.
+- Add flat-file read/modify/write storage to the production cloud service.
+- Publish unsigned or unverifiable release binaries.
+- Claim a platform, browser, feature, or test count that CI does not verify.
+
+---
+
+# Phase 0, Freeze, Inventory, and Baseline
+
+**Objective:** Turn the current working folder into a known, reproducible starting point.
+
+## Tasks
+
+- [x] Create an implementation branch from the current branch.
+- [x] Inventory every modified and untracked file.
+- [x] Separate intended product changes from caches, worktrees, generated output, and local configuration.
+- [x] Review the current CLI REPL, MCP warning, and local web app changes.
+- [x] Commit intended changes in logical commits.
+- [x] Remove or ignore unintended generated files.
+- [x] Preserve all user-authored work; do not discard dirty files without review.
+- [x] Fix `test_check_health_stale` to use a date relative to the test clock.
+- [x] Update `test_set_backup_key_writes_next_value` to require the plaintext MCP warning.
+- [x] Run all Python tests.
+- [x] Run both frontend builds.
+- [x] Run Python compilation checks.
+- [x] Record the exact baseline versions of Python, Node, npm, OS, and dependencies.
+- [x] Tag the clean baseline as an internal pre-production milestone.
+
+## Verification
+
+```powershell
+git status --short
+git diff --check
+python -m compileall pushkey*.py server
+pytest -q
+cd web; npm ci; npm run lint; npm run build
+cd ../web-app; npm ci; npm run build
+```
+
+## Exit Gate
+
+- [x] Clean working tree
+- [x] Current collected test count completes: 334 passed and 1 justified platform skip
+- [x] Both Next.js production builds passing
+- [x] No unknown or accidental files in the release baseline
+
+---
+
+# Phase 1, Architecture and Contract Lock
+
+**Objective:** Eliminate duplicate ownership and define the contracts all clients will use.
+
+## Tasks
+
+- [ ] Write `docs/ARCHITECTURE.md` with component ownership and trust boundaries.
+- [ ] Designate `pushkey_cloud_api.py` as the canonical cloud service.
+- [ ] Inventory behavior unique to `server/main.py`.
+- [ ] Move activation, heartbeat, deactivation, device limits, and signed-token behavior into the canonical service.
+- [ ] Remove client-controlled tier selection; the server must derive tier from the license record.
+- [ ] Specify license status, expiry, grace, device, and revocation behavior.
+- [ ] Version and document `/v1/activate`, `/v1/heartbeat`, and `/v1/deactivate`.
+- [ ] Decide whether `/api/v1/*` remains or becomes a compatibility alias.
+- [ ] Generate or hand-maintain a checked OpenAPI contract for cloud endpoints.
+- [ ] Formalize a versioned local API contract from `web-app/src/lib/api.ts`.
+- [ ] Formalize the versioned `health.json` sidecar schema used by extensions.
+- [ ] Define backward compatibility for V1, V2, and V3 vault files.
+- [ ] Define client/server compatibility and forced-upgrade rules.
+- [ ] Mark `server/` legacy after parity tests pass, then archive or remove it.
+- [ ] Record architecture decisions as ADRs.
+
+## Verification
+
+- [ ] Contract test: desktop activation → heartbeat → deactivation against the canonical app.
+- [ ] Contract test every local web client method against `pushkey_local_api.py`.
+- [ ] Assert no production client imports or calls the legacy server contract.
+- [ ] Search for duplicate tier definitions and duplicate route ownership.
+
+## Exit Gate
+
+- [ ] One cloud backend
+- [ ] One authoritative license record
+- [ ] Versioned cloud, local, and sidecar contracts
+- [ ] No client-supplied commercial entitlements
+
+---
+
+# Phase 2, Core Vault, CLI, MCP, and Local API Hardening
+
+**Objective:** Make every local secret-handling path robust under failure and hostile input.
+
+## Vault tasks
+
+- [ ] Add immutable binary fixtures for V1, V2, and V3.
+- [ ] Make CLI initialization create V3 and display/confirm a recovery code instead of silently creating V2.
+- [ ] Centralize recovery-code generation in `pushkey_crypto.py`; remove the duplicate local API generator.
+- [ ] Verify and document the recovery code's effective entropy and normalization rules.
+- [ ] Test every supported migration path.
+- [ ] Test wrong-password, wrong-recovery-code, truncated, corrupted, oversized, and tampered vaults.
+- [ ] Property-test vault round trips with Unicode, empty, long, and unusual metadata.
+- [ ] Test interrupted writes and backup restoration.
+- [ ] Add file and parent-directory `fsync`, vault write locking, and post-write decrypt validation.
+- [ ] Validate restrictive file permissions on Windows, macOS, and Linux where supported.
+- [ ] Define maximum vault and field sizes.
+- [ ] Ensure every migration creates a recoverable backup.
+- [ ] Add a documented vault repair and recovery procedure.
+
+## CLI tasks
+
+- [ ] Complete and test the interactive REPL.
+- [ ] Verify secrets never enter command history or logs.
+- [ ] Implement or verify `set-backup` with `getpass`.
+- [ ] Add stable exit codes for usage, auth, I/O, corruption, and network failures.
+- [ ] Add machine-readable JSON output where automation needs it.
+- [ ] Test Ctrl+C and child-process cleanup for `pushkey app`.
+- [ ] Test port selection and stale local API processes.
+- [ ] Test shell completions on supported shells.
+- [ ] Add subprocess-level CLI tests rather than only direct function tests.
+
+## MCP tasks
+
+- [ ] Require scoped agent tokens as the recommended unlock path.
+- [ ] Add expiration, revocation, scope, and last-used enforcement tests.
+- [ ] Ensure every plaintext write tool returns the mandated warning.
+- [ ] Stop `inject_env` from returning `NAME=value` lines; return key names and counts only.
+- [ ] Consolidate CLI, MCP, and local API `.env` mutation into one atomic, tested service.
+- [ ] Ensure secret-returning tools clearly mark transcript exposure.
+- [ ] Verify `rotate_to_backup(name)` never returns plaintext.
+- [ ] Add session timeout and explicit memory clearing where practical.
+- [ ] Add allowlisted project-path validation for write operations.
+- [ ] Add hostile name/path/value tests.
+- [ ] Update MCP setup documentation for supported clients.
+
+## Local API tasks
+
+- [ ] Bind only to loopback.
+- [ ] Require a high-entropy, single-launch authentication token.
+- [ ] Remove the token from URLs after bootstrap.
+- [ ] Fix the CLI readiness probe to use an authenticated status request or a dedicated unauthenticated readiness endpoint.
+- [ ] Validate `Origin`, `Host`, and allowed methods.
+- [ ] Parse and compare exact origins; do not use string-prefix origin checks.
+- [ ] Add strict CORS and security headers.
+- [ ] Add request body limits and request timeouts.
+- [ ] Add idle shutdown and parent-process lifecycle behavior.
+- [ ] Prevent directory traversal and arbitrary filesystem writes.
+- [ ] Redact secrets from access logs and exceptions.
+- [ ] Minimize how long plaintext master passwords remain in process memory and clear session state on shutdown.
+- [ ] Add tests for hostile origins, reused tokens, invalid hosts, and malformed bodies.
+- [ ] Embed and serve the exact versioned `web-app/out` artifact.
+
+## Verification
+
+```powershell
+pytest tests/test_vault_crypto.py tests/test_encryption_edge_cases.py -q
+pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
+```
+
+- [ ] Run a clean local journey: init → add → assign → inject → rotate → backup → promote → recover.
+- [ ] Confirm no plaintext secrets appear in logs, history, URLs, or error telemetry.
+
+## Exit Gate
+
+- [ ] All local critical journeys automated
+- [ ] Local API origin/token security tests passing
+- [ ] Recovery and corruption behavior documented and proven
+
+---
+
+# Phase 3, Production Admin Authentication and Authorization
+
+**Objective:** Replace the browser-held global admin secret with accountable, revocable administration.
+
+## Tasks
+
+- [ ] Define admin user, role, session, MFA, recovery, and audit models.
+- [x] Store newly created admin password hashes with Argon2id while retaining legacy bcrypt verification.
+- [ ] Add individual admin accounts.
+- [ ] Add least-privilege roles and route permissions.
+- [ ] Add MFA enrollment, verification, recovery codes, and reset procedures.
+- [x] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
+- [ ] Add refresh rotation and server-side session revocation.
+- [x] Add CSRF protection for cookie-authenticated mutations.
+- [x] Remove `X-Admin-Secret` from public browser requests.
+- [x] Remove admin secrets from `localStorage`.
+- [ ] Keep a break-glass credential only in the server secret store, not the UI.
+- [ ] Add login throttling, lockout policy, and alerting.
+- [ ] Record actor ID, role, request ID, IP, and target in audit events.
+- [ ] Add admin account provisioning and offboarding procedures.
+- [ ] Add tests for role boundaries, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
+
+## Pattern references
+
+- Replace the dependency gate pattern currently used by admin routes with an authenticated principal dependency.
+- Preserve generic login/reset responses from `pushkey_cloud_api.py`.
+- Preserve the existing audit event concept but extend its actor and request context.
+
+## Exit Gate
+
+- [ ] No production-wide admin secret reaches browser JavaScript
+- [ ] Every admin mutation has an authenticated actor
+- [ ] MFA and session revocation verified end-to-end
+
+---
+
+# Phase 4, Durable Cloud Data and Sync Protocol
+
+**Objective:** Replace flat files with transactional storage and conflict-safe encrypted blob storage.
+
+## Tasks
+
+- [ ] Select managed PostgreSQL and object storage providers.
+- [ ] Design schemas for users, admins, sessions, licenses, devices, contacts, tickets, settings, audits, and vault revisions.
+- [ ] Add a formal migration framework.
+- [ ] Create initial schema migrations with constraints and indexes.
+- [ ] Store only hashed license keys and reset tokens.
+- [ ] Migrate encrypted vault blobs to object storage.
+- [ ] Store vault revision metadata transactionally in PostgreSQL.
+- [ ] Add conditional writes using revision or `If-Match`.
+- [ ] Return conflict responses without destroying either revision.
+- [ ] Add per-account storage quotas and maximum request sizes.
+- [ ] Add version history and retention policy.
+- [ ] Add transactional audit/outbox behavior.
+- [ ] Add a one-time importer from existing JSON/JSONL/blob storage.
+- [ ] Add migration dry-run, reconciliation, rollback, and idempotency.
+- [ ] Verify the server never receives password, salt, decrypted vault, or vault key.
+- [ ] Define account export and deletion workflows.
+- [ ] Remove production flat-file write paths after migration.
+
+## Verification
+
+- [ ] Import a seeded legacy dataset and reconcile record counts and hashes.
+- [ ] Run concurrent license, contact, and vault writes.
+- [ ] Prove stale revisions cannot overwrite newer vaults.
+- [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
+- [ ] Load-test expected beta and launch concurrency.
+
+## Exit Gate
+
+- [ ] Transactional operational data
+- [ ] Conflict-safe vault sync
+- [ ] Reversible, tested migration
+- [ ] No production dependency on JSON/JSONL read-modify-write storage
+
+---
+
+# Phase 5, Cloud API Security and Abuse Controls
+
+**Objective:** Harden authentication, network boundaries, quotas, and failure behavior.
+
+## Tasks
+
+- [ ] Replace 30-day bearer-only JWT behavior with short access tokens and revocable sessions.
+- [ ] Add issuer, audience, subject, expiry, issued-at, and unique token IDs.
+- [ ] Add signing-key rotation.
+- [ ] Revoke sessions on password change, reset, compromise, and account closure.
+- [ ] Add distributed rate limiting through Redis or the API gateway.
+- [ ] Configure trusted proxies before using forwarded client IPs.
+- [ ] Add per-endpoint limits, quotas, and `Retry-After`.
+- [ ] Rate-limit registration, login, reset, activation, heartbeat, sync, portal, support, and admin endpoints.
+- [ ] Add request body, header, and upload limits.
+- [ ] Enumerate allowed CORS origins, headers, and methods.
+- [ ] Add trusted-host enforcement.
+- [ ] Add HSTS, CSP, frame, referrer, and content-type headers.
+- [ ] Add dependency/readiness health checks.
+- [ ] Add idempotency keys for retryable mutations.
+- [ ] Add SMTP retry, timeout, and dead-letter behavior.
+- [ ] Add abuse detection and operational alerts.
+- [ ] Add security regression tests across multiple workers/instances.
+
+## Exit Gate
+
+- [ ] Distributed controls cannot be bypassed by restart or horizontal scaling
+- [ ] Token revocation and key rotation proven
+- [ ] Network and browser policies verified in production-like infrastructure
+
+---
+
+# Phase 6, Frontend Completion and Accessibility
+
+**Objective:** Finish and verify the local product UI and public/commercial web surfaces.
+
+## Local web app tasks
+
+- [ ] Reconcile all UI operations with the versioned local API.
+- [ ] Complete loading, empty, error, locked, offline, and conflict states.
+- [ ] Add safe secret reveal/copy timeouts.
+- [ ] Prevent secret values from entering analytics, browser logs, or persistent state.
+- [ ] Replace obsolete `next lint` with the working ESLint pattern from `web`.
+- [ ] Add keyboard navigation and focus management.
+- [ ] Meet WCAG 2.2 AA for critical journeys.
+- [ ] Add responsive layouts for supported viewport sizes.
+- [ ] Add Playwright coverage for core vault journeys.
+
+## Marketing/admin/portal tasks
+
+- [ ] Replace admin secret login with the Phase 3 session design.
+- [ ] Complete or remove the “coming soon” GitHub integration UI.
+- [ ] Validate every marketing claim against a tested capability.
+- [ ] Configure `metadataBase`, canonical URLs, sitemap, robots, Open Graph, and error pages.
+- [ ] Add CSP-compatible analytics and consent behavior if analytics is used.
+- [ ] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
+- [ ] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
+- [ ] Replace boilerplate `web/README.md` with an operator/developer runbook.
+
+## Exit Gate
+
+- [ ] Critical UI journeys pass in Chromium, Firefox, and WebKit where applicable
+- [ ] WCAG audit has no critical failures
+- [ ] No unimplemented controls appear as functional production features
+
+---
+
+# Phase 7, Packaging and Reproducible Builds
+
+**Objective:** Make every supported installation path deliver the same documented product safely.
+
+## Python package tasks
+
+- [ ] Replace placeholder author metadata.
+- [ ] Reconcile minimum Python version across code, package, CI, and docs.
+- [ ] Define core and optional dependency groups.
+- [ ] Remove or pin the Git-sourced `graphifyy` dependency.
+- [ ] Include every required runtime module and static artifact.
+- [ ] Decide which entry points ship in the public package.
+- [ ] Build sdist and wheel.
+- [ ] Install both into fresh virtual environments.
+- [ ] Test upgrade and uninstall behavior.
+
+## Executable tasks
+
+- [ ] Make PyInstaller specs reproducible from a clean checkout.
+- [ ] Embed the exact local web build.
+- [ ] Verify icons and version resources.
+- [ ] Produce supported OS/architecture artifacts.
+- [ ] Sign Windows and macOS artifacts.
+- [ ] Generate SHA-256 checksums, signatures, provenance, and SBOMs.
+- [ ] Test upgrades without vault loss.
+
+## npm wrapper tasks
+
+- [ ] Align installer asset names with CI release artifacts.
+- [ ] Verify checksums/signatures before installation.
+- [ ] Fail with a nonzero exit code on unsuccessful installation.
+- [ ] Handle unsupported OS/architecture explicitly.
+- [ ] Add arm64 support or document it as unsupported.
+- [ ] Prevent Windows shim self-resolution loops.
+- [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
+
+## Verification
+
+```powershell
+python -m build
+python -m twine check dist/*
+npm pack --dry-run
+```
+
+- [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
+- [ ] Release assets exactly match the npm download map.
+
+## Exit Gate
+
+- [ ] Reproducible package and binary builds
+- [ ] Signed and checksummed artifacts
+- [ ] Clean installation on every claimed platform
+
+---
+
+# Phase 8, CI/CD and Supply-Chain Security
+
+**Objective:** Make production quality enforceable on every change and release.
+
+## Tasks
+
+- [ ] Add pull-request CI for Python tests and compilation.
+- [ ] Add frontend lint, type-check, test, and build jobs.
+- [ ] Add packaging smoke tests.
+- [ ] Add Windows, macOS, and Linux matrices.
+- [ ] Add supported Python and Node version matrices.
+- [ ] Add Gitleaks or equivalent secret scanning.
+- [ ] Add `pip-audit` and npm audit policy.
+- [ ] Add Bandit/Semgrep static analysis.
+- [ ] Add Trivy container/filesystem scanning.
+- [ ] Generate CycloneDX or SPDX SBOMs.
+- [ ] Pin CI actions by immutable commit SHA.
+- [ ] Add dependency update automation with review gates.
+- [ ] Add artifact provenance and release attestations.
+- [ ] Add a release workflow requiring an approved version tag.
+- [ ] Add an automated public-repository export from an allowlist.
+- [ ] Secret-scan and clean-room-test the exported public repository.
+- [ ] Protect the main branch and require all release gates.
+
+## Exit Gate
+
+- [ ] No release can bypass tests, scans, signing, or approval
+- [ ] Public/private boundary is executable and tested
+- [ ] Build provenance is available for every artifact
+
+---
+
+# Phase 9, Extensions and Secondary Clients
+
+**Objective:** Either make extensions production-grade or remove them from launch claims.
+
+## VS Code tasks
+
+- [ ] Version the sidecar schema.
+- [ ] Test missing, malformed, partial, and concurrently replaced health files.
+- [ ] Test file-watcher reattachment.
+- [ ] Support or explicitly exclude Remote SSH, WSL, and containers.
+- [ ] Add Extension Host tests.
+- [ ] Add publisher, privacy, support, icons, screenshots, and marketplace metadata.
+- [ ] Package and install-test the VSIX.
+
+## Browser extension tasks
+
+- [ ] Authenticate localhost health requests or limit the response to harmless metadata.
+- [ ] Validate allowed origins.
+- [ ] Replace `innerHTML` rendering of key-controlled content with safe DOM/text APIs.
+- [ ] Test missing local server, malformed data, and port changes.
+- [ ] Add Playwright extension tests.
+- [ ] Verify Chrome and Edge.
+- [ ] Remove the Firefox claim or test/package a Firefox-compatible build.
+- [ ] Add store privacy disclosures and listing assets.
+
+## Exit Gate
+
+- [ ] Each claimed extension has automated tests and a store-ready package
+- [ ] No key-controlled content can inject markup/script
+- [ ] Local health exposure has an explicit security model
+
+---
+
+# Phase 10, Operations, Backup, Monitoring, and Incident Readiness
+
+**Objective:** Ensure the service can be operated and recovered, not merely deployed.
+
+## Tasks
+
+- [ ] Define availability, latency, error-rate, backup, and recovery SLOs.
+- [ ] Set RPO and RTO.
+- [ ] Add structured JSON logs with correlation/request IDs.
+- [ ] Add metrics for auth, sync, activation, storage, email, errors, and rate limits.
+- [ ] Add tracing where it materially improves diagnosis.
+- [ ] Add error reporting with secret redaction.
+- [ ] Add readiness and liveness checks.
+- [ ] Configure dashboards and actionable alerts.
+- [ ] Configure encrypted database backups and point-in-time recovery.
+- [ ] Configure versioned object-storage backups.
+- [ ] Add offsite retention and deletion policies.
+- [ ] Write and automate restoration procedures.
+- [ ] Conduct and record a destructive restore drill.
+- [ ] Write deployment, rollback, migration, incident, compromise, and key-rotation runbooks.
+- [ ] Configure managed secrets and documented rotation.
+- [ ] Run capacity and load tests.
+- [ ] Run a production rollback drill.
+- [ ] Define on-call and escalation ownership.
+
+## Exit Gate
+
+- [ ] Successful restore drill meets RPO/RTO
+- [ ] Successful deploy and rollback drill
+- [ ] Alerts reach an accountable operator
+- [ ] Logs and telemetry contain no plaintext secrets
+
+---
+
+# Phase 11, Documentation, Legal, Support, and Commercial Readiness
+
+**Objective:** Align customer promises and internal operations with the verified product.
+
+## Tasks
+
+- [ ] Rewrite README around the final launch scope.
+- [ ] Update test counts automatically from CI.
+- [ ] Update V3 architecture and migration documentation.
+- [ ] Update CLI, MCP, local app, sync, recovery, and extension docs.
+- [ ] Rewrite deployment docs for the canonical architecture.
+- [ ] Add administrator, backup, restore, and incident runbooks.
+- [ ] Add supported-platform and lifecycle policy.
+- [ ] Add vulnerability reporting and disclosure procedure.
+- [ ] Verify privacy policy covers accounts, metadata, logs, support, and encrypted blobs.
+- [ ] Add data retention, export, deletion, and subprocessors disclosures.
+- [ ] Review terms, licensing, refund, and acceptable-use policies.
+- [ ] Create support severity levels and response targets.
+- [ ] Prepare status-page and incident communication templates.
+- [ ] Verify billing/tier enforcement if paid plans launch.
+- [ ] Remove mojibake and validate repository text as UTF-8.
+
+## Exit Gate
+
+- [ ] Documentation matches the tested release
+- [ ] Legal and privacy review complete
+- [ ] Support ownership and response process operational
+
+---
+
+# Phase 12, Independent Security Review and Release Candidate
+
+**Objective:** Prove the assembled system is safe and releasable.
+
+## Tasks
+
+- [ ] Freeze release-candidate scope.
+- [ ] Commission independent crypto/application security review.
+- [ ] Penetration-test cloud API, admin, portal, local API, and sync.
+- [ ] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
+- [ ] Resolve all critical and high findings.
+- [ ] Triage medium/low findings with owners and deadlines.
+- [ ] Re-run the full test, build, scan, and packaging matrix.
+- [ ] Conduct a clean-room installation on each supported platform.
+- [ ] Test upgrade from the latest public version.
+- [ ] Test rollback without vault or cloud data loss.
+- [ ] Run a private beta with representative developers.
+- [ ] Measure onboarding completion, crash/error rate, sync reliability, and support volume.
+- [ ] Fix release-blocking beta defects.
+- [ ] Create release notes, checksums, signatures, SBOM, and known-issues list.
+- [ ] Obtain explicit engineering, security, operations, product, and legal sign-off.
+
+## Final Release Gate
+
+- [ ] Zero open critical/high security findings
+- [ ] All required CI jobs green
+- [ ] Backup and rollback drills passed
+- [ ] Production monitoring and support active
+- [ ] Signed artifacts install successfully
+- [ ] Documentation and claims match verified behavior
+- [ ] Release sign-off recorded
+
+---
+
+# Consecutive Implementation Schedule
+
+The estimates assume one experienced full-time engineer plus part-time security,
+design, legal, and operations support. They are planning ranges, not guarantees.
+
+| Weeks | Phase | Primary outcome |
+|---|---|---|
+| 1 | Phase 0 | Clean, fully passing baseline |
+| 2–3 | Phase 1 | Canonical architecture and contracts |
+| 4–6 | Phase 2 | Hardened local product |
+| 7–9 | Phase 3 | Real admin identity, MFA, and sessions |
+| 10–13 | Phase 4 | PostgreSQL/object storage migration and sync conflicts |
+| 14–15 | Phase 5 | Distributed security and abuse controls |
+| 16–18 | Phase 6 | Complete, accessible, E2E-tested web clients |
+| 19–21 | Phase 7 | Reproducible packages and signed binaries |
+| 22–23 | Phase 8 | CI/CD and supply-chain gates |
+| 24–25 | Phase 9 | Production-grade extensions or scoped deferral |
+| 26–27 | Phase 10 | Monitoring, backup, restore, rollback, incident readiness |
+| 28 | Phase 11 | Documentation, privacy, legal, and support readiness |
+| 29–31 | Phase 12 | External review, private beta, release candidate |
+| 32 | Launch | Controlled production release |
+
+With two experienced engineers, Phases 3–9 can overlap after Phase 2 contracts
+are locked. A realistic two-engineer target is 20–24 weeks. Security review,
+store approvals, signing certificates, and legal review remain external
+critical-path items.
+
+---
+
+# Master Release Checklist
+
+## Product
+
+- [ ] Core local workflows complete
+- [ ] Recovery proven
+- [ ] Sync conflict handling complete
+- [ ] Paid entitlement behavior server-authoritative
+- [ ] Deferred features absent from launch claims
+
+## Security
+
+- [ ] Admin secret removed from browsers
+- [ ] Scoped/revocable sessions
+- [ ] MCP plaintext warnings enforced
+- [ ] Local API origin and token boundary verified
+- [ ] Independent review complete
+
+## Quality
+
+- [ ] Unit, integration, contract, E2E, migration, load, and install tests pass
+- [ ] Accessibility gate passes
+- [ ] No test depends on wall-clock dates
+- [ ] No secrets in test artifacts or logs
+
+## Delivery
+
+- [ ] CI/CD protected
+- [ ] Artifacts signed and checksummed
+- [ ] SBOM and provenance published
+- [ ] Upgrade and rollback tested
+
+## Operations
+
+- [ ] Database and object storage backed up
+- [ ] Restore and rollback drills passed
+- [ ] Monitoring and alerts active
+- [ ] Incident and key-rotation runbooks approved
+
+## Business
+
+- [ ] Documentation accurate
+- [ ] Legal/privacy review complete
+- [ ] Support process staffed
+- [ ] Billing and tier claims verified

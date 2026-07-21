@@ -1,0 +1,976 @@
+"""
+Tests for the local-only Pushkey API consumed by the bundled web UI.
+Phase 1: status, unlock, lock, keys read-only, token auth, autolock.
+"""
+import importlib
+import json
+import os
+import sys
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from pushkey_crypto import encrypt_data_v3
+import pushkey_shared as _s
+
+
+@pytest.fixture
+def fresh_app(monkeypatch):
+    monkeypatch.setenv("PUSHKEY_LAUNCH_TOKEN", "test-launch-token")
+    monkeypatch.setenv("PUSHKEY_LOCAL_PORT", "0")
+    if "pushkey_local_api" in sys.modules:
+        del sys.modules["pushkey_local_api"]
+    mod = importlib.import_module("pushkey_local_api")
+    return mod
+
+
+@pytest.fixture
+def client(fresh_app):
+    return TestClient(fresh_app.app)
+
+
+@pytest.fixture
+def auth(client):
+    response = client.post(
+        "/api/bootstrap",
+        headers={"Authorization": "Bearer test-launch-token"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def _seed_vault(password: str, recovery: str, keys: dict) -> None:
+    _s.ensure_vault_dir()
+    payload = {"_schema": _s.VAULT_SCHEMA_VERSION, "keys": keys}
+    blob = encrypt_data_v3(json.dumps(payload), password, recovery)
+    _s.VAULT_FILE.write_bytes(blob)
+
+
+# ── auth gate ──────────────────────────────────────────────────────
+def test_status_requires_bearer_token(client):
+    r = client.get("/api/status")
+    assert r.status_code == 401
+
+
+def test_invalid_bearer_rejected(client):
+    r = client.get("/api/status", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_valid_bearer_accepted(client, auth):
+    r = client.get("/api/status", headers=auth)
+    assert r.status_code == 200
+
+
+# ── status ─────────────────────────────────────────────────────────
+def test_status_locked_when_no_vault(client, auth):
+    r = client.get("/api/status", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["locked"] is True
+    assert body["has_vault"] is False
+    assert body["key_count"] == 0
+
+
+def test_status_locked_when_vault_present_but_not_unlocked(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"OPENAI": {"value": "sk-x"}})
+    r = client.get("/api/status", headers=auth)
+    body = r.json()
+    assert body["locked"] is True
+    assert body["has_vault"] is True
+
+
+# ── unlock / lock ─────────────────────────────────────────────────
+def test_unlock_requires_credential(client, auth):
+    r = client.post("/api/unlock", headers=auth, json={})
+    assert r.status_code == 400
+
+
+def test_unlock_wrong_password(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/unlock", headers=auth, json={"password": "nope"})
+    assert r.status_code == 401
+
+
+def test_unlock_correct_password(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K1": {"value": "v1"}, "K2": {"value": "v2"}})
+    r = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["locked"] is False
+    assert body["key_count"] == 2
+    assert body["can_write"] is True
+    s = client.get("/api/status", headers=auth).json()
+    assert s["locked"] is False
+    assert s["key_count"] == 2
+
+
+def test_unlock_via_recovery_code(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/unlock", headers=auth, json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD"})
+    assert r.status_code == 200
+
+
+def test_lock_clears_session(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    r = client.post("/api/lock", headers=auth)
+    assert r.status_code == 200
+    assert r.json() == {"locked": True}
+    assert client.get("/api/status", headers=auth).status_code == 401
+
+
+# ── keys read-only ────────────────────────────────────────────────
+def test_keys_blocked_when_locked(client, auth):
+    r = client.get("/api/keys", headers=auth)
+    assert r.status_code == 423
+
+
+def test_keys_list_masks_values(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "OPENAI_API_KEY": {"value": "sk-1234567890abcdef", "env": "prod", "rotated": "2026-01-01"},
+        "STRIPE_KEY": {"value": "pk_short", "env": "dev"},
+    })
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    body = client.get("/api/keys", headers=auth).json()
+    assert body["count"] == 2
+    by = {k["name"]: k for k in body["keys"]}
+    assert "OPENAI_API_KEY" in by
+    assert by["OPENAI_API_KEY"]["env"] == "prod"
+    assert by["OPENAI_API_KEY"]["masked"].startswith("sk-1")
+    assert "•" in by["OPENAI_API_KEY"]["masked"]
+    assert "sk-1234567890abcdef" not in body["keys"].__repr__()
+
+
+def test_keys_list_skips_meta_underscore_keys(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "REAL": {"value": "v"},
+        "_policies": {"foo": "bar"},
+    })
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    body = client.get("/api/keys", headers=auth).json()
+    names = [k["name"] for k in body["keys"]]
+    assert "REAL" in names
+    assert "_policies" not in names
+
+
+def test_reveal_returns_plaintext(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "the-real-secret", "env": "prod"}})
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    r = client.get("/api/keys/K", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["value"] == "the-real-secret"
+
+
+def test_reveal_unknown_key(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    r = client.get("/api/keys/NOPE", headers=auth)
+    assert r.status_code == 404
+
+
+def test_reveal_blocked_when_locked(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.get("/api/keys/K", headers=auth)
+    assert r.status_code == 423
+
+
+# ── autolock ──────────────────────────────────────────────────────
+def test_autolock_relocks_after_idle(client, auth, fresh_app):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    fresh_app.app.state.session.autolock_seconds = 1
+    fresh_app.app.state.session.last_activity = time.time() - 5
+    r = client.get("/api/keys", headers=auth)
+    assert r.status_code == 423
+
+
+# ── origin pin ────────────────────────────────────────────────────
+def test_foreign_origin_rejected(client, auth):
+    r = client.get("/api/status", headers={**auth, "Origin": "http://evil.example.com"})
+    assert r.status_code == 403
+
+
+def test_localhost_origin_allowed(client, auth):
+    r = client.get("/api/status", headers={**auth, "Origin": "http://127.0.0.1:5173"})
+    assert r.status_code == 200
+
+
+def test_origin_prefix_attack_rejected(client, auth):
+    r = client.get("/api/status", headers={
+        **auth, "Origin": "http://127.0.0.1:5173.evil.example"
+    })
+    assert r.status_code == 403
+
+
+def test_dns_rebinding_host_rejected(client, auth):
+    r = client.get("/api/status", headers={**auth, "Host": "evil.example"})
+    assert r.status_code == 400
+
+
+def test_healthz_is_unauthenticated(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_bootstrap_is_single_use_and_issues_session(client):
+    bootstrap = {"Authorization": "Bearer test-launch-token"}
+    first = client.post("/api/bootstrap", headers=bootstrap)
+    assert first.status_code == 200
+    session = {"Authorization": f"Bearer {first.json()['token']}"}
+    assert client.get("/api/status", headers=session).status_code == 200
+    assert client.post("/api/bootstrap", headers=bootstrap).status_code == 401
+    assert client.get("/api/status", headers=bootstrap).status_code == 401
+
+
+def test_launch_token_never_authenticates_regular_routes(client):
+    launch = {"Authorization": "Bearer test-launch-token"}
+    assert client.get("/api/status", headers=launch).status_code == 401
+
+
+def test_logout_revokes_session(client, auth):
+    assert client.post("/api/logout", headers=auth).status_code == 200
+    assert client.get("/api/status", headers=auth).status_code == 401
+
+
+def test_session_absolute_expiry(client, auth, fresh_app):
+    token = auth["Authorization"][7:]
+    fresh_app.app.state.sessions[token]["absolute_expires"] = time.monotonic() - 1
+    assert client.get("/api/status", headers=auth).status_code == 401
+
+
+def test_session_map_is_bounded(client, fresh_app):
+    first_launch = {"Authorization": "Bearer test-launch-token"}
+    assert client.post("/api/bootstrap", headers=first_launch).status_code == 200
+    # Directly seed old sessions to exercise bounded cleanup at exchange.
+    now = time.monotonic()
+    fresh_app.app.state.sessions = {
+        f"s{i}": {"created": now + i, "idle_expires": now + 100, "absolute_expires": now + 100}
+        for i in range(fresh_app.MAX_SESSIONS)
+    }
+    fresh_app.app.state.bootstrap_token = "second-launch"
+    r = client.post("/api/bootstrap", headers={"Authorization": "Bearer second-launch"})
+    assert r.status_code == 200
+    assert len(fresh_app.app.state.sessions) == fresh_app.MAX_SESSIONS
+
+
+def test_concurrent_bootstrap_only_one_succeeds(client):
+    from concurrent.futures import ThreadPoolExecutor
+    headers = {"Authorization": "Bearer test-launch-token"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(
+            lambda _: client.post("/api/bootstrap", headers=headers).status_code,
+            range(2),
+        ))
+    assert sorted(statuses) == [200, 401]
+
+
+def test_oversize_request_rejected(client, auth):
+    r = client.post(
+        "/api/unlock",
+        headers={**auth, "Content-Length": str(2 * 1024 * 1024 + 1)},
+        content=b"{}",
+    )
+    assert r.status_code == 413
+
+
+def test_oversize_header_rejected(client, auth):
+    r = client.get("/api/status", headers={**auth, "X-Padding": "x" * 9000})
+    assert r.status_code == 431
+
+
+def test_security_headers_present(client):
+    r = client.get("/healthz")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    csp = r.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in csp
+    assert "script-src 'self' 'sha256-" in csp
+
+
+def test_static_manifest_rejects_tampered_asset(fresh_app, tmp_path):
+    import shutil
+    source = fresh_app._static_dir()
+    assert source
+    copied = tmp_path / "out"
+    shutil.copytree(source, copied, copy_function=shutil.copyfile)
+    manifest = json.loads((copied / "pushkey-integrity.json").read_text(encoding="utf-8"))
+    relative = next(iter(manifest["files"]))
+    with (copied / relative).open("ab") as handle:
+        handle.write(b"tampered")
+    with pytest.raises(RuntimeError, match="integrity"):
+        fresh_app._verify_static_manifest(str(copied))
+
+
+def test_manifest_covers_every_static_asset(fresh_app):
+    from pathlib import Path
+    static = Path(fresh_app._static_dir())
+    manifest = fresh_app._verify_static_manifest(str(static))
+    actual = {
+        p.relative_to(static).as_posix()
+        for p in static.rglob("*")
+        if p.is_file() and p.name != "pushkey-integrity.json"
+    }
+    assert set(manifest["files"]) == actual
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Phase 2 — write ops
+# ════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def unlocked(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "OPENAI_API_KEY": {"value": "sk-original", "env": "prod", "provider": "OpenAI",
+                           "rotated": "2026-01-01", "created": "2026-01-01", "projects": []},
+    })
+    r = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert r.status_code == 200
+    return client
+
+
+@pytest.fixture
+def unlocked_recovery(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "K": {"value": "v", "env": "dev", "provider": "Unknown",
+              "rotated": "2026-01-01", "created": "2026-01-01", "projects": []},
+    })
+    r = client.post("/api/unlock", headers=auth, json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD"})
+    assert r.status_code == 200
+    return client
+
+
+# ── auth gate for writes ──────────────────────────────────────────
+def test_recovery_unlock_blocks_writes(unlocked_recovery, auth):
+    r = unlocked_recovery.post("/api/keys", headers=auth,
+                               json={"name": "NEW", "value": "v"})
+    assert r.status_code == 403
+    assert "master-password" in r.json()["detail"]
+
+
+def test_status_reports_can_write_false_on_recovery(unlocked_recovery, auth):
+    body = unlocked_recovery.get("/api/status", headers=auth).json()
+    assert body["can_write"] is False
+    assert body["auth_method"] == "recovery"
+
+
+def test_status_reports_can_write_true_on_password(unlocked, auth):
+    body = unlocked.get("/api/status", headers=auth).json()
+    assert body["can_write"] is True
+    assert body["auth_method"] == "password"
+
+
+# ── keys CRUD ─────────────────────────────────────────────────────
+def test_create_key(unlocked, auth):
+    r = unlocked.post("/api/keys", headers=auth,
+                      json={"name": "STRIPE_KEY", "value": "sk_live_x", "env": "prod"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["name"] == "STRIPE_KEY"
+    assert body["env"] == "prod"
+    keys = unlocked.get("/api/keys", headers=auth).json()
+    names = [k["name"] for k in keys["keys"]]
+    assert "STRIPE_KEY" in names
+
+
+def test_create_key_auto_detects_provider(unlocked, auth):
+    r = unlocked.post("/api/keys", headers=auth,
+                      json={"name": "ANTHROPIC_API_KEY", "value": "sk-ant-x"})
+    assert r.json()["provider"] == "Anthropic"
+
+
+def test_create_duplicate_key_rejected(unlocked, auth):
+    r = unlocked.post("/api/keys", headers=auth,
+                      json={"name": "OPENAI_API_KEY", "value": "sk-x"})
+    assert r.status_code == 409
+
+
+def test_create_duplicate_key_with_overwrite(unlocked, auth):
+    r = unlocked.post("/api/keys", headers=auth,
+                      json={"name": "OPENAI_API_KEY", "value": "sk-replaced", "overwrite": True})
+    assert r.status_code == 201
+    rev = unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()
+    assert rev["value"] == "sk-replaced"
+
+
+def test_create_underscore_name_rejected(unlocked, auth):
+    r = unlocked.post("/api/keys", headers=auth, json={"name": "_meta", "value": "v"})
+    assert r.status_code == 400
+
+
+def test_update_key_metadata(unlocked, auth):
+    r = unlocked.patch("/api/keys/OPENAI_API_KEY", headers=auth,
+                       json={"env": "dev", "notes": "rotated by dev"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["env"] == "dev"
+    assert body["notes"] == "rotated by dev"
+
+
+def test_update_unknown_key_404(unlocked, auth):
+    r = unlocked.patch("/api/keys/NOPE", headers=auth, json={"env": "dev"})
+    assert r.status_code == 404
+
+
+def test_delete_key(unlocked, auth):
+    r = unlocked.delete("/api/keys/OPENAI_API_KEY", headers=auth)
+    assert r.status_code == 204
+    assert unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).status_code == 404
+
+
+def test_delete_unknown_404(unlocked, auth):
+    r = unlocked.delete("/api/keys/NOPE", headers=auth)
+    assert r.status_code == 404
+
+
+# ── rotate / dual-rotation ────────────────────────────────────────
+def test_rotate_key(unlocked, auth):
+    r = unlocked.post("/api/keys/OPENAI_API_KEY/rotate", headers=auth,
+                      json={"new_value": "sk-new"})
+    assert r.status_code == 200
+    rev = unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()
+    assert rev["value"] == "sk-new"
+    assert len(rev["history"]) == 1
+    assert rev["history"][0]["value"] == "sk-original"
+
+
+def test_rotate_unknown_key_404(unlocked, auth):
+    r = unlocked.post("/api/keys/NOPE/rotate", headers=auth, json={"new_value": "x"})
+    assert r.status_code == 404
+
+
+def test_set_backup_key(unlocked, auth):
+    r = unlocked.post("/api/keys/OPENAI_API_KEY/backup", headers=auth,
+                      json={"backup_value": "sk-backup"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dual_rotation"] is True
+    assert body["provider_supports_multi_key"] in (True, False)
+    rev = unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()
+    assert rev["next_value"] == "sk-backup"
+    assert rev["dual_rotation"] is True
+
+
+def test_promote_backup(unlocked, auth):
+    unlocked.post("/api/keys/OPENAI_API_KEY/backup", headers=auth,
+                  json={"backup_value": "sk-backup"})
+    r = unlocked.post("/api/keys/OPENAI_API_KEY/promote", headers=auth)
+    assert r.status_code == 200
+    rev = unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()
+    assert rev["value"] == "sk-backup"
+    assert rev["next_value"] is None
+    assert any(h["value"] == "sk-original" for h in rev["history"])
+
+
+def test_promote_without_backup_400(unlocked, auth):
+    r = unlocked.post("/api/keys/OPENAI_API_KEY/promote", headers=auth)
+    assert r.status_code == 400
+
+
+# ── projects ──────────────────────────────────────────────────────
+def test_create_and_list_project(unlocked, auth, tmp_path):
+    p = str(tmp_path / "myproj")
+    (tmp_path / "myproj").mkdir()
+    r = unlocked.post("/api/projects", headers=auth, json={"path": p, "name": "Demo"})
+    assert r.status_code == 201
+    body = unlocked.get("/api/projects", headers=auth).json()
+    assert body["count"] == 1
+    assert body["projects"][0]["name"] == "Demo"
+
+
+def test_create_project_duplicate(unlocked, auth, tmp_path):
+    p = str(tmp_path / "p")
+    (tmp_path / "p").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    r = unlocked.post("/api/projects", headers=auth, json={"path": p})
+    assert r.status_code == 409
+
+
+def test_create_project_rejects_relative_path(unlocked, auth):
+    r = unlocked.post("/api/projects", headers=auth, json={"path": "../escape"})
+    assert r.status_code == 400
+
+
+def test_inject_rejects_unregistered_directory(unlocked, auth, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    r = unlocked.post(
+        "/api/projects/inject", headers=auth,
+        params={"path": str(outside)}, json={},
+    )
+    assert r.status_code == 404
+
+
+def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = tmp_path / "outside.env"
+    target.write_text("SAFE=1\n", encoding="utf-8")
+    try:
+        (project / ".env").symlink_to(target)
+    except (OSError, NotImplementedError):
+        import shutil
+
+        shutil.rmtree(tmp_path, ignore_errors=True)
+        pytest.skip("symlink creation unavailable")
+    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    r = unlocked.post(
+        "/api/projects/inject", headers=auth,
+        params={"path": str(project)}, json={},
+    )
+    assert r.status_code == 400
+    assert target.read_text(encoding="utf-8") == "SAFE=1\n"
+
+
+def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch, fresh_app):
+    project = tmp_path / "project"
+    project.mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    unlocked.post(
+        "/api/projects/assign", headers=auth, params={"path": str(project)},
+        json={"keys": ["OPENAI_API_KEY"]},
+    )
+    original = fresh_app._atomic_project_write
+
+    def fail_ignore(registered, filename, data, expected_identity=None):
+        if filename == ".gitignore":
+            raise OSError("simulated disk failure")
+        return original(registered, filename, data, expected_identity)
+
+    monkeypatch.setattr(fresh_app, "_atomic_project_write", fail_ignore)
+    with pytest.raises(OSError, match="disk failure"):
+        unlocked.post(
+            "/api/projects/inject", headers=auth,
+            params={"path": str(project)}, json={},
+        )
+    assert not (project / ".env").exists()
+
+
+def test_project_state_persists_across_disk_reload(unlocked, auth, tmp_path):
+    from pushkey_vault import load_config, load_vault
+    project = tmp_path / "persist"
+    project.mkdir()
+    path = str(project.resolve())
+    assert unlocked.post("/api/projects", headers=auth, json={"path": path}).status_code == 201
+    assert unlocked.post(
+        "/api/projects/assign", headers=auth, params={"path": path},
+        json={"keys": ["OPENAI_API_KEY"]},
+    ).status_code == 200
+    assert path in load_config()["projects"]
+    assert path in load_vault("master-pw")[0]["OPENAI_API_KEY"]["projects"]
+    assert unlocked.post(
+        "/api/projects/unassign", headers=auth, params={"path": path},
+        json={"keys": ["OPENAI_API_KEY"]},
+    ).status_code == 200
+    assert path not in load_vault("master-pw")[0]["OPENAI_API_KEY"]["projects"]
+    assert unlocked.delete("/api/projects", headers=auth, params={"path": path}).status_code == 204
+    assert path not in load_config()["projects"]
+
+
+def test_canonical_collision_rejected_without_data_loss(unlocked, auth, tmp_path):
+    from pushkey_vault import load_config, save_config
+    project = tmp_path / "collision"
+    project.mkdir()
+    canonical = str(project.resolve())
+    alias = canonical + os.sep + "."
+    save_config({"projects": {
+        canonical: {"name": "first"},
+        alias: {"name": "second"},
+    }})
+    before = _s.CONFIG_FILE.read_bytes()
+    r = unlocked.get("/api/projects", headers=auth)
+    assert r.status_code == 409
+    assert _s.CONFIG_FILE.read_bytes() == before
+    assert len(load_config()["projects"]) == 2
+
+
+def test_project_transaction_rolls_back_config_and_session(unlocked, auth, tmp_path, monkeypatch):
+    import pushkey_vault
+    project = tmp_path / "rollback"
+    project.mkdir()
+    before_config = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
+    before_vault = _s.VAULT_FILE.read_bytes()
+    original = pushkey_vault.save_vault
+
+    def fail_vault(*args, **kwargs):
+        raise OSError("simulated vault save failure")
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", fail_vault)
+    with pytest.raises(OSError, match="vault save failure"):
+        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    assert (_s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None) == before_config
+    assert _s.VAULT_FILE.read_bytes() == before_vault
+    monkeypatch.setattr(pushkey_vault, "save_vault", original)
+
+
+def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from pushkey_vault import load_config
+    projects = [tmp_path / "concurrent-a", tmp_path / "concurrent-b"]
+    for project in projects:
+        project.mkdir()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(
+            lambda project: unlocked.post(
+                "/api/projects", headers=auth, json={"path": str(project)}
+            ),
+            projects,
+        ))
+    assert [response.status_code for response in responses] == [201, 201]
+    stored = load_config()["projects"]
+    assert all(str(project.resolve()) in stored for project in projects)
+
+
+def test_failed_transaction_cannot_rollback_later_success(
+    unlocked, auth, tmp_path, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import pushkey_vault
+    from pushkey_vault import load_config
+
+    failing = tmp_path / "failure"
+    succeeding = tmp_path / "success"
+    failing.mkdir()
+    succeeding.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    original = pushkey_vault.save_vault
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def controlled_save(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            entered.set()
+            assert release.wait(5)
+            raise OSError("transaction A failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", controlled_save)
+
+    def failure_request():
+        return unlocked.post(
+            "/api/projects", headers=auth, json={"path": str(failing)}
+        )
+
+    def success_request():
+        return unlocked.post(
+            "/api/projects", headers=auth, json={"path": str(succeeding)}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        failed_future = pool.submit(failure_request)
+        assert entered.wait(5)
+        success_future = pool.submit(success_request)
+        release.set()
+        with pytest.raises(OSError, match="transaction A failed"):
+            failed_future.result()
+        assert success_future.result().status_code == 201
+
+    stored = load_config()["projects"]
+    assert str(failing.resolve()) not in stored
+    assert str(succeeding.resolve()) in stored
+
+
+def test_assign_keys_to_project(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    r = unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                      json={"keys": ["OPENAI_API_KEY"]})
+    assert r.status_code == 200
+    listing = unlocked.get("/api/projects", headers=auth).json()
+    assert listing["projects"][0]["keys"] == ["OPENAI_API_KEY"]
+
+
+def test_assign_unknown_key_400(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    r = unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                      json={"keys": ["GHOST"]})
+    assert r.status_code == 400
+
+
+def test_unassign_keys(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                  json={"keys": ["OPENAI_API_KEY"]})
+    r = unlocked.post("/api/projects/unassign", headers=auth, params={"path": p},
+                     json={"keys": ["OPENAI_API_KEY"]})
+    assert r.status_code == 200
+    listing = unlocked.get("/api/projects", headers=auth).json()
+    assert listing["projects"][0]["keys"] == []
+
+
+def test_delete_project_clears_assignments(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                  json={"keys": ["OPENAI_API_KEY"]})
+    r = unlocked.delete("/api/projects", headers=auth, params={"path": p})
+    assert r.status_code == 204
+    rev = unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()
+    assert p not in rev["projects"]
+
+
+def test_inject_preview_does_not_write(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                  json={"keys": ["OPENAI_API_KEY"]})
+    r = unlocked.post("/api/projects/inject", headers=auth,
+                      params={"path": p, "write": False}, json={})
+    body = r.json()
+    assert "OPENAI_API_KEY=sk-original" in body["injected"]
+    assert body["wrote"] is False
+    assert not (tmp_path / "proj" / ".env").exists()
+
+
+def test_inject_writes_env_and_gitignore(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                  json={"keys": ["OPENAI_API_KEY"]})
+    r = unlocked.post("/api/projects/inject", headers=auth, params={"path": p}, json={})
+    assert r.status_code == 200
+    env_text = (tmp_path / "proj" / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY=sk-original" in env_text
+    gi = (tmp_path / "proj" / ".gitignore").read_text(encoding="utf-8")
+    assert ".env" in gi
+
+
+def test_inject_skips_existing_env_keys(unlocked, auth, tmp_path):
+    p = str(tmp_path / "proj")
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / ".env").write_text("OPENAI_API_KEY=preexisting\n", encoding="utf-8")
+    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                  json={"keys": ["OPENAI_API_KEY"]})
+    r = unlocked.post("/api/projects/inject", headers=auth, params={"path": p}, json={})
+    body = r.json()
+    assert body["injected"] == []
+    assert "OPENAI_API_KEY" in body["skipped_existing"]
+
+
+# ── providers ─────────────────────────────────────────────────────
+def test_list_providers(client, auth):
+    r = client.get("/api/providers", headers=auth)
+    assert r.status_code == 200
+    assert "OpenAI" in r.json()["providers"]
+
+
+def test_detect_provider_by_name(client, auth):
+    r = client.post("/api/providers/detect", headers=auth,
+                    json={"name": "OPENAI_API_KEY", "value": "sk-x"})
+    body = r.json()
+    assert body["provider"] == "OpenAI"
+
+
+def test_detect_provider_unknown(client, auth):
+    r = client.post("/api/providers/detect", headers=auth,
+                    json={"name": "MY_RANDOM_THING", "value": "x"})
+    assert r.json()["provider"] is None
+
+
+# ── agent tokens ──────────────────────────────────────────────────
+def test_list_agents_empty(unlocked, auth):
+    r = unlocked.get("/api/agents", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["tokens"] == []
+
+
+def test_create_agent_token_requires_pro(unlocked, auth):
+    # Free tier (default) → 403
+    r = unlocked.post("/api/agents", headers=auth,
+                      json={"name": "ci", "scopes": ["read"]})
+    assert r.status_code == 403
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Phase 3 — advanced ops (forecast, lifecycle, audit, init, recovery, backup)
+# ════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def unlocked_with_keys(client, auth):
+    from datetime import datetime, timedelta
+    old = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+    fresh = datetime.now().strftime("%Y-%m-%d")
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
+        "OLD_KEY":   {"value": "old", "env": "prod", "provider": "OpenAI",
+                      "rotated": old,   "created": old,   "projects": []},
+        "FRESH_KEY": {"value": "new", "env": "dev",  "provider": "Stripe",
+                      "rotated": fresh, "created": fresh, "projects": []},
+    })
+    r = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert r.status_code == 200
+    return client
+
+
+# ── health ────────────────────────────────────────────────────────
+def test_health_classifies_keys(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/health", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2
+    stale_names = [k["name"] for k in body["stale"]]
+    assert "OLD_KEY" in stale_names
+    assert 0 <= body["score"] <= 100
+
+
+def test_health_blocked_when_locked(client, auth):
+    r = client.get("/api/health", headers=auth)
+    assert r.status_code == 423
+
+
+# ── forecast ──────────────────────────────────────────────────────
+def test_forecast_lists_due_keys(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/forecast", headers=auth, params={"window_days": 365})
+    body = r.json()
+    names = [u["name"] for u in body["upcoming"]]
+    assert "OLD_KEY" in names
+    overdue = [u for u in body["upcoming"] if u["overdue"]]
+    assert len(overdue) >= 1
+
+
+def test_forecast_window_filters(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/forecast", headers=auth, params={"window_days": 1})
+    # OLD_KEY is far overdue → days_left negative → still <= window_days
+    # FRESH_KEY rotated today, due in 90 (or provider interval); should NOT appear
+    body = r.json()
+    names = [u["name"] for u in body["upcoming"]]
+    assert "FRESH_KEY" not in names
+
+
+# ── lifecycle ─────────────────────────────────────────────────────
+def test_lifecycle_returns_full_record(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/lifecycle/OLD_KEY", headers=auth)
+    body = r.json()
+    assert body["name"] == "OLD_KEY"
+    assert body["age_days"] >= 100
+    assert body["status"] in ("warning", "critical")
+    assert body["next_due_date"]
+
+
+def test_lifecycle_unknown_404(unlocked_with_keys, auth):
+    r = unlocked_with_keys.get("/api/lifecycle/NOPE", headers=auth)
+    assert r.status_code == 404
+
+
+# ── audit ─────────────────────────────────────────────────────────
+def test_audit_post_logs_event(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/audit/log", headers=auth,
+                                json={"message": "rotated OLD_KEY"})
+    assert r.status_code == 200
+    listing = unlocked_with_keys.get("/api/audit", headers=auth).json()
+    assert any("rotated OLD_KEY" in e for e in listing["events"])
+
+
+def test_audit_post_requires_message(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/audit/log", headers=auth, json={"message": ""})
+    assert r.status_code == 400
+
+
+# ── init ──────────────────────────────────────────────────────────
+def test_init_creates_vault_when_none(client, auth):
+    r = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["created"] is True
+    assert body["recovery_code"].startswith("PUSH-")
+    assert all(
+        set(part) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        for part in body["recovery_code"].split("-")[1:]
+    )
+    assert _s.VAULT_FILE.exists()
+    # Can unlock with that password
+    u = client.post("/api/unlock", headers=auth, json={"password": "newpass-1234"})
+    assert u.status_code == 200
+
+
+def test_init_rejects_when_vault_exists(client, auth):
+    _seed_vault("pw-1234567", "PUSH-AAAA-BBBB-CCCC-DDDD", {})
+    r = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})
+    assert r.status_code == 409
+
+
+def test_init_rejects_short_password(client, auth):
+    r = client.post("/api/init", headers=auth, json={"password": "short"})
+    assert r.status_code == 400
+
+
+# ── recovery / rekey ──────────────────────────────────────────────
+def test_rekey_with_recovery_code(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/vault/rekey", headers=auth,
+                    json={"recovery_code": "PUSH-AAAA-BBBB-CCCC-DDDD",
+                          "new_password": "rotated-pass"})
+    assert r.status_code == 200
+    # Old password rejected
+    bad = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
+    assert bad.status_code == 401
+    # New password works
+    good = client.post("/api/unlock", headers=auth, json={"password": "rotated-pass"})
+    assert good.status_code == 200
+
+
+def test_rekey_wrong_recovery_code(client, auth):
+    _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "v"}})
+    r = client.post("/api/vault/rekey", headers=auth,
+                    json={"recovery_code": "PUSH-WRON-GGGG-WRON-GGGG",
+                          "new_password": "another-pass"})
+    assert r.status_code == 401
+
+
+# ── backup export / import ────────────────────────────────────────
+def test_backup_export_returns_blob(unlocked_with_keys, auth):
+    r = unlocked_with_keys.post("/api/backup/export", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["format"] == "pushkey-vault-v3"
+    assert body["size_bytes"] > 0
+    assert len(body["blob_b64"]) > 100
+
+
+def test_backup_import_replaces_vault(client, auth):
+    import base64
+    # First seed and export
+    _seed_vault("orig-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"K": {"value": "orig"}})
+    client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
+    exported = client.post("/api/backup/export", headers=auth).json()["blob_b64"]
+    # Modify vault: re-init with different password
+    _s.VAULT_FILE.unlink()
+    _seed_vault("new-pw-1234", "PUSH-AAAA-BBBB-CCCC-DDDD", {"DIFF": {"value": "v"}})
+    # Import original blob
+    r = client.post("/api/backup/import", headers=auth, json={"blob_b64": exported})
+    assert r.status_code == 200
+    # Original password unlocks, key K is back
+    u = client.post("/api/unlock", headers=auth, json={"password": "orig-pw-1234"})
+    assert u.status_code == 200
+
+
+def test_backup_import_rejects_non_v3(client, auth):
+    import base64
+    bad = base64.b64encode(b"NOT_A_VAULT").decode()
+    r = client.post("/api/backup/import", headers=auth, json={"blob_b64": bad})
+    assert r.status_code == 400
+
+
+# ── cloud status ──────────────────────────────────────────────────
+def test_cloud_status(client, auth):
+    r = client.get("/api/cloud/status", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert "tier" in body
+    assert "cloud_sync_available" in body

@@ -14,6 +14,7 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://push-key.com"),
   title: "PushKey — Encrypted API Key Vault",
   description: "Store, rotate, and inject your API secrets into every project automatically. AES-256-GCM encrypted. Zero network access. Built for dev teams.",
   icons: {

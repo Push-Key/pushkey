@@ -5,7 +5,7 @@ Zero-knowledge: server stores only the encrypted vault blob.
 It never sees plaintext keys. Auth is email + password (hashed).
 
 Requirements:
-    pip install fastapi uvicorn[standard] passlib[bcrypt] python-jose[cryptography]
+    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt python-jose[cryptography]
 
 Run:
     uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
@@ -14,11 +14,14 @@ Configure Pushkey to use: http://your-server:8000
 """
 
 import hashlib
+import hmac
 import html as _html
 import json
 import os
 import secrets
+import threading
 import time
+import base64
 from pathlib import Path
 
 # Load .env if present
@@ -31,13 +34,14 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pushkey_shared import TIERS as PRODUCT_TIERS
 
 def _utcnow() -> datetime:
     """Replacement for deprecated datetime.utcnow() — returns naive UTC datetime."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 try:
-    from fastapi import FastAPI, HTTPException, Depends, Request, Header
+    from fastapi import FastAPI, HTTPException, Depends, Request, Header, Cookie
     from fastapi.responses import JSONResponse, Response
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from fastapi.middleware.cors import CORSMiddleware
@@ -71,9 +75,10 @@ USERS_FILE = DATA_DIR / "users.json"
 VAULTS_DIR = DATA_DIR / "vaults"
 VAULTS_DIR.mkdir(exist_ok=True)
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,18 +95,37 @@ app.add_middleware(
 
 # ── Admin config ─────────────────────────────────────────────────
 LICENSES_FILE = DATA_DIR / "licenses.json"
-ADMIN_SECRET = os.environ.get("PUSHKEY_ADMIN_SECRET", "")
-if not ADMIN_SECRET:
+ADMINS_FILE = DATA_DIR / "admins.json"
+ADMIN_SESSIONS_FILE = DATA_DIR / "admin_sessions.json"
+ADMIN_BOOTSTRAP_EMAIL = os.environ.get("PUSHKEY_ADMIN_EMAIL", "").strip().lower()
+ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
+ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
+ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"))
+ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
+if ADMIN_SESSION_TTL_MIN <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_SESSION_TTL_MIN must be greater than zero")
+if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
     if _DEV_MODE:
-        ADMIN_SECRET = "dev-change-me"
-        print("[pushkey] WARNING: PUSHKEY_ADMIN_SECRET not set — using 'dev-change-me' (dev mode only)")
+        ADMIN_BOOTSTRAP_EMAIL = ADMIN_BOOTSTRAP_EMAIL or "admin@localhost"
+        ADMIN_BOOTSTRAP_PASSWORD = ADMIN_BOOTSTRAP_PASSWORD or "dev-change-me"
+        print("[pushkey] WARNING: admin bootstrap credentials defaulted (dev mode only)")
     else:
         raise SystemExit(
-            "\n[pushkey] FATAL: PUSHKEY_ADMIN_SECRET environment variable is required.\n"
-            "Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "\n[pushkey] FATAL: PUSHKEY_ADMIN_EMAIL and PUSHKEY_ADMIN_PASSWORD are required.\n"
+            "Generate a password: python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
             "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
         )
-TIER_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
+_KNOWN_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
+TIER_PREFIXES = {tier: _KNOWN_PREFIXES[tier] for tier in PRODUCT_TIERS}
+DEVICE_LIMITS = {
+    tier: definition["max_devices"] for tier, definition in PRODUCT_TIERS.items()
+}
+DEVICE_TOKEN_TTL_DAYS = int(os.environ.get("PUSHKEY_DEVICE_TOKEN_TTL_DAYS", "7"))
+if DEVICE_TOKEN_TTL_DAYS <= 0:
+    raise RuntimeError("PUSHKEY_DEVICE_TOKEN_TTL_DAYS must be greater than zero")
+DEVICE_TOKEN_VERSION = 1
+DEVICE_TOKEN_AUDIENCE = "pushkey-device-license-v1"
+_LICENSE_LOCK = threading.RLock()
 
 
 # ── User store (flat JSON, fine for <1000 users) ─────────────────
@@ -337,13 +361,24 @@ def _load_events() -> list[dict]:
             pass
     return out
 
-def _log_audit(action: str, target: str, details: dict | None = None) -> None:
+def _log_audit(
+    action: str,
+    target: str,
+    details: dict | None = None,
+    actor: dict | None = None,
+    request: Request | None = None,
+) -> None:
     """Record admin action for compliance audit trail."""
     entry = {
         "ts":      _utcnow().isoformat(),
         "action":  action,
         "target":  target,
         "details": details or {},
+        "actor_id": actor.get("id", "system") if actor else "system",
+        "actor_email": actor.get("email", "") if actor else "",
+        "actor_role": actor.get("role", "") if actor else "",
+        "request_id": request.headers.get("x-request-id", "") if request else "",
+        "ip": request.client.host if request and request.client else "",
     }
     with AUDIT_FILE.open("a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -365,72 +400,312 @@ def _load_audit() -> list[dict]:
 # Simple in-memory token bucket rate limiter
 RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
+RATE_LIMIT_MAX_ENTRIES = int(os.environ.get("RATE_LIMIT_MAX_ENTRIES", "10000"))
+RATE_LIMIT_GLOBAL_MULTIPLIER = int(
+    os.environ.get("RATE_LIMIT_GLOBAL_MULTIPLIER", "100")
+)
 AUTH_RATE_MAX         = int(os.environ.get("AUTH_RATE_MAX", "5"))
 AUTH_RATE_WINDOW_SEC  = int(os.environ.get("AUTH_RATE_WINDOW", "60"))
 PORTAL_RATE_MAX       = int(os.environ.get("PORTAL_RATE_MAX", "20"))
 PORTAL_RATE_WINDOW_SEC = int(os.environ.get("PORTAL_RATE_WINDOW", "60"))
 
+for _config_name, _config_value in {
+    "HEARTBEAT_RATE_MAX": RATE_LIMIT_MAX,
+    "HEARTBEAT_RATE_WINDOW": RATE_LIMIT_WINDOW_SEC,
+    "AUTH_RATE_MAX": AUTH_RATE_MAX,
+    "AUTH_RATE_WINDOW": AUTH_RATE_WINDOW_SEC,
+    "PORTAL_RATE_MAX": PORTAL_RATE_MAX,
+    "PORTAL_RATE_WINDOW": PORTAL_RATE_WINDOW_SEC,
+    "RATE_LIMIT_MAX_ENTRIES": RATE_LIMIT_MAX_ENTRIES,
+    "RATE_LIMIT_GLOBAL_MULTIPLIER": RATE_LIMIT_GLOBAL_MULTIPLIER,
+}.items():
+    if _config_value <= 0:
+        raise RuntimeError(f"{_config_name} must be greater than zero")
+
 _HEARTBEAT_HITS: dict[str, list[float]] = {}
+_ACTIVATION_HITS: dict[str, list[float]] = {}
+_DEACTIVATION_HITS: dict[str, list[float]] = {}
 _AUTH_HITS:      dict[str, list[float]] = {}
 _PORTAL_HITS:    dict[str, list[float]] = {}
+_RATE_LOCK = threading.Lock()
 
 
 def _rate_check(bucket: dict, key: str, max_hits: int, window_sec: int) -> bool:
-    """Generic token-bucket check. Returns True if allowed."""
+    """Bounded, thread-safe sliding-window check. Returns True if allowed."""
     now = time.time()
-    hits = [h for h in bucket.get(key, []) if now - h < window_sec]
-    if len(hits) >= max_hits:
+    with _RATE_LOCK:
+        cutoff = now - window_sec
+        hits = [h for h in bucket.get(key, ()) if h > cutoff]
+        if len(hits) >= max_hits:
+            bucket[key] = hits
+            return False
+        hits.append(now)
         bucket[key] = hits
+
+        # Remove expired/empty entries before enforcing the hard memory bound.
+        if len(bucket) > RATE_LIMIT_MAX_ENTRIES:
+            for stale_key in list(bucket):
+                live = [h for h in bucket[stale_key] if h > cutoff]
+                if live:
+                    bucket[stale_key] = live
+                else:
+                    bucket.pop(stale_key, None)
+            if len(bucket) > RATE_LIMIT_MAX_ENTRIES:
+                oldest = sorted(
+                    bucket, key=lambda item: bucket[item][-1]
+                )[: len(bucket) - RATE_LIMIT_MAX_ENTRIES]
+                for stale_key in oldest:
+                    bucket.pop(stale_key, None)
+        return True
+
+
+def _rate_check_request(
+    bucket: dict, identity: str, request: Request, max_hits: int, window_sec: int
+) -> bool:
+    """Limit one license identity and aggregate endpoint traffic."""
+    if not _rate_check(bucket, f"identity:{identity}", max_hits, window_sec):
         return False
-    hits.append(now)
-    bucket[key] = hits
-    if len(bucket) > 10000:
-        bucket.clear()
-    return True
+    return _rate_check(
+        bucket,
+        "global",
+        max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER),
+        window_sec,
+    )
 
 
-def _check_rate_limit(key: str) -> bool:
-    return _rate_check(_HEARTBEAT_HITS, key, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC)
+def _check_rate_limit(key: str, request: Request) -> bool:
+    return _rate_check_request(
+        _HEARTBEAT_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    )
 
 
-async def _handle_heartbeat(body: dict) -> dict:
+def _normalized_expiry(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if expiry.tzinfo:
+        expiry = expiry.astimezone(timezone.utc).replace(tzinfo=None)
+    return expiry
+
+
+def _license_state(entry: dict) -> str:
+    """Return the authoritative current status and apply time-based expiry."""
+    status = entry.get("status", "active")
+    expires_at = entry.get("expires_at")
+    if status == "active" and expires_at:
+        try:
+            expiry = _normalized_expiry(expires_at)
+        except (TypeError, ValueError):
+            entry["status"] = "invalid"
+            return "invalid"
+        if expiry <= _utcnow():
+            entry["status"] = "expired"
+            entry["stage"] = "churned"
+            return "expired"
+    return status
+
+
+def _device_token(license_key: str, fingerprint: str, tier: str) -> str:
+    """Issue a signed, expiring token bound to one license/device/tier."""
+    payload = {
+        "kh": hashlib.sha256(license_key.encode()).hexdigest(),
+        "fp": fingerprint,
+        "tier": tier,
+        "v": DEVICE_TOKEN_VERSION,
+        "aud": DEVICE_TOKEN_AUDIENCE,
+        "exp": (
+            _utcnow() + timedelta(days=DEVICE_TOKEN_TTL_DAYS)
+        ).isoformat(),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ).decode().rstrip("=")
+    signing_key = hmac.new(SECRET_KEY.encode(), b"pushkey/device-token/v1", hashlib.sha256).digest()
+    signature = hmac.new(signing_key, encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _valid_device_token(
+    token: str, license_key: str, fingerprint: str, tier: str
+) -> bool:
+    try:
+        encoded, signature = token.split(".", 1)
+        signing_key = hmac.new(SECRET_KEY.encode(), b"pushkey/device-token/v1", hashlib.sha256).digest()
+        expected = hmac.new(signing_key, encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        return (
+            payload["kh"] == hashlib.sha256(license_key.encode()).hexdigest()
+            and payload["fp"] == fingerprint
+            and payload["tier"] == tier
+            and payload["v"] == DEVICE_TOKEN_VERSION
+            and payload["aud"] == DEVICE_TOKEN_AUDIENCE
+            and _utcnow() <= datetime.fromisoformat(payload["exp"])
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _require_usable_license(licenses: dict, key: str) -> dict:
+    entry = licenses.get(key)
+    if entry is None:
+        raise HTTPException(404, {"code": "license_not_found", "message": "License not found"})
+    status = _license_state(entry)
+    if status == "revoked":
+        raise HTTPException(403, {"code": "license_revoked", "message": "License revoked"})
+    if status == "expired":
+        raise HTTPException(403, {"code": "license_expired", "message": "License expired"})
+    if status != "active":
+        raise HTTPException(403, {"code": "license_unusable", "message": f"License {status}"})
+    tier = entry.get("tier", "")
+    if tier not in DEVICE_LIMITS:
+        raise HTTPException(500, {"code": "invalid_license_tier", "message": "License has invalid tier"})
+    return entry
+
+
+async def _handle_activate(body: dict, request: Request) -> dict:
+    key = body.get("license_key", "").strip().upper()
+    fingerprint = body.get("fingerprint", "").strip()
+    if not key:
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not fingerprint:
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
+    if not _rate_check_request(
+        _ACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    ):
+        raise HTTPException(429, {"code": "rate_limited", "message": "Too many activation requests"})
+
+    def activate_device(licenses):
+        entry = _require_usable_license(licenses, key)
+        tier = entry["tier"]
+        devices = entry.setdefault("devices", {})
+        max_devices = DEVICE_LIMITS[tier]
+        if fingerprint not in devices and (max_devices is not None and len(devices) >= max_devices):
+            plural = "device" if max_devices == 1 else "devices"
+            raise HTTPException(409, {"code": "device_limit_reached", "message": f"Device limit reached ({max_devices} {plural} for {tier.title()} plan)."})
+        now = _utcnow().isoformat()
+        device = devices.setdefault(fingerprint, {"activated_at": now})
+        device.update({"last_seen": now, "platform": body.get("platform", ""), "version": body.get("version", "")})
+        entry["last_heartbeat"] = now
+        entry["platform"] = body.get("platform", "")
+        return entry.copy(), device.copy(), len(devices), max_devices
+
+    entry, device, devices_used, max_devices = _mutate_licenses(activate_device)
+    tier = entry["tier"]
+    _log_event(
+        "device_activated",
+        {"key": key[:8] + "…", "tier": tier, "platform": device["platform"]},
+    )
+    return {
+        "ok": True,
+        "status": "active",
+        "tier": tier,
+        "expires_at": entry.get("expires_at"),
+        "token": _device_token(key, fingerprint, tier),
+        "devices_used": devices_used,
+        "devices_max": max_devices,
+    }
+
+
+async def _handle_deactivate(body: dict, request: Request) -> dict:
+    key = body.get("license_key", "").strip().upper()
+    fingerprint = body.get("fingerprint", "").strip()
+    token = body.get("token", "")
+    if not key:
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not fingerprint:
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
+    if not _rate_check_request(
+        _DEACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    ):
+        raise HTTPException(429, {"code": "rate_limited", "message": "Too many deactivation requests"})
+
+    def deactivate_device(licenses):
+        entry = _require_usable_license(licenses, key)
+        if fingerprint not in entry.setdefault("devices", {}):
+            raise HTTPException(403, {"code": "device_unregistered", "message": "Device not registered"})
+        if not _valid_device_token(token, key, fingerprint, entry["tier"]):
+            raise HTTPException(403, {"code": "token_expired", "message": "Invalid or expired device token"})
+        entry["devices"].pop(fingerprint)
+    _mutate_licenses(deactivate_device)
+    _log_event("device_deactivated", {"key": key[:8] + "…"})
+    return {"ok": True}
+
+
+async def _handle_heartbeat(
+    body: dict, request: Request, *, strict: bool = True
+) -> dict:
     """Shared logic for both /v1/heartbeat and /api/v1/heartbeat."""
     import platform as _pl
     key = body.get("license_key", "").strip().upper()
     if not key:
-        raise HTTPException(400, "license_key required")
-    if not _check_rate_limit(key):
-        raise HTTPException(429, f"Too many heartbeats — limit is {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW_SEC}s")
+        raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
+    if not _check_rate_limit(key, request):
+        raise HTTPException(429, {"code": "rate_limited", "message": f"Too many heartbeats — limit is {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW_SEC}s"})
 
     # Accept platform from body, or auto-detect if missing
     platform = body.get("platform", "") or f"{_pl.system()} {_pl.release()}"
     version  = body.get("version", "")
 
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-
-    entry = lic[key]
-    if entry["status"] == "revoked":
-        raise HTTPException(403, "License revoked")
-
-    entry["last_heartbeat"] = _utcnow().isoformat()
-    entry["platform"] = platform
+    fingerprint = body.get("fingerprint", "").strip()
+    token = body.get("token", "")
     agent_token_count = body.get("agent_token_count", 0)
-    if isinstance(agent_token_count, int):
-        entry["agent_token_count"] = agent_token_count
-    _save_licenses(lic)
+    if strict and (not fingerprint or not token):
+        raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint and token required"})
+    def update_heartbeat(lic):
+        entry = _require_usable_license(lic, key)
+        if fingerprint:
+            devices = entry.setdefault("devices", {})
+            if fingerprint not in devices:
+                raise HTTPException(403, {"code": "device_unregistered", "message": "Device not registered. Please reactivate your license."})
+            if not _valid_device_token(token, key, fingerprint, entry["tier"]):
+                raise HTTPException(403, {"code": "token_expired", "message": "Invalid or expired device token"})
+            devices[fingerprint].update({
+                "last_seen": _utcnow().isoformat(),
+                "platform": platform,
+                "version": version,
+            })
+        entry["last_heartbeat"] = _utcnow().isoformat()
+        entry["platform"] = platform
+        if isinstance(agent_token_count, int):
+            entry["agent_token_count"] = agent_token_count
+        return entry.copy()
+
+    entry = _mutate_licenses(update_heartbeat)
 
     _log_event("heartbeat", {"key": key[:8] + "…", "tier": entry["tier"], "platform": platform, "version": version, "agent_tokens": agent_token_count})
 
-    # Return shape compatible with both old token flow and new admin flow
-    return {"ok": True, "status": entry["status"], "tier": entry["tier"], "token": ""}
+    return {
+        "ok": True,
+        "status": entry["status"],
+        "tier": entry["tier"],
+        "expires_at": entry.get("expires_at"),
+        "token": _device_token(key, fingerprint, entry["tier"]) if fingerprint else "",
+    }
 
 
-@app.post("/v1/heartbeat")       # path desktop app calls
-@app.post("/api/v1/heartbeat")   # path admin API uses
+@app.post("/v1/heartbeat")
 async def heartbeat(request: Request):
-    return await _handle_heartbeat(await request.json())
+    return await _handle_heartbeat(await request.json(), request, strict=True)
+
+
+@app.post("/api/v1/heartbeat")
+async def heartbeat_alias(request: Request):
+    return await _handle_heartbeat(await request.json(), request, strict=True)
+
+
+@app.post("/v1/activate")
+@app.post("/api/v1/activate")
+async def activate(request: Request):
+    return await _handle_activate(await request.json(), request)
+
+
+@app.post("/v1/deactivate")
+@app.post("/api/v1/deactivate")
+async def deactivate(request: Request):
+    return await _handle_deactivate(await request.json(), request)
 
 
 # ── Admin helpers ────────────────────────────────────────────────
@@ -440,11 +715,152 @@ def _load_licenses() -> dict:
     return json.loads(LICENSES_FILE.read_text())
 
 def _save_licenses(data: dict) -> None:
-    LICENSES_FILE.write_text(json.dumps(data, indent=2))
+    tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, LICENSES_FILE)
 
-def _require_admin(x_admin_secret: str = Header(default="")):
-    if x_admin_secret != ADMIN_SECRET:
-        raise HTTPException(403, "Forbidden")
+
+def _mutate_licenses(mutator):
+    """Run one synchronous license read-modify-write transaction."""
+    with _LICENSE_LOCK:
+        licenses = _load_licenses()
+        result = mutator(licenses)
+        _save_licenses(licenses)
+        return result
+
+def _load_admins() -> dict:
+    if not ADMINS_FILE.exists():
+        admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
+        data = {
+            admin_id: {
+                "id": admin_id,
+                "email": ADMIN_BOOTSTRAP_EMAIL,
+                "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
+                "role": "owner",
+                "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
+                "created": _utcnow().isoformat(),
+                "disabled": False,
+            }
+        }
+        ADMINS_FILE.write_text(json.dumps(data, indent=2))
+        return data
+    return json.loads(ADMINS_FILE.read_text())
+
+
+def _save_admins(data: dict) -> None:
+    ADMINS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_admin_sessions() -> dict:
+    if not ADMIN_SESSIONS_FILE.exists():
+        return {}
+    return json.loads(ADMIN_SESSIONS_FILE.read_text())
+
+
+def _save_admin_sessions(data: dict) -> None:
+    ADMIN_SESSIONS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _admin_by_email(email: str) -> dict | None:
+    email = email.strip().lower()
+    for admin in _load_admins().values():
+        if admin.get("email", "").lower() == email:
+            return admin
+    return None
+
+
+def _totp_code(secret: str, counter: int) -> str:
+    import struct
+    normalized = secret.replace(" ", "").upper()
+    padded = normalized + "=" * (-len(normalized) % 8)
+    key = base64.b32decode(padded, casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % 1_000_000).zfill(6)
+
+
+def _verify_totp(secret: str, code: str, now: int | None = None) -> bool:
+    if not secret:
+        return True
+    if not code or not code.isdigit():
+        return False
+    step = int((now or time.time()) // 30)
+    return any(hmac.compare_digest(_totp_code(secret, step + drift), code) for drift in (-1, 0, 1))
+
+
+def _issue_admin_session(admin: dict, request: Request) -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    expires_at = (_utcnow() + timedelta(minutes=ADMIN_SESSION_TTL_MIN)).isoformat()
+    sessions[token_hash] = {
+        "admin_id": admin["id"],
+        "csrf_hash": hashlib.sha256(csrf.encode()).hexdigest(),
+        "created": _utcnow().isoformat(),
+        "expires_at": expires_at,
+        "revoked": False,
+        "ip": request.client.host if request.client else "",
+        "last_used": _utcnow().isoformat(),
+    }
+    _save_admin_sessions(sessions)
+    return token, csrf
+
+
+def _set_admin_cookies(response: Response, token: str, csrf: str) -> None:
+    response.set_cookie(
+        "pk_admin_session",
+        token,
+        httponly=True,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="strict",
+        max_age=ADMIN_SESSION_TTL_MIN * 60,
+        path="/",
+    )
+    response.set_cookie(
+        "pk_admin_csrf",
+        csrf,
+        httponly=False,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="strict",
+        max_age=ADMIN_SESSION_TTL_MIN * 60,
+        path="/",
+    )
+
+
+def _clear_admin_cookies(response: Response) -> None:
+    response.delete_cookie("pk_admin_session", path="/")
+    response.delete_cookie("pk_admin_csrf", path="/")
+
+
+def _require_admin(
+    request: Request,
+    pk_admin_session: str = Cookie(default=""),
+    x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+) -> dict:
+    if not pk_admin_session:
+        raise HTTPException(401, "Not authenticated")
+    token_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    session = sessions.get(token_hash)
+    if not session or session.get("revoked"):
+        raise HTTPException(401, "Not authenticated")
+    if session["expires_at"] < _utcnow().isoformat():
+        session["revoked"] = True
+        _save_admin_sessions(sessions)
+        raise HTTPException(401, "Session expired")
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        expected = session.get("csrf_hash", "")
+        actual = hashlib.sha256(x_csrf_token.encode()).hexdigest() if x_csrf_token else ""
+        if not expected or not hmac.compare_digest(expected, actual):
+            raise HTTPException(403, "CSRF check failed")
+    admin = _load_admins().get(session["admin_id"])
+    if not admin or admin.get("disabled"):
+        raise HTTPException(403, "Admin disabled")
+    session["last_used"] = _utcnow().isoformat()
+    _save_admin_sessions(sessions)
+    return {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")}
 
 def _gen_key(tier: str) -> str:
     import secrets as _sec, string as _s
@@ -454,6 +870,54 @@ def _gen_key(tier: str) -> str:
     seg2 = "".join(_sec.choice(chars) for _ in range(16))
     seg3 = "".join(_sec.choice(chars) for _ in range(4))
     return f"{prefix}-{seg1}-{seg2}-{seg3}"
+
+
+@app.post("/api/admin/auth/login")
+async def admin_login(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_check(_AUTH_HITS, f"admin:{ip}", AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+        raise HTTPException(429, "Too many login attempts")
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    mfa_code = body.get("mfa_code", "")
+    admin = _admin_by_email(email) if email else None
+    if not admin or admin.get("disabled") or not pwd_ctx.verify(password, admin["hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    if not _verify_totp(admin.get("mfa_secret", ""), mfa_code):
+        raise HTTPException(401, "Invalid credentials")
+    token, csrf = _issue_admin_session(admin, request)
+    response = JSONResponse({
+        "ok": True,
+        "admin": {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")},
+        "csrf_token": csrf,
+        "mfa_required": bool(admin.get("mfa_secret")),
+    })
+    _set_admin_cookies(response, token, csrf)
+    _log_audit("admin_login", admin["id"], actor=admin, request=request)
+    return response
+
+
+@app.post("/api/admin/auth/logout")
+async def admin_logout(
+    response: Response,
+    actor: dict = Depends(_require_admin),
+    pk_admin_session: str = Cookie(default=""),
+):
+    sessions = _load_admin_sessions()
+    if pk_admin_session:
+        token_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+        if token_hash in sessions:
+            sessions[token_hash]["revoked"] = True
+            _save_admin_sessions(sessions)
+    _clear_admin_cookies(response)
+    _log_audit("admin_logout", actor["id"], actor=actor)
+    return {"ok": True}
+
+
+@app.get("/api/admin/auth/me")
+async def admin_me(actor: dict = Depends(_require_admin)):
+    return {"admin": actor}
 
 
 SMTP_HOST  = os.environ.get("SMTP_HOST", "")
@@ -822,7 +1286,7 @@ def _auto_expire(lic: dict) -> bool:
         if (
             entry.get("expires_at")
             and entry["status"] == "active"
-            and entry["expires_at"] < now
+            and _normalized_expiry(entry["expires_at"]) <= _utcnow()
         ):
             entry["status"] = "expired"
             entry["stage"]  = "churned"
@@ -856,9 +1320,7 @@ async def admin_stats(_: None = Depends(_require_admin)):
 
 @app.get("/api/admin/licenses")
 async def admin_list_licenses(_: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if _auto_expire(lic):
-        _save_licenses(lic)
+    lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
     return list(lic.values())
 
 
@@ -868,22 +1330,20 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     tier = body.get("tier", "free").lower()
     if tier not in TIER_PREFIXES:
         raise HTTPException(400, f"tier must be one of: {list(TIER_PREFIXES)}")
-    lic = _load_licenses()
-    key = _gen_key(tier)
-    while key in lic:
+    def generate(lic):
         key = _gen_key(tier)
-    entry = {
-        "key":            key,
-        "tier":           tier,
-        "email":          body.get("email", ""),
-        "platform":       body.get("platform", ""),
-        "activated":      _utcnow().isoformat(),
-        "last_heartbeat": None,
-        "status":         "active",
-        "notes":          body.get("notes", ""),
-    }
-    lic[key] = entry
-    _save_licenses(lic)
+        while key in lic:
+            key = _gen_key(tier)
+        entry = {
+            "key": key, "tier": tier, "email": body.get("email", ""),
+            "platform": body.get("platform", ""), "activated": _utcnow().isoformat(),
+            "last_heartbeat": None, "status": "active",
+            "notes": body.get("notes", ""),
+        }
+        lic[key] = entry
+        return entry.copy()
+    entry = _mutate_licenses(generate)
+    key = entry["key"]
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
     _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]})
     return entry
@@ -919,13 +1379,12 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
     if trial_days is not None:
         expires_at = (_utcnow() + timedelta(days=trial_days)).isoformat()
 
-    lic = _load_licenses()
-    key = _gen_key(tier)
-    while key in lic:
+    def issue(lic):
         key = _gen_key(tier)
-
-    entry = {
-        "key":            key,
+        while key in lic:
+            key = _gen_key(tier)
+        entry = {
+        "key": key,
         "tier":           tier,
         "email":          email,
         "name":           name,
@@ -940,15 +1399,22 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
         "follow_up_date": follow_up,
         "stage":          "trial" if trial_days else "active",
         "sent_invite":    False,
-    }
+        }
+        lic[key] = entry
+        return entry.copy()
 
     email_result = {"sent": False, "reason": "not_requested"}
+    entry = _mutate_licenses(issue)
+    key = entry["key"]
     if send_email:
         email_result = _send_invite_email(email, name, tier, key, expires_at)
-        entry["sent_invite"] = email_result.get("sent", False)
-
-    lic[key] = entry
-    _save_licenses(lic)
+        if email_result.get("sent"):
+            def mark_invited(lic):
+                if key in lic:
+                    lic[key]["sent_invite"] = True
+                    return lic[key].copy()
+                return entry
+            entry = _mutate_licenses(mark_invited)
     _log_event("issued", {"key": key[:8] + "…", "tier": tier, "email": email})
     _log_audit("issue_license", key, {
         "tier": tier, "email": email, "trial_days": trial_days,
@@ -959,9 +1425,7 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
 
 @app.get("/api/admin/contacts")
 async def admin_contacts(_: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if _auto_expire(lic):
-        _save_licenses(lic)
+    lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
 
     by_email: dict[str, dict] = {}
     for entry in lic.values():
@@ -1017,19 +1481,20 @@ async def admin_update_contact(
 ):
     email = email.lower()
     body  = await request.json()
-    lic   = _load_licenses()
-    matched = [v for v in lic.values() if v.get("email", "").lower() == email]
-    if not matched:
-        raise HTTPException(404, "Contact not found")
     allowed = {"name", "company", "follow_up_date", "stage", "notes", "source"}
     changes = {k: v for k, v in body.items() if k in allowed}
-    for entry in matched:
-        for field in allowed:
-            if field in body:
-                entry[field] = body[field]
-    _save_licenses(lic)
-    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": len(matched)})
-    return {"ok": True, "updated": len(matched)}
+    def update_contact(lic):
+        matched = [v for v in lic.values() if v.get("email", "").lower() == email]
+        if not matched:
+            raise HTTPException(404, "Contact not found")
+        for entry in matched:
+            for field in allowed:
+                if field in body:
+                    entry[field] = body[field]
+        return len(matched)
+    matched_count = _mutate_licenses(update_contact)
+    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count})
+    return {"ok": True, "updated": matched_count}
 
 
 @app.post("/api/admin/licenses/{key}/send-invite")
@@ -1037,25 +1502,30 @@ async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
     lic = _load_licenses()
     if key not in lic:
         raise HTTPException(404, "License not found")
-    entry  = lic[key]
+    entry = lic[key].copy()
     result = _send_invite_email(
         entry["email"], entry.get("name", ""), entry["tier"],
         key, entry.get("expires_at")
     )
     if result.get("sent"):
-        entry["sent_invite"] = True
-        _save_licenses(lic)
+        def mark_invited(licenses):
+            if key not in licenses:
+                raise HTTPException(404, "License not found")
+            licenses[key]["sent_invite"] = True
+        _mutate_licenses(mark_invited)
     _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)})
     return result
 
 
 @app.post("/api/admin/licenses/{key}/expire")
 async def admin_expire(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "expired"
-    _save_licenses(lic)
+    def expire(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "expired"
+        return lic[key].copy()
+    entry = _mutate_licenses(expire)
+    lic = {key: entry}
     _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("expire_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1063,12 +1533,14 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
 
 @app.post("/api/admin/licenses/{key}/revoke")
 async def admin_revoke(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "revoked"
-    lic[key]["last_heartbeat"] = None
-    _save_licenses(lic)
+    def revoke(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "revoked"
+        lic[key]["last_heartbeat"] = None
+        return lic[key].copy()
+    entry = _mutate_licenses(revoke)
+    lic = {key: entry}
     _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("revoke_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1076,11 +1548,13 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
 
 @app.post("/api/admin/licenses/{key}/renew")
 async def admin_renew(key: str, _: None = Depends(_require_admin)):
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-    lic[key]["status"] = "active"
-    _save_licenses(lic)
+    def renew(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        lic[key]["status"] = "active"
+        return lic[key].copy()
+    entry = _mutate_licenses(renew)
+    lic = {key: entry}
     _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
     _log_audit("renew_license", key, {"tier": lic[key]["tier"]})
     return {"ok": True}
@@ -1338,17 +1812,12 @@ async def portal_lookup(request: Request):
     if not key:
         raise HTTPException(400, "license_key required")
 
-    lic = _load_licenses()
-    if key not in lic:
-        raise HTTPException(404, "License not found")
-
-    entry = lic[key]
-    # Auto-expire if past expiry
-    if (entry.get("expires_at")
-            and entry["status"] == "active"
-            and entry["expires_at"] < _utcnow().isoformat()):
-        entry["status"] = "expired"
-        _save_licenses(lic)
+    def lookup(lic):
+        if key not in lic:
+            raise HTTPException(404, "License not found")
+        _license_state(lic[key])
+        return lic[key].copy()
+    entry = _mutate_licenses(lookup)
 
     return {
         "key":            entry["key"],
@@ -1420,23 +1889,26 @@ async def admin_bulk_action(request: Request, _: None = Depends(_require_admin))
     if not keys:
         raise HTTPException(400, "keys list required")
 
-    lic = _load_licenses()
-    affected: list[str] = []
-    not_found: list[str] = []
-    for key in keys:
-        if key not in lic:
-            not_found.append(key)
-            continue
-        if action == "expire":
-            lic[key]["status"] = "expired"
-        elif action == "revoke":
-            lic[key]["status"] = "revoked"
-            lic[key]["last_heartbeat"] = None
-        elif action == "renew":
-            lic[key]["status"] = "active"
-        affected.append(key)
-        _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _save_licenses(lic)
+    def update_many(lic):
+        affected: list[tuple[str, str]] = []
+        not_found: list[str] = []
+        for key in keys:
+            if key not in lic:
+                not_found.append(key)
+                continue
+            if action == "expire":
+                lic[key]["status"] = "expired"
+            elif action == "revoke":
+                lic[key]["status"] = "revoked"
+                lic[key]["last_heartbeat"] = None
+            elif action == "renew":
+                lic[key]["status"] = "active"
+            affected.append((key, lic[key]["tier"]))
+        return affected, not_found
+    affected_with_tiers, not_found = _mutate_licenses(update_many)
+    affected = [key for key, _tier in affected_with_tiers]
+    for key, tier in affected_with_tiers:
+        _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": tier})
     _log_audit(f"bulk_{action}", f"{len(affected)} licenses", {
         "affected": [k[:8] + "…" for k in affected],
         "not_found": len(not_found),
@@ -1458,7 +1930,7 @@ async def admin_settings(_: None = Depends(_require_admin)):
             "configured": bool(SMTP_HOST and SMTP_USER and SMTP_PASS),
         },
         "app_url":             APP_URL,
-        "admin_secret_set":    ADMIN_SECRET != "dev-change-me",
+        "admin_auth":          "cookie_session",
         "data_dir":            str(DATA_DIR),
         "license_count":       len(_load_licenses()),
         "event_count":         len(_load_events()),

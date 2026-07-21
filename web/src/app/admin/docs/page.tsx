@@ -69,9 +69,10 @@ export default function DocsPage() {
       <div className="space-y-5">
         {/* Auth */}
         <Section icon={<Key size={16} />} title="Authentication">
-          <p>Admin endpoints require the <code className="text-sky-400 bg-[#060B14] px-1 py-0.5 rounded">X-Admin-Secret</code> header.</p>
-          <CodeBlock lang="curl" code={`curl https://api.pushkey.app/api/admin/licenses \\
-  -H "X-Admin-Secret: YourSecretHere"`} />
+          <p>Admin endpoints require an authenticated admin session cookie and CSRF token from <code className="text-sky-400 bg-[#060B14] px-1 py-0.5 rounded">/api/admin/auth/login</code>.</p>
+          <CodeBlock lang="curl" code={`curl https://api.pushkey.app/api/admin/auth/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"admin@example.com","password":"...","mfa_code":"123456"}'`} />
           <p>Client endpoints (heartbeat) require a valid license key in the request body. No auth header needed.</p>
         </Section>
 

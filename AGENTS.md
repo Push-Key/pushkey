@@ -6,7 +6,23 @@ This file provides guidance to AI coding agents when working with code in this r
 
 - **Git identity:** always commit as `pushkeydev <pushkeydev@gmail.com>`. Never use `abrown18@gmail.com` or any other identity for this repo. Verify with `git config user.email` before any commit.
 - **No AI attribution in commits:** do NOT append `Co-Authored-By: Claude`, `Generated with Claude Code`, `noreply@anthropic.com`, or any similar AI-tooling attribution to commit messages or PR bodies. Pushkey is shipped as `pushkeydev`'s work.
-- **Client-integration references are allowed:** docs and code MAY mention "Claude Code" / "VS Code" / "Cursor" etc. as MCP client names — those are product integration references, not authorship. Only attribution/co-author lines are forbidden.
+- **Client-integration references are allowed:** docs and code MAY mention "Claude Code" / "VS Code" / "Cursor" etc. as MCP client names, those are product integration references, not authorship. Only attribution/co-author lines are forbidden.
+
+## MCP Plaintext-over-Chat Policy (mandatory for agents)
+
+When driving Pushkey via MCP, choose the rotation/add path by key lifetime:
+
+| Key lifetime | Path | Why |
+|--------------|------|-----|
+| Short-lived (dev, test, sandbox, throwaway) | `add_key` / `rotate_key` / `set_backup_key` over MCP | Fast, plaintext exposure acceptable when key is disposable |
+| Long-lived (prod, shared, anything you'd rotate on a schedule) | Local CLI (`pushkey add` / `rotate` / `set-backup`, getpass) | Secret never reaches LLM provider or chat transcript |
+| Long-lived, agent-driven rotation | Pre-stage backup via CLI, then `rotate_to_backup(name)` over MCP | Only the *name* crosses the LLM channel |
+
+Plaintext MCP write tools (`add_key`, `rotate_key`, `set_backup_key`) return a
+`warning` field. Agents MUST surface that warning to the user when the call
+succeeds, including the suggested CLI alternative for production keys. Do not
+swallow the warning silently. See `SECURITY.md` → "MCP / LLM Channel" for the
+full threat model.
 
 ## Commands
 
@@ -17,13 +33,13 @@ python pushkey.py
 # Run CLI
 python pushkey_cli.py --help
 
-# Run all tests (107 tests)
+# Run all tests (335 collected; current Windows baseline: 334 passed, 1 skipped)
 pytest
 
 # Single test file
 pytest tests/test_vault_crypto.py -v
 
-# Build Windows exes (GUI + CLI — clears dist/ automatically via --noconfirm)
+# Build Windows exes (GUI + CLI, clears dist/ automatically via --noconfirm)
 python build_exe.py
 # Output: dist/Pushkey.exe           (GUI, --onefile)
 #         dist/pushkey-cli.exe      (CLI, --onefile)
@@ -35,31 +51,31 @@ uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
 cd web && npm run dev
 ```
 
-No linting config — project uses no formatter/linter config files.
+No linting config, project uses no formatter/linter config files.
 
 ## Updating the Desktop Icon (Windows)
 
-**CRITICAL — read this before touching the desktop icon. Six attempts failed because of folder confusion before this was documented.**
+**CRITICAL, read this before touching the desktop icon. Six attempts failed because of folder confusion before this was documented.**
 
 ### Why this is non-obvious
 
-1. **Desktop is OneDrive-redirected.** The user's real Desktop is `C:\Users\aware\OneDrive\Desktop`, NOT `C:\Users\aware\Desktop`. The latter exists but is empty/orphaned. Always resolve via `[Environment]::GetFolderPath('Desktop')` in PowerShell or `%USERPROFILE%\OneDrive\Desktop` — never hardcode `$env:USERPROFILE\Desktop`.
+1. **Desktop is OneDrive-redirected.** The user's real Desktop is `C:\Users\aware\OneDrive\Desktop`, NOT `C:\Users\aware\Desktop`. The latter exists but is empty/orphaned. Always resolve via `[Environment]::GetFolderPath('Desktop')` in PowerShell or `%USERPROFILE%\OneDrive\Desktop`, never hardcode `$env:USERPROFILE\Desktop`.
 2. **The desktop "icon" is `Pushkey.exe` directly on the desktop**, not a `.lnk` shortcut. Editing shortcut properties does nothing because there is no shortcut. You must replace the `.exe` itself.
 3. **Single-size `.ico` files render badly or fail.** Windows needs 16, 32, 48, and 256 px embedded in one file. PIL's `save(format='ICO')` only embeds the first size unless you pass `sizes=[...]` AND `append_images=[...]`.
 4. **Windows aggressively caches icons.** Even after replacing the file correctly, the visual desktop won't update until both `IconCache.db` and `iconcache_*` files in `%LOCALAPPDATA%\Microsoft\Windows\Explorer` are deleted AND explorer is restarted. F5 alone is not enough.
 
-### The full pipeline (do all 4 steps — skipping any one will fail)
+### The full pipeline (do all 4 steps, skipping any one will fail)
 
-**Step 1 — Copy the source `.ico` directly. DO NOT rebuild it through PIL.**
+**Step 1, Copy the source `.ico` directly. DO NOT rebuild it through PIL.**
 
-If the user's source already has multiple sizes embedded (check with `Image.open(path).info.get('sizes')`), just copy it byte-for-byte. PIL's `save(format='ICO')` strips sizes — a 9-size source becomes a 4-size output. Verify hashes match:
+If the user's source already has multiple sizes embedded (check with `Image.open(path).info.get('sizes')`), just copy it byte-for-byte. PIL's `save(format='ICO')` strips sizes, a 9-size source becomes a 4-size output. Verify hashes match:
 ```bash
 cp "<source.ico>" "C:/Users/aware/bots/pushkey/pushkey.ico"
 python -c "import hashlib; print(hashlib.md5(open('C:/Users/aware/bots/pushkey/pushkey.ico','rb').read()).hexdigest())"
 ```
 Only fall back to PIL conversion if the source is a single-size `.ico` or a `.png`.
 
-**Step 2 — NUKE the PyInstaller build cache, then rebuild:**
+**Step 2, NUKE the PyInstaller build cache, then rebuild:**
 
 PyInstaller caches the icon resource. Rebuilding without clearing `build/` and `Pushkey.spec` produces an `.exe` with the OLD icon, even though `pushkey.ico` on disk is new. This bug wasted 7+ build cycles before being identified.
 ```bash
@@ -81,16 +97,16 @@ for r1 in pe.DIRECTORY_ENTRY_RESOURCE.entries:
                 else:
                     print(struct.unpack('<i', raw[4:8])[0], 'BMP')
 ```
-If it prints fewer sizes than the source `.ico` had, the cache wasn't cleared — try again.
+If it prints fewer sizes than the source `.ico` had, the cache wasn't cleared, try again.
 
-**Step 3 — Copy the fresh `.exe` over the desktop copy. Resolve real desktop via API:**
+**Step 3, Copy the fresh `.exe` over the desktop copy. Resolve real desktop via API:**
 ```powershell
 Get-Process -Name "Pushkey" -ErrorAction SilentlyContinue | Stop-Process -Force
 $realDesktop = [Environment]::GetFolderPath('Desktop')   # NOT $env:USERPROFILE\Desktop
 Copy-Item "C:\Users\aware\bots\pushkey\dist\Pushkey.exe" (Join-Path $realDesktop "Pushkey.exe") -Force
 ```
 
-**Step 4 — Wipe icon cache + restart explorer + notify shell:**
+**Step 4, Wipe icon cache + restart explorer + notify shell:**
 ```powershell
 Stop-Process -Name explorer -Force
 Start-Sleep -Milliseconds 800
@@ -102,7 +118,7 @@ Add-Type '[DllImport("shell32.dll")] public static extern void SHChangeNotify(in
 [W.S]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
 ```
 
-### Verification (REQUIRED — do not declare success without this)
+### Verification (REQUIRED, do not declare success without this)
 
 Extract the icon from the desktop `.exe` after the copy and read it back as PNG to confirm it matches the source:
 ```powershell
@@ -110,7 +126,7 @@ Add-Type -AssemblyName System.Drawing
 $ico = [System.Drawing.Icon]::ExtractAssociatedIcon("C:\Users\aware\OneDrive\Desktop\Pushkey.exe")
 $ico.ToBitmap().Save("C:\Users\aware\Downloads\verify_icon.png")
 ```
-Then `Read` that PNG and visually confirm it matches the user's source. If they don't match, the file copy is wrong — do not blame caching until verification passes.
+Then `Read` that PNG and visually confirm it matches the user's source. If they don't match, the file copy is wrong, do not blame caching until verification passes.
 
 ### Common failure modes (rule out in this order)
 
@@ -126,17 +142,18 @@ Then `Read` that PNG and visually confirm it matches the user's source. If they 
 
 ## Architecture
 
-**Modular app**: `pushkey.py` is the GUI entry point; core logic is split into focused submodules (see table below). All submodules import paths via `pushkey_shared` — never hardcode `~/.pushkey` paths.
+**Modular app**: `pushkey.py` is the GUI entry point; core logic is split into focused submodules (see table below). All submodules import paths via `pushkey_shared`, never hardcode `~/.pushkey` paths.
 
 ### Crypto Layer
 
-Two vault formats, both using `~/.pushkey/vault.enc`:
+Three vault formats, all using `~/.pushkey/vault.enc`:
 
-- **V2** (current): magic `PK2\x00`, AES-256-GCM, Argon2id KDF (time=3, mem=64MB, par=4) or PBKDF2 fallback at 600k iterations. Nonce is 12 bytes prepended to ciphertext.
+- **V3** (current): magic `PK3\x00`, AES-256-GCM envelope encryption with independent master-password and recovery-code slots wrapping the vault key.
+- **V2** (legacy): magic `PK2\x00`, AES-256-GCM, Argon2id KDF (time=3, mem=64MB, par=4) or PBKDF2 fallback at 600k iterations. Nonce is 12 bytes prepended to ciphertext.
 - **Legacy V1**: Fernet (AES-128-CBC). Auto-detected on load, user prompted to migrate.
 - **Team vault**: magic `PKT2`, ephemeral salt embedded in payload (not persisted to disk).
 
-Log encryption uses a deterministic AESGCM key derived from the salt — no password needed to decrypt logs, intentionally.
+Log encryption uses a deterministic AESGCM key derived from the salt, no password needed to decrypt logs, intentionally.
 
 Key derivation entry point: `derive_key(password, salt)` → 32 bytes (`pushkey_crypto.py`).
 Vault entry point: `load_vault(password)` → `(dict, key)`, `save_vault(dict, password)` (`pushkey_vault.py`).
@@ -149,7 +166,7 @@ Vault entry point: `load_vault(password)` → `(dict, key)`, `save_vault(dict, p
 ```
 
 `~/.pushkey/config.json` holds project paths and key assignments (encrypted separately).
-`~/.pushkey/health.json` is a public sidecar — no secrets, just health status + timestamps.
+`~/.pushkey/health.json` is a public sidecar, no secrets, just health status + timestamps.
 
 ### Tier/License System (`pushkey_tiers.py`)
 
@@ -194,7 +211,7 @@ PushkeyApp
   `ctk.set_appearance_mode()`.
 
 **Icon system** (`pushkey_icons.py`)
-- 27 Lucide-inspired stroke icons drawn at runtime via PIL primitives — no SVG/Cairo
+- 27 Lucide-inspired stroke icons drawn at runtime via PIL primitives, no SVG/Cairo
   dep, fully offline. Each icon is a function `(d, s, c, w)` that strokes geometry on a
   transparent PIL image at requested size.
 - Public API: `load_icon(name, size, color)` → PIL Image (cached per name+size+color).
@@ -213,7 +230,7 @@ PushkeyApp
 - Idle pre-render: 800ms after login, `_idle_prerender_tabs` schedules a
   non-blocking render of every non-active tab on a 250ms cadence so first-visit
   switches feel instant.
-- `_invalidate_tabs(*tabs)` — call when state changes (key added, rotated, etc.)
+- `_invalidate_tabs(*tabs)`, call when state changes (key added, rotated, etc.)
   to mark relevant tabs dirty.
 
 **Resize debouncer** (`_ResizeDebouncer` in `pushkey.py`)
@@ -233,22 +250,22 @@ PushkeyApp
   → "neon glow" effect. See dashboard Row 1 stat cards.
 - Pills: `CTkFrame(fg_color=tinted_bg, corner_radius=8-10, border_width=1, border_color=accent)`
   with a single bold uppercase label inside.
-- **Never** mix `pack(side=...)` and `.place(rely=0.5)` in the same row — children
+- **Never** mix `pack(side=...)` and `.place(rely=0.5)` in the same row, children
   land on different baselines and the row's border looks broken (this was the
-  All Keys card outline bug — see `_render_single_key`).
+  All Keys card outline bug, see `_render_single_key`).
 
 ### Python Submodules
 
 | Module | Purpose |
 |--------|---------|
-| `pushkey_shared.py` | Path constants + `TIERS` dict. Zero imports — safe base for all others. |
+| `pushkey_shared.py` | Path constants + `TIERS` dict. Zero imports, safe base for all others. |
 | `pushkey_crypto.py` | AES-256-GCM, Argon2id/PBKDF2 KDF, salt, log encryption |
 | `pushkey_vault.py` | `load_vault` / `save_vault` / `load_config` / `save_config` |
 | `pushkey_tiers.py` | License load/save, tier gates, heartbeat, offline grace |
 | `pushkey_providers.py` | Provider detection, health status, `days_since` |
 | `pushkey_icons.py` | 27 Lucide-style PIL icons, `load_icon(name, size, color)` |
-| `pushkey_cli.py` | Standalone CLI — no tkinter. Entry point: `pushkey` (pip) or `pushkey-cli.exe` |
-| `pushkey_cloud_api.py` | FastAPI sync backend — zero-knowledge vault storage |
+| `pushkey_cli.py` | Standalone CLI, no tkinter. Entry point: `pushkey` (pip) or `pushkey-cli.exe` |
+| `pushkey_cloud_api.py` | FastAPI sync backend, zero-knowledge vault storage |
 
 ### Subdirectory Submodules
 
@@ -256,13 +273,13 @@ PushkeyApp
 |------|---------|
 | `server/` | FastAPI zero-knowledge cloud sync backend (Railway-deployable) |
 | `web/` | Next.js admin dashboard + landing page. Env: `NEXT_PUBLIC_ADMIN_API_URL`. Deployed via `vercel.json` at repo root. |
-| `vscode-pushkey/` | VS Code extension — reads `~/.pushkey/health.json`, decorates editors |
-| `browser-pushkey/` | Chrome/Edge MV3 extension — polls health server on port 7654 |
+| `vscode-pushkey/` | VS Code extension, reads `~/.pushkey/health.json`, decorates editors |
+| `browser-pushkey/` | Chrome/Edge MV3 extension, polls health server on port 7654 |
 
 ### Security Invariants
 
 - Master password **never** stored; vault decrypted in memory only.
-- Cloud sync sends only AES-GCM ciphertext — server is zero-knowledge.
+- Cloud sync sends only AES-GCM ciphertext, server is zero-knowledge.
 - `.env` injection always adds `.env` to project's `.gitignore`.
 - Audit log entries are individually encrypted (length-prefixed binary format).
 - Team exports embed ephemeral salt in payload; recipient derives key from shared password, not persisted salt.
@@ -271,7 +288,7 @@ PushkeyApp
 
 `tests/conftest.py` has an `autouse` fixture that monkeypatches all `pushkey_shared` path constants to `tmp_path` for every test. Because all submodules read paths via `pushkey_shared` at call time (not import time), this one patch point covers everything.
 
-**Do not** monkeypatch `pushkey.*` path attrs in new tests — they're irrelevant since vault/crypto/tiers all use `pushkey_shared` directly.
+**Do not** monkeypatch `pushkey.*` path attrs in new tests, they're irrelevant since vault/crypto/tiers all use `pushkey_shared` directly.
 
 Test files:
 | File | Coverage |

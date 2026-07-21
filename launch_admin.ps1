@@ -11,7 +11,7 @@ foreach ($port in $ports) {
 # Start cloud API (minimized terminal)
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "Set-Location '$root'; Write-Host 'Pushkey API starting...' -ForegroundColor Cyan; uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000"
+    "Set-Location '$root'; `$env:PUSHKEY_ENV='development'; Write-Host 'Pushkey API starting...' -ForegroundColor Cyan; uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000"
 ) -WindowStyle Minimized
 
 # Start Next.js dev server (minimized terminal)

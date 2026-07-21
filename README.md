@@ -1,19 +1,24 @@
 <div align="center">
 
-<img src="docs/banner.png" alt="Pushkey — Encrypted API key manager for developers" width="100%" />
+<img src="docs/banner.png" alt="Pushkey, Encrypted API key manager for developers" width="100%" />
 
 <br/>
 
 [![Version](https://img.shields.io/badge/version-2.1.0-00d9ff?style=for-the-badge&logo=github)](https://github.com/Push-Key/pushkey/releases)
 [![npm](https://img.shields.io/badge/npm-%40pushkey%2Fcli-cb3837?style=for-the-badge&logo=npm&logoColor=white)](https://www.npmjs.com/package/@pushkey/cli)
 [![License](https://img.shields.io/badge/license-MIT-7c3aed?style=for-the-badge)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.12%2B-3572A5?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-107%20passing-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Python](https://img.shields.io/badge/python-3.12%20verified-3572A5?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Tests](https://img.shields.io/badge/tests-334%20passed%20%7C%201%20skipped-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![Platform](https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-64748b?style=for-the-badge)](#installation)
 
 <br/>
 
-> Pushkey stores, rotates, and injects your API keys using **AES-256-GCM** encryption with **Argon2id** key derivation —
+> [!WARNING]
+> Pushkey is in pre-production hardening. The local security baseline is verified,
+> but cloud durability, complete administrator authorization, release signing,
+> and production operations remain open roadmap gates.
+
+> Pushkey stores, rotates, and injects your API keys using **AES-256-GCM** encryption with **Argon2id** key derivation ,
 > the same primitives used in password managers you already trust.
 > The vault never writes plaintext to disk.
 > The cloud sync backend is zero-knowledge: even we can't read your keys.
@@ -33,7 +38,7 @@ Most developers manage API keys in `.env` files, shell profiles, or their brain.
 | 😬 The problem | ✅ Pushkey fixes it |
 |----------------|---------------------|
 | Keys committed to git by accident | `inject` writes `.gitignore` guard first, every time |
-| Keys shared over Slack in plaintext | Encrypted vault — share the vault, not the secret |
+| Keys shared over Slack in plaintext | Encrypted vault, share the vault, not the secret |
 | No idea when `sk-abc123` was last rotated | Per-key rotation timestamps + health scoring |
 | One key used across 6 projects | Multi-project assignment with per-env injection |
 | No audit trail | Encrypted per-entry audit log with deterministic replay |
@@ -44,7 +49,7 @@ Most developers manage API keys in `.env` files, shell profiles, or their brain.
 
 ### Install
 
-**via npm** *(recommended — works everywhere Node is installed)*
+**via npm** *(recommended, works everywhere Node is installed)*
 ```bash
 npm install -g @pushkey/cli
 ```
@@ -86,7 +91,7 @@ python pushkey.py
 ```
 
 > [!TIP]
-> Set `PUSHKEY_MASTER` in your shell profile to skip the password prompt in scripts. Use a separate service account password — never your personal master password.
+> Set `PUSHKEY_MASTER` in your shell profile to skip the password prompt in scripts. Use a separate service account password, never your personal master password.
 
 ---
 
@@ -117,7 +122,7 @@ python pushkey.py
 **Common patterns:**
 
 ```bash
-# 🏷️  Add a key — provider auto-detected from name/prefix
+# 🏷️  Add a key, provider auto-detected from name/prefix
 pushkey add STRIPE_SECRET_KEY sk_live_...
 
 # 🎲  Generate a cryptographically random key
@@ -163,19 +168,19 @@ pushkey completion bash >> ~/.bashrc
  ╚══════════════════════════════════════════════════════════╝
 ```
 
-**Two independent unlock paths — neither has access to the other's salt:**
+**Two independent unlock paths, neither has access to the other's salt:**
 
 ```
 🔑 Master password  →  Argon2id(pw, pw_salt)   →  vault_key  →  decrypt body
 🆘 Recovery code    →  Argon2id(code, rec_salt) →  vault_key  →  decrypt body
 ```
 
-The `vault_key` is a random 256-bit key created at vault init and never written to disk in plaintext. Changing your master password re-encrypts only the password slot — the recovery slot and vault body are untouched.
+The `vault_key` is a random 256-bit key created at vault init and never written to disk in plaintext. Changing your master password re-encrypts only the password slot, the recovery slot and vault body are untouched.
 
 ### Key Derivation
 
 ```python
-# ✅ Argon2id — memory-hard, GPU-resistant (preferred)
+# ✅ Argon2id, memory-hard, GPU-resistant (preferred)
 Argon2id(secret=password, salt=salt, time=3, memory=64MB, parallelism=4, hash_len=32)
 
 # ⬇️  PBKDF2-SHA256 fallback (if argon2-cffi not installed)
@@ -190,10 +195,10 @@ PBKDF2(password, salt, iterations=600_000)
 | V2 *(legacy)* | `PK2\x00` | AES-256-GCM | Argon2id | ❌ |
 | V1 *(legacy)* | *(none)* | Fernet/AES-128-CBC | PBKDF2 | ❌ |
 
-V2 and V1 vaults are auto-detected and migrated on first open — no action needed.
+V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 
 > [!IMPORTANT]
-> The recovery code (`PUSH-XXXX-XXXX-XXXX-XXXX`) is shown **exactly once** at vault creation. Pushkey never stores it — not on disk, not in the cloud. Treat it like a seed phrase.
+> The recovery code (`PUSH-XXXX-XXXX-XXXX-XXXX`) is shown **exactly once** at vault creation. Pushkey never stores it, not on disk, not in the cloud. Treat it like a seed phrase.
 
 ---
 
@@ -204,10 +209,10 @@ V2 and V1 vaults are auto-detected and migrated on first open — no action need
 <td width="50%">
 
 **🔒 Encryption**
-- AES-256-GCM vault — any tamper invalidates the MAC
-- Argon2id KDF — 64 MB memory cost, GPU-resistant
+- AES-256-GCM vault, any tamper invalidates the MAC
+- Argon2id KDF, 64 MB memory cost, GPU-resistant
 - Independent recovery key slot (80-bit entropy)
-- Atomic writes via `os.replace()` — no partial vault states
+- Atomic writes via `os.replace()`, no partial vault states
 - Rolling backups (last 3 kept automatically)
 
 **🔄 Key Management**
@@ -227,10 +232,10 @@ V2 and V1 vaults are auto-detected and migrated on first open — no action need
 - Drop zone for batch imports
 
 **🖥️ Interface**
-- Desktop GUI — dark/light themes, neon stat cards
+- Desktop GUI, dark/light themes, neon stat cards
 - CLI with shell completion (bash/zsh/PowerShell)
-- VS Code extension — health decorations in editor
-- Chrome/Edge extension — live status in browser
+- VS Code extension, health decorations in editor
+- Chrome/Edge extension, live status in browser
 
 **🔐 Auth & Sync**
 - TOTP MFA (Google Authenticator compatible)
@@ -276,17 +281,17 @@ V2 and V1 vaults are auto-detected and migrated on first open — no action need
 
 | Control | 🟢 What it does |
 |---------|----------------|
-| 🔑 **Master password** | Never stored — vault is cryptographically useless without it |
+| 🔑 **Master password** | Never stored, vault is cryptographically useless without it |
 | 🔀 **Vault key isolation** | Random 256-bit key encrypts the body; password/recovery code never touch data directly |
-| ✍️ **Atomic writes** | `.tmp` → `os.replace()` — no partial vault states possible |
+| ✍️ **Atomic writes** | `.tmp` → `os.replace()`, no partial vault states possible |
 | 🔒 **File permissions** | `vault.enc` and `.salt` set to `chmod 600` on write |
 | 💾 **Rolling backups** | Last 3 vault snapshots at `~/.pushkey/vault_backup_*.enc` |
 | 📵 **No plaintext on disk** | Vault, config, and audit log all encrypted at rest |
 | 🙈 **`.gitignore` guard** | `inject` adds `.env` to `.gitignore` before writing, every time |
-| 🌐 **Zero-knowledge cloud** | Server stores only ciphertext — no key material ever transmitted |
+| 🌐 **Zero-knowledge cloud** | Server stores only ciphertext, no key material ever transmitted |
 
 > [!WARNING]
-> If you lose both your master password **and** your recovery code, your vault **cannot be recovered by anyone — including us**. Store your recovery code offline: paper copy, separate password manager, or safety deposit box.
+> If you lose both your master password **and** your recovery code, your vault **cannot be recovered by anyone, including us**. Store your recovery code offline: paper copy, separate password manager, or safety deposit box.
 
 ---
 
@@ -298,7 +303,7 @@ V2 and V1 vaults are auto-detected and migrated on first open — no action need
 ├── 🧂 .salt              32-byte random salt  (chmod 600)
 ├── ⚙️  config.json        AES-256-GCM encrypted project config
 ├── 📋 pushkey.log        Encrypted binary audit log
-├── 📡 health.json        Public sidecar — health + timestamps, no secrets
+├── 📡 health.json        Public sidecar, health + timestamps, no secrets
 ├── 🪪 .license           AES-GCM encrypted tier token
 ├── 📲 .mfa               Encrypted TOTP secret
 ├── 🗝️  .fido2             FIDO2 credential blob
@@ -325,7 +330,7 @@ pushkey/
 ## 🧪 Tests
 
 ```bash
-# 🧪 Run all 107 tests
+# 🧪 Run all 335 collected tests
 pytest
 
 # 🔍 Single module with verbose output
@@ -343,24 +348,28 @@ pytest --cov=. --cov-report=term-missing
 | `test_env_injection.py` | `.env` merge, gitignore dedup |
 | `test_multi_project.py` | Project link/unlink |
 | `test_provider_detection.py` | Provider pattern matching |
-| `test_providers.py` | `pushkey_providers` module — 20 tests |
-| `test_cli.py` | CLI commands — 26 tests |
-| `test_tiers.py` | License, tier gates, heartbeat — 23 tests |
+| `test_providers.py` | `pushkey_providers` module, 20 tests |
+| `test_cli.py` | CLI commands, 26 tests |
+| `test_tiers.py` | License, tier gates, heartbeat, 23 tests |
 | `test_ui_helpers.py` | `_log_line_age_days` |
+
+The 2026-07-20 Windows baseline collected 335 tests: 334 passed and one
+symlink test was skipped because symlink creation was unavailable. See
+[`docs/BASELINE_VERIFICATION_2026-07-20.md`](docs/BASELINE_VERIFICATION_2026-07-20.md).
 
 ---
 
 ## 🔓 Open-Core Model
 
-Pushkey is **open-core** — the security-critical layer is fully open so you can audit exactly what protects your keys. The monetization layer is proprietary.
+Pushkey is **open-core**, the security-critical layer is fully open so you can audit exactly what protects your keys. The monetization layer is proprietary.
 
 | Component | Open Source | Why |
 |-----------|:-----------:|-----|
-| `pushkey_crypto.py` — AES-256-GCM, Argon2id | ✅ | Audit the thing protecting your secrets |
-| `pushkey_vault.py` — vault I/O | ✅ | Verify no plaintext ever touches disk |
-| `pushkey_cli.py` — full CLI | ✅ | Free forever, no feature limits |
-| `pushkey_providers.py` — 32+ providers | ✅ | Community can add new providers |
-| `providers.json` — pattern registry | ✅ | Community contributions welcome |
+| `pushkey_crypto.py`, AES-256-GCM, Argon2id | ✅ | Audit the thing protecting your secrets |
+| `pushkey_vault.py`, vault I/O | ✅ | Verify no plaintext ever touches disk |
+| `pushkey_cli.py`, full CLI | ✅ | Free forever, no feature limits |
+| `pushkey_providers.py`, 32+ providers | ✅ | Community can add new providers |
+| `providers.json`, pattern registry | ✅ | Community contributions welcome |
 | Desktop GUI | ❌ | Free tier (15 keys) → paid for full access |
 | Cloud sync backend | ❌ | Starter+ |
 | CI/CD push, Team RBAC, SSO | ❌ | Pro / Team / Enterprise |
@@ -379,7 +388,7 @@ Most "encrypted" tools encrypt the data directly with a password-derived key. Th
 - Changing your password requires re-encrypting all data
 - There's no way to add a second unlock path (recovery key) without a completely different design
 
-Pushkey uses **envelope encryption** — the same pattern AWS KMS, Age, and 1Password use:
+Pushkey uses **envelope encryption**, the same pattern AWS KMS, Age, and 1Password use:
 
 ```
 Password  ──→  Argon2id  ──→  pw_key  ──→  encrypts ──→  vault_key (256-bit random)
@@ -399,7 +408,7 @@ The `vault_key` is random, generated once, never written to disk in plaintext. B
 
 ### Why Argon2id
 
-Argon2id won the Password Hashing Competition (2015). It's memory-hard — cracking requires both CPU time AND RAM, which makes GPU/ASIC attacks expensive:
+Argon2id won the Password Hashing Competition (2015). It's memory-hard, cracking requires both CPU time AND RAM, which makes GPU/ASIC attacks expensive:
 
 ```
 time_cost   = 3      iterations
@@ -417,10 +426,10 @@ parallelism = 4      threads
 
 Pull requests welcome on the open-core surface. The highest-impact areas:
 
-- 🏷️ **New providers** in `providers.json` — add a pattern entry and a matching test
-- 🔍 **Security review** of `pushkey_crypto.py` — open an issue for any findings (see [SECURITY.md](SECURITY.md))
-- 💻 **CLI improvements** — new commands, better error messages, cross-platform fixes
-- 🐚 **Shell completions** — bash/zsh/PowerShell coverage improvements
+- 🏷️ **New providers** in `providers.json`, add a pattern entry and a matching test
+- 🔍 **Security review** of `pushkey_crypto.py`, open an issue for any findings (see [SECURITY.md](SECURITY.md))
+- 💻 **CLI improvements**, new commands, better error messages, cross-platform fixes
+- 🐚 **Shell completions**, bash/zsh/PowerShell coverage improvements
 
 ```bash
 git clone https://github.com/ebothegreat/pushkey.git
@@ -436,6 +445,6 @@ pytest   # ✅ confirm everything passes before opening a PR
 
 ## 📄 License
 
-MIT © [Pushkey](https://pushkey.dev) — see [LICENSE](LICENSE)
+MIT © [Pushkey](https://pushkey.dev), see [LICENSE](LICENSE)
 
 🔍 Full vault format specification and responsible disclosure: [SECURITY.md](SECURITY.md)

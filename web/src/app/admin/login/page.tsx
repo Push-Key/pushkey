@@ -7,7 +7,9 @@ import { adminApi } from "@/lib/admin-api"
 
 export default function AdminLogin() {
   const router = useRouter()
-  const [secret, setSecret] = useState("")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [mfaCode, setMfaCode] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
 
@@ -16,11 +18,10 @@ export default function AdminLogin() {
     setError("")
     setLoading(true)
     try {
-      await adminApi.stats(secret)
-      localStorage.setItem("pk_admin_secret", secret)
+      await adminApi.login({ email, password, mfa_code: mfaCode })
       router.replace("/admin/licenses")
     } catch {
-      setError("Invalid admin secret")
+      setError("Invalid admin credentials")
     } finally {
       setLoading(false)
     }
@@ -47,25 +48,39 @@ export default function AdminLogin() {
           className="bg-[#0D1B2A] border border-white/8 rounded-xl p-6 space-y-4"
         >
           <div>
-            <p className="text-sm font-semibold text-white mb-1">Admin Secret</p>
-            <p className="text-xs text-[#94A3B8] mb-4">Set via PUSHKEY_ADMIN_SECRET env var on the cloud API.</p>
+            <p className="text-sm font-semibold text-white mb-1">Admin Account</p>
+            <p className="text-xs text-[#94A3B8] mb-4">Sign in with an assigned admin account.</p>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="admin@example.com"
+              className="w-full bg-[#112233] border border-white/8 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors mb-3"
+            />
             <div className="relative">
               <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#94A3B8]" />
               <input
                 type="password"
-                value={secret}
-                onChange={e => setSecret(e.target.value)}
-                placeholder="Enter admin secret"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Password"
                 className="w-full bg-[#112233] border border-white/8 rounded-lg pl-9 pr-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors"
               />
             </div>
+            <input
+              inputMode="numeric"
+              value={mfaCode}
+              onChange={e => setMfaCode(e.target.value)}
+              placeholder="MFA code"
+              className="w-full bg-[#112233] border border-white/8 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors mt-3"
+            />
           </div>
 
           {error && <p className="text-xs text-red-400">{error}</p>}
 
           <button
             type="submit"
-            disabled={loading || !secret}
+            disabled={loading || !email || !password}
             className="w-full bg-[#00DC82] text-[#060B14] font-semibold text-sm py-2.5 rounded-lg hover:bg-[#00DC82]/90 disabled:opacity-40 transition-colors"
           >
             {loading ? "Verifying…" : "Sign In"}

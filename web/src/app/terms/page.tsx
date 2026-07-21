@@ -4,6 +4,7 @@ export default function TermsPage() {
   return (
     <main style={{ background: "#060B14", color: "#F8FAFC", minHeight: "100vh" }}>
       <div className="max-w-3xl mx-auto px-6 py-24">
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
         <a href="/" className="text-sm" style={{ color: "#94A3B8" }}>← Back to PushKey</a>
         <h1 className="text-4xl font-bold mt-6 mb-4">Terms of Service</h1>
         <p className="text-sm mb-8" style={{ color: "#64748B" }}>Last updated: May 3, 2026</p>

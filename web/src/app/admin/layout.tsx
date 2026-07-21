@@ -8,6 +8,7 @@ import {
   Settings as SettingsIcon, FileText, ShieldCheck,
 } from "lucide-react"
 import { AdminProvider, useAdmin } from "./_context"
+import { adminApi } from "@/lib/admin-api"
 
 function Sidebar() {
   const { stats } = useAdmin()
@@ -110,12 +111,16 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
   const [secret, setSecret] = useState<string | null>(null)
 
   useEffect(() => {
-    const s = localStorage.getItem("pk_admin_secret")
-    if (!s && pathname !== "/admin/login") {
-      router.replace("/admin/login")
-    } else {
-      setSecret(s ?? "")
-    }
+    const timer = window.setTimeout(() => {
+      if (pathname === "/admin/login") {
+        setSecret("")
+        return
+      }
+      adminApi.me()
+        .then(() => setSecret("session-authenticated"))
+        .catch(() => router.replace("/admin/login"))
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [pathname, router])
 
   if (secret === null) return null

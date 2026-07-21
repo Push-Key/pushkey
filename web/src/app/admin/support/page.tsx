@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { MessageSquare, ChevronDown, ChevronUp, CheckCircle, Clock, AlertCircle } from "lucide-react"
 import { adminApi, type SupportTicket } from "@/lib/admin-api"
 import { useAdmin } from "../_context"
@@ -12,7 +12,7 @@ const FAQS = [
   { q: "Can a client use Pushkey offline?", a: "Yes. There's a 10-day offline grace period. After that, the heartbeat check will gate Pro/Team/Enterprise features until connectivity is restored." },
   { q: "How do I move a client from one tier to another?", a: "Revoke their current key, generate a new key with the target tier, and send it to them. There's no in-place upgrade — keys are immutable once generated." },
   { q: "Where is vault data stored?", a: "Each client's vault is stored locally at ~/.pushkey/vault.enc (AES-256-GCM encrypted). If cloud sync is enabled, an encrypted blob is also stored on your cloud API server — the server never sees plaintext." },
-  { q: "How do I set up my own admin password?", a: 'Set the PUSHKEY_ADMIN_SECRET environment variable before starting the cloud API: $env:PUSHKEY_ADMIN_SECRET = "YourPassword123"; uvicorn pushkey_cloud_api:app' },
+  { q: "How do I set up my own admin account?", a: 'Set PUSHKEY_ADMIN_EMAIL and PUSHKEY_ADMIN_PASSWORD before starting the cloud API. Add PUSHKEY_ADMIN_TOTP_SECRET to require MFA for that account.' },
 ]
 
 const PRIORITY_CFG = {
@@ -38,11 +38,14 @@ export default function SupportPage() {
   const [submitting, setSubmitting] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  function load() {
+  const load = useCallback(() => {
     if (!secret) return
     adminApi.listTickets(secret).then(setTickets).catch(() => {})
-  }
-  useEffect(() => { load() }, [secret])
+  }, [secret])
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0)
+    return () => window.clearTimeout(timer)
+  }, [load])
 
   async function submitTicket() {
     if (!form.subject || !form.message) return

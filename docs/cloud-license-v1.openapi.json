@@ -1,0 +1,209 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pushkey Device License API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/activate": {
+      "post": {
+        "summary": "Register or refresh a licensed device",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ActivationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device activated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ActivationResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/ServerError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/heartbeat": {
+      "post": {
+        "summary": "Refresh a registered device and rotate its token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/HeartbeatRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Heartbeat accepted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HeartbeatResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/deactivate": {
+      "post": {
+        "summary": "Remove a device registration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AuthenticatedDeviceRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device is no longer registered"
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/api/v1/activate": { "$ref": "#/paths/~1v1~1activate" },
+    "/api/v1/heartbeat": { "$ref": "#/paths/~1v1~1heartbeat" },
+    "/api/v1/deactivate": { "$ref": "#/paths/~1v1~1deactivate" }
+  },
+  "components": {
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "Forbidden": {
+        "description": "License or device rejected",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "NotFound": {
+        "description": "License not found",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "Conflict": {
+        "description": "Device limit reached",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "ServerError": {
+        "description": "Invalid server-side license data",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "RateLimited": {
+        "description": "Rate limited",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["detail"],
+        "properties": {
+          "detail": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+      "DeviceRequest": {
+        "type": "object",
+        "required": ["license_key", "fingerprint"],
+        "properties": {
+          "license_key": { "type": "string", "minLength": 1 },
+          "fingerprint": { "type": "string", "minLength": 1 }
+        }
+      },
+      "AuthenticatedDeviceRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/DeviceRequest" },
+          {
+            "type": "object",
+            "required": ["token"],
+            "properties": { "token": { "type": "string", "minLength": 1 } }
+          }
+        ]
+      },
+      "ActivationRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/DeviceRequest" },
+          {
+            "type": "object",
+            "properties": {
+              "platform": { "type": "string" },
+              "version": { "type": "string" }
+            }
+          }
+        ]
+      },
+      "HeartbeatRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/DeviceRequest" },
+          {
+            "type": "object",
+            "required": ["token"],
+            "properties": {
+              "token": { "type": "string", "minLength": 1 },
+              "platform": { "type": "string" },
+              "version": { "type": "string" },
+              "agent_token_count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        ]
+      },
+      "ActivationResponse": {
+        "type": "object",
+        "required": ["ok", "status", "tier", "token", "devices_used", "devices_max"],
+        "properties": {
+          "ok": { "const": true },
+          "status": { "const": "active" },
+          "tier": {
+            "enum": ["free", "starter", "pro", "team", "enterprise"]
+          },
+          "token": { "type": "string" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time" },
+          "devices_used": { "type": "integer" },
+          "devices_max": { "type": ["integer", "null"] }
+        }
+      },
+      "HeartbeatResponse": {
+        "type": "object",
+        "required": ["ok", "status", "tier", "token"],
+        "properties": {
+          "ok": { "const": true },
+          "status": { "const": "active" },
+          "tier": {
+            "enum": ["free", "starter", "pro", "team", "enterprise"]
+          },
+          "token": { "type": "string" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      }
+    }
+  }
+}

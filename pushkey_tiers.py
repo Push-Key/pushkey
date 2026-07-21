@@ -68,6 +68,7 @@ def save_token(data: dict) -> None:
 
 
 def _server_post(path: str, payload: dict, timeout: int = 8) -> dict | None:
+    import urllib.error
     try:
         import urllib.request
         url = f"{_s.ACTIVATION_SERVER.rstrip('/')}{path}"
@@ -77,19 +78,29 @@ def _server_post(path: str, payload: dict, timeout: int = 8) -> dict | None:
                                      method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            data = json.loads(exc.read())
+        except Exception:
+            data = {}
+        detail = data.get("detail") or data.get("error") or f"Server rejected request ({exc.code})"
+        if isinstance(detail, dict):
+            code = detail.get("code", "")
+            message = detail.get("message", "Server rejected request")
+        else:
+            code, message = data.get("code", ""), str(detail)
+        return {"ok": False, "error": message, "detail": message, "code": code, "status_code": exc.code}
     except Exception:
         return None
 
 
-def server_activate(license_key: str, tier: str, email: str = "") -> tuple[bool, str, dict]:
+def server_activate(license_key: str, tier: str = "", email: str = "") -> tuple[bool, str, dict]:
     """Call /v1/activate. Returns (ok, message, response_dict)."""
     import platform as _pl
     resp = _server_post("/v1/activate", {
         "license_key": license_key,
         "fingerprint": get_machine_fingerprint(),
-        "tier":        tier,
         "platform":    f"{_pl.system()} {_pl.release()}",
-        "email":       email,
     })
     if resp is None:
         return False, "Could not reach activation server. Check your internet connection.", {}
@@ -120,11 +131,58 @@ def server_heartbeat(license_key: str) -> dict | None:
 
 def server_deactivate(license_key: str) -> bool:
     """Call /v1/deactivate. Returns True on success."""
+    token = load_token()
     resp = _server_post("/v1/deactivate", {
         "license_key": license_key,
         "fingerprint": get_machine_fingerprint(),
+        "token": token.get("token", "") if token else "",
     })
     return bool(resp and resp.get("ok"))
+
+
+def _validated_success_response(resp: dict) -> tuple[dict | None, str]:
+    """Validate authoritative fields before replacing a known-good local state."""
+    tier = resp.get("tier")
+    if tier not in _s.TIERS:
+        return None, "Activation server returned an invalid tier"
+    if resp.get("status") != "active":
+        return None, "Activation server returned a non-active license"
+    token = resp.get("token")
+    if not isinstance(token, str) or not token.strip():
+        return None, "Activation server returned an invalid device token"
+    expiry = resp.get("expires_at")
+    if expiry is not None:
+        if not isinstance(expiry, str) or not expiry.strip():
+            return None, "Activation server returned an invalid expiry"
+        try:
+            datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        except ValueError:
+            return None, "Activation server returned an invalid expiry"
+    return resp, ""
+
+
+def _persist_license_and_token(license_data: dict, token_data: dict) -> bool:
+    """Write both encrypted files or restore the exact prior on-disk state."""
+    global _LICENSE_CACHE
+    old_license = _s.LICENSE_FILE.read_bytes() if _s.LICENSE_FILE.exists() else None
+    old_token = _s.TOKEN_FILE.read_bytes() if _s.TOKEN_FILE.exists() else None
+    old_cache = dict(_LICENSE_CACHE) if _LICENSE_CACHE is not None else None
+    try:
+        save_license(license_data)
+        save_token(token_data)
+        return True
+    except Exception:
+        _s.ensure_vault_dir()
+        if old_license is None:
+            _s.LICENSE_FILE.unlink(missing_ok=True)
+        else:
+            _s.LICENSE_FILE.write_bytes(old_license)
+        if old_token is None:
+            _s.TOKEN_FILE.unlink(missing_ok=True)
+        else:
+            _s.TOKEN_FILE.write_bytes(old_token)
+        _LICENSE_CACHE = old_cache
+        return False
 
 
 def maybe_heartbeat() -> None:
@@ -147,12 +205,39 @@ def maybe_heartbeat() -> None:
             except Exception:
                 pass
     resp = server_heartbeat(license_key)
+    if resp and not resp.get("code") and resp.get("status_code") == 403:
+        message = str(resp.get("error") or resp.get("detail") or "").lower()
+        if "revoked" in message:
+            resp["code"] = "license_revoked"
+        elif "expired" in message:
+            resp["code"] = "license_expired"
     if resp and resp.get("ok"):
-        save_token({
+        validated, _error = _validated_success_response(resp)
+        if validated is None:
+            return
+        updated_license = {
+            **lic,
+            "tier": resp["tier"],
+            "expires": resp.get("expires_at"),
+            "lifetime": resp.get("expires_at") is None,
+            "status": resp.get("status", "active"),
+        }
+        if not _persist_license_and_token(updated_license, {
             "token":        resp["token"],
             "tier":         resp["tier"],
             "refreshed_at": now.isoformat(),
-        })
+        }):
+            return
+        return
+    if resp and resp.get("code") in ("license_revoked", "license_expired"):
+        lic.update({"tier": "free", "status": "revoked" if resp["code"] == "license_revoked" else "expired"})
+        save_license(lic)
+        return
+    if resp and resp.get("code") in ("token_expired", "device_unregistered", "license_not_found"):
+        if _s.TOKEN_FILE.exists():
+            _s.TOKEN_FILE.unlink(missing_ok=True)
+        lic.update({"tier": "free", "status": "reactivation_required"})
+        save_license(lic)
         return
     if token:
         refreshed_at = token.get("refreshed_at")
@@ -238,58 +323,40 @@ def within_limit(resource: str, current_count: int) -> bool:
 
 def activate_license(license_key: str) -> tuple[bool, str]:
     """
-    Validate and activate a license key.
-    Format: TIER-XXXXXXXX-XXXXXXXX-XXXXXXXX (base32 encoded payload + checksum)
+    Activate an opaque license key against the authoritative server.
     Returns (success, message).
     """
     try:
-        parts = license_key.strip().upper().split("-")
-        if len(parts) < 2:
+        normalized = license_key.strip().upper()
+        if len(normalized) < 8 or "-" not in normalized:
             return False, "Invalid license key format"
-        tier_code = parts[0].lower()
-        tier_map = {"free": "free", "strt": "starter", "pro": "pro",
-                    "team": "team", "ent": "enterprise",
-                    "ltdp": "pro", "ltdt": "team"}
-        tier = tier_map.get(tier_code)
-        if not tier:
-            return False, f"Unknown tier code: {tier_code}"
-        payload_parts = parts[1:-1]
-        checksum = parts[-1]
-        expected = hashlib.sha256("-".join(payload_parts).encode()).hexdigest()[:8].upper()
-        if checksum != expected:
-            return False, "License key checksum invalid — check for typos"
-        import base64 as _b64
-        try:
-            raw_payload = _b64.b32decode("".join(payload_parts) + "=" * 4)
-            payload = json.loads(raw_payload)
-        except Exception:
-            payload = {}
-        expiry = payload.get("expires")
-        seats = payload.get("seats", 1)
-        email = payload.get("email", "")
-        ok, err_msg, srv = server_activate(license_key.strip(), tier, email)
+        ok, err_msg, srv = server_activate(normalized)
         if not ok:
             return False, err_msg
-        data = {
-            "tier": tier,
-            "license_key": license_key.strip(),
+        srv, validation_error = _validated_success_response(srv)
+        if srv is None:
+            return False, validation_error
+        authoritative_tier = srv["tier"]
+        authoritative_expiry = srv.get("expires_at")
+        save_license({
+            "tier": authoritative_tier,
+            "license_key": normalized,
             "activated": datetime.now().isoformat(),
-            "expires": expiry,
-            "seats": seats,
-            "email": email,
-            "lifetime": expiry is None,
-        }
-        save_license(data)
+            "expires": authoritative_expiry,
+            "lifetime": authoritative_expiry is None,
+            "status": srv.get("status", "active"),
+        })
         save_token({
-            "token":        srv.get("token", ""),
-            "tier":         tier,
+            "token": srv.get("token", ""),
+            "tier": authoritative_tier,
             "refreshed_at": datetime.now().isoformat(),
         })
-        log_event(f"license activated: {tier} {'(lifetime)' if not expiry else expiry}")
+        log_event(f"license activated: {authoritative_tier}")
         devices_used = srv.get("devices_used", 1)
         devices_max = srv.get("devices_max")
         slot_msg = f" ({devices_used}/{devices_max} devices)" if devices_max else ""
-        return True, f"✅ {_s.TIERS[tier]['emoji']} {_s.TIERS[tier]['label']} license activated!{slot_msg}"
+        return True, f"License activated: {_s.TIERS[authoritative_tier]['label']}{slot_msg}"
+
     except Exception as e:
         return False, f"Activation error: {e}"
 

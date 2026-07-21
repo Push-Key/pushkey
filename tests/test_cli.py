@@ -12,6 +12,7 @@ import pytest
 import pushkey_shared
 import pushkey_cli as cli
 from pushkey_vault import save_vault
+from pushkey_crypto import _V3_MAGIC, decrypt_data_v3
 
 
 PASSWORD = "cli-test-password"
@@ -49,6 +50,68 @@ def _vault_with_key():
             "rotation_count": 0,
         }
     }
+
+
+def test_cmd_init_noninteractive_creates_v3_without_printing_recovery(monkeypatch, capsys, tmp_path):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+
+    recovery_file = tmp_path / "recovery.txt"
+    cli._cmd_init(str(recovery_file))
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    assert raw.startswith(_V3_MAGIC)
+    output = capsys.readouterr().out
+    recovery = recovery_file.read_text().strip()
+    assert recovery not in output
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    assert json.loads(plaintext)["keys"] == {}
+
+
+def test_cmd_init_interactive_requires_recovery_confirmation(monkeypatch):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+
+    with pytest.raises(SystemExit):
+        cli._cmd_init()
+
+    assert not pushkey_shared.VAULT_FILE.exists()
+
+
+def test_cmd_init_noninteractive_requires_recovery_file(monkeypatch, capsys):
+    answers = iter(["new-password", "new-password"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        cli._cmd_init()
+    assert exc.value.code == 2
+    assert "PUSH-" not in capsys.readouterr().out
+    assert not pushkey_shared.VAULT_FILE.exists()
+
+
+def test_v3_cli_mutations_preserve_recovery_unlock(tmp_path):
+    from pushkey_crypto import generate_recovery_code, decrypt_data_v3
+    recovery = generate_recovery_code()
+    save_vault({}, PASSWORD, recovery_code=recovery)
+    vault, vault_key = cli.load_vault(PASSWORD)
+
+    cli.cmd_add(Namespace(name="A", value="one", notes=None), vault, PASSWORD, vault_key)
+    cli.cmd_rotate(Namespace(name="A", new_value="two"), vault, PASSWORD, vault_key)
+    cli.cmd_add(Namespace(name="B", value="three", notes=None), vault, PASSWORD, vault_key)
+    cli.cmd_delete(Namespace(name="B", yes=True), vault, PASSWORD, vault_key)
+    env_file = tmp_path / "input.env"
+    env_file.write_text("C=four\n")
+    cli.cmd_import(Namespace(file=str(env_file)), vault, PASSWORD, vault_key)
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    data = json.loads(plaintext)["keys"]
+    assert data["A"]["value"] == "two"
+    assert data["C"]["value"] == "four"
+    assert "B" not in data
 
 
 # ── add ──────────────────────────────────────────────────────────────────────
@@ -293,3 +356,30 @@ def test_cmd_inject_updates_existing_env(tmp_path, capsys):
     content = env_file.read_text()
     assert "OPENAI_API_KEY=sk-test123" in content
     assert "OTHER=keep" in content
+def test_frozen_app_launcher_reexecutes_binary(monkeypatch):
+    import pushkey_cli as cli
+
+    calls = {}
+
+    class Process:
+        def __init__(self, command, env):
+            calls["command"] = command
+            calls["env"] = env
+
+        def kill(self):
+            pass
+
+    class Response:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_port_in_use", lambda _port: False)
+    monkeypatch.setattr(cli.subprocess, "Popen", Process)
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(cli.webbrowser, "open", lambda _url: True)
+    monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
+
+    cli._cmd_app(blocking=False)
+
+    assert calls["command"] == [cli.sys.executable, "--local-api-server"]
+    assert calls["env"]["PUSHKEY_PARENT_PID"] == str(cli.os.getpid())
