@@ -3,27 +3,29 @@
 **Updated:** 2026-07-20
 **Active branch:** `feat/agentic-auth-foundation`
 **Baseline branch:** `feat/pushkey-app` at `5ef2f81`
-**Last verified implementation commit:** `5b1956f`
+**Last verified implementation commit:** `2881eca`
 
 ## Current Position
 
 | Measure | Status |
 |---|---|
-| Verified production checklist | 23/340, 6.8% |
+| Verified production checklist | 27/340, 7.9% |
 | Completed production phase gates | 1/13, 7.7% |
 | Phase 0 baseline | Complete |
-| CP1 health sidecar design | Complete and approved |
-| CP1 health sidecar implementation | In progress (Tasks 1-5 complete and compliance-closed; Task 6 next) |
+| CP1 health sidecar | **Complete** |
 | Agentic authorization design | Complete and approved |
 | Agentic authorization implementation plan | Complete and approved |
-| Authorization implementation | Not started |
+| Authorization implementation | Not started (CP1 prerequisite satisfied) |
 
 ## Verified Baseline
 
-- Python suite: 334 passed, 1 justified platform skip.
-- Both Next.js production builds passed at the Phase 0 baseline.
+- Python suite: 441 passed, 10 platform skips (CP1 final full suite).
+- VS Code contract: 10 passed.
+- Browser contract: 6 passed.
+- Packaging import/build-declaration: 4 passed.
+- Both Next.js production builds passed.
+- CLI executable built and verified.
 - Baseline tag: `production-readiness-baseline-20260720`.
-- Worktree baseline on this branch passed: 334 passed, 1 skipped.
 
 ## Approved Specifications
 
@@ -37,13 +39,11 @@
 
 ## Immediate Next Gate
 
-Execute CP1, the versioned `health.json` v1 sidecar contract:
+CP1 complete. Begin CP2, roadmap accounting and Agentic Vision tracking:
 
-1. CP1 Tasks 1-2 complete: shared locking and strict v1 schema verified.
-2. CP1 Task 3 implementation and boundary fixes through `dda86bd` are complete and accepted.
-3. Continue CP1 Task 6: update the browser extension consumer for the strict v1 contract.
-4. Verify schema, privacy, concurrency, filesystem safety, browser rendering, packaging, and full regression suites.
-5. Record CP1 evidence in `docs/PRODUCTION_READINESS_PLAN.md`.
+1. Update the production readiness plan with CP2 scope and tasks.
+2. Record permission catalog and Agentic Vision tracking requirements.
+3. CP2 is documentation-only and does not modify code.
 
 ## Remaining Authorization Gates
 
@@ -59,12 +59,11 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 ## Resume Procedure
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
-2. Continue CP1 Task 6 after the accepted VS Code consumer implementation.
-3. Tasks 1-5 implementation commits include `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, `c65dac9`, `8b6f8d2`, `4ea91ac`, `d4f8367`, `0a1d63b`, `8ece4e5`, `a699ec9`, `dda86bd`, `6de2810`, `3ded3db`, `36cb9f4`, `f0d3afb`, and `5b1956f`.
+2. CP1 is complete. Begin CP2 (roadmap accounting, Agentic Vision tracking).
+3. CP1 commit history includes `1641886` through `2881eca` (Tasks 1-8).
 4. Use a fresh implementation subagent and two independent reviews per completed task.
-5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
-6. Do not begin authorization implementation until CP1 is complete.
-7. Preserve the required Git identity: `pushkeydev <pushkeydev@gmail.com>`.
+5. Do not begin authorization implementation until CP2 completes.
+6. Preserve the required Git identity: `pushkeydev <pushkeydev@gmail.com>`.
 
 ## Task 3 Boundary Follow-up
 
