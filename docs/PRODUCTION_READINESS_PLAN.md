@@ -298,7 +298,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ## Verification
 
 - [x] Import a seeded legacy dataset and reconcile record counts and hashes.
-- [ ] Run concurrent license, contact, and vault writes.
+- [x] Run concurrent license, contact, and vault writes.
 - [x] Prove stale revisions cannot overwrite newer vaults.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
 - [ ] Load-test expected beta and launch concurrency.
@@ -332,8 +332,8 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add HSTS, CSP, frame, referrer, and content-type headers.
 - [x] Add dependency/readiness health checks.
 - [x] Add idempotency keys for retryable mutations.
-- [ ] Add SMTP retry, timeout, and dead-letter behavior.
-- [ ] Add abuse detection and operational alerts.
+- [x] Add SMTP retry, timeout, and dead-letter behavior.
+- [x] Add abuse detection and operational alerts.
 - [ ] Add security regression tests across multiple workers/instances.
 
 ## Exit Gate

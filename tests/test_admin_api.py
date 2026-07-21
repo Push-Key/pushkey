@@ -602,6 +602,58 @@ def test_test_email_no_smtp(client):
     assert "smtp" in body["reason"].lower() or "configured" in body["reason"].lower()
 
 
+def test_email_sender_retries_and_dead_letters_without_body(app_module, monkeypatch):
+    class FailingSMTP:
+        attempts = 0
+
+        def __init__(self, host, port, timeout=None):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def starttls(self):
+            return None
+
+        def login(self, *_):
+            return None
+
+        def sendmail(self, *_):
+            FailingSMTP.attempts += 1
+            raise OSError("smtp down")
+
+    monkeypatch.setattr(app_module, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(app_module, "SMTP_USER", "smtp-user")
+    monkeypatch.setattr(app_module, "SMTP_PASS", "smtp-pass")
+    monkeypatch.setattr(app_module, "FROM_EMAIL", "from@example.com")
+    monkeypatch.setattr(app_module, "SMTP_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(app_module, "SMTP_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(app_module.smtplib, "SMTP", FailingSMTP)
+
+    result = app_module._send_email_html(
+        "to@example.com",
+        "Subject",
+        "<p>secret-html-body</p>",
+        "secret-plain-body",
+    )
+
+    assert result["sent"] is False
+    assert result["reason"] == "dead_lettered"
+    assert FailingSMTP.attempts == 2
+    dead_letters = list(app_module.DEAD_LETTER_DIR.glob("email-*.json"))
+    assert len(dead_letters) == 1
+    text = dead_letters[0].read_text(encoding="utf-8")
+    assert "to@example.com" in text
+    assert "Subject" in text
+    assert "secret-html-body" not in text
+    assert "secret-plain-body" not in text
+
+
 # ── License-CRM E2E flow ─────────────────────────────────────────
 def test_license_crm_e2e_issue_to_contact_to_invite(client):
     """End-to-end: issue trial → appears in /contacts → update stage → resend invite."""
@@ -713,6 +765,22 @@ def test_auth_login_rate_limit(low_rate_limit_app):
     assert r3.status_code == 429
     assert r3.headers["retry-after"] == str(low_rate_limit_app.AUTH_RATE_WINDOW_SEC)
     assert "try again" in r3.json()["detail"].lower()
+
+
+def test_rate_limit_abuse_alert_is_recorded_without_secret_body(low_rate_limit_app):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(low_rate_limit_app.app)
+    body = {"email": "u@x.com", "password": "secret-password"}
+    client.post("/api/v1/auth/login", json=body)
+    client.post("/api/v1/auth/login", json=body)
+    r3 = client.post("/api/v1/auth/login", json=body)
+
+    assert r3.status_code == 429
+    alerts = low_rate_limit_app.app.state.alerts
+    assert alerts[-1]["type"] == "rate_limit"
+    assert alerts[-1]["path"] == "/api/v1/auth/login"
+    assert "secret-password" not in json.dumps(alerts[-1])
 
 
 def test_auth_register_rate_limit_shares_bucket_with_login(low_rate_limit_app):

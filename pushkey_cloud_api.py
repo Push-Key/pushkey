@@ -19,6 +19,7 @@ import html as _html
 import json
 import os
 import secrets
+import smtplib
 import threading
 import time
 import base64
@@ -108,6 +109,7 @@ app.state.metrics = {
     "routes": Counter(),
 }
 app.state.idempotency_cache = {}
+app.state.alerts = deque(maxlen=1000)
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
@@ -131,6 +133,16 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
         elif path.startswith("/api/portal"):
             retry_after = PORTAL_RATE_WINDOW_SEC
         headers.setdefault("Retry-After", str(retry_after))
+        app.state.alerts.append(
+            {
+                "ts": _utcnow().isoformat(),
+                "type": "rate_limit",
+                "path": path,
+                "method": request.method,
+                "client": request.client.host if request.client else "unknown",
+                "request_id": request.headers.get("X-Request-ID", ""),
+            }
+        )
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=headers)
 
 
@@ -229,6 +241,7 @@ if DEVICE_TOKEN_TTL_DAYS <= 0:
 DEVICE_TOKEN_VERSION = 1
 DEVICE_TOKEN_AUDIENCE = "pushkey-device-license-v1"
 _LICENSE_LOCK = threading.RLock()
+_ADMIN_SESSION_LOCK = threading.RLock()
 
 
 # ── User store (flat JSON, fine for <1000 users) ─────────────────
@@ -974,13 +987,20 @@ def _save_admins(data: dict) -> None:
 
 
 def _load_admin_sessions() -> dict:
-    if not ADMIN_SESSIONS_FILE.exists():
-        return {}
-    return json.loads(ADMIN_SESSIONS_FILE.read_text())
+    with _ADMIN_SESSION_LOCK:
+        if not ADMIN_SESSIONS_FILE.exists():
+            return {}
+        text = ADMIN_SESSIONS_FILE.read_text()
+        if not text.strip():
+            return {}
+        return json.loads(text)
 
 
 def _save_admin_sessions(data: dict) -> None:
-    ADMIN_SESSIONS_FILE.write_text(json.dumps(data, indent=2))
+    with _ADMIN_SESSION_LOCK:
+        tmp = ADMIN_SESSIONS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, ADMIN_SESSIONS_FILE)
 
 
 def _revoke_admin_sessions(admin_id: str, *, except_hash: str | None = None) -> int:
@@ -1321,6 +1341,11 @@ SMTP_USER  = os.environ.get("SMTP_USER", "")
 SMTP_PASS  = os.environ.get("SMTP_PASS", "")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 APP_URL    = os.environ.get("APP_URL", "https://pushkey.app")
+SMTP_TIMEOUT_SEC = float(os.environ.get("SMTP_TIMEOUT_SEC", "10"))
+SMTP_RETRY_ATTEMPTS = int(os.environ.get("SMTP_RETRY_ATTEMPTS", "3"))
+SMTP_RETRY_DELAY_SEC = float(os.environ.get("SMTP_RETRY_DELAY_SEC", "0.25"))
+DEAD_LETTER_DIR = DATA_DIR / "dead-letter"
+DEAD_LETTER_DIR.mkdir(exist_ok=True)
 
 
 def _email_html(title: str, preview: str, body_html: str) -> str:
@@ -1381,7 +1406,6 @@ def _email_html(title: str, preview: str, body_html: str) -> str:
 def _send_email_html(to: str, subject: str, html: str, plain: str) -> dict:
     if not SMTP_HOST:
         return {"sent": False, "reason": "smtp_not_configured"}
-    import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     msg = MIMEMultipart("alternative")
@@ -1390,14 +1414,30 @@ def _send_email_html(to: str, subject: str, html: str, plain: str) -> dict:
     msg["To"]      = to
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html,  "html"))
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(FROM_EMAIL, [to], msg.as_string())
-        return {"sent": True}
-    except Exception as exc:
-        return {"sent": False, "reason": str(exc)}
+    last_error = ""
+    for attempt in range(1, max(1, SMTP_RETRY_ATTEMPTS) + 1):
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SEC) as s:
+                s.starttls()
+                s.login(SMTP_USER, SMTP_PASS)
+                s.sendmail(FROM_EMAIL, [to], msg.as_string())
+            return {"sent": True, "attempts": attempt}
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < max(1, SMTP_RETRY_ATTEMPTS) and SMTP_RETRY_DELAY_SEC > 0:
+                time.sleep(SMTP_RETRY_DELAY_SEC)
+
+    dead_letter = {
+        "ts": _utcnow().isoformat(),
+        "to": to,
+        "subject": subject,
+        "smtp_host": SMTP_HOST,
+        "attempts": max(1, SMTP_RETRY_ATTEMPTS),
+        "error": last_error,
+    }
+    target = DEAD_LETTER_DIR / f"email-{int(time.time() * 1000)}-{secrets.token_hex(4)}.json"
+    target.write_text(json.dumps(dead_letter, indent=2), encoding="utf-8")
+    return {"sent": False, "reason": "dead_lettered", "attempts": max(1, SMTP_RETRY_ATTEMPTS)}
 
 
 def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at: str | None) -> dict:

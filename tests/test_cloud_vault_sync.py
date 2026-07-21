@@ -1,5 +1,6 @@
 import importlib
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -133,3 +134,73 @@ def test_user_token_decode_accepts_previous_signing_key_during_rotation(app_modu
     app_module.TOKEN_SIGNING_KEYS[:] = [app_module.SECRET_KEY, "previous-secret"]
 
     assert app_module._decode_token(token) == "user@example.com"
+
+
+def test_concurrent_license_contact_and_vault_writes_do_not_crash(app_module):
+    admin_client = TestClient(app_module.app)
+    login = admin_client.post(
+        "/api/admin/auth/login",
+        json={"email": "admin@example.com", "password": "admin-pass-123"},
+    )
+    assert login.status_code == 200
+    admin_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+
+    user_client = TestClient(app_module.app)
+    assert user_client.post(
+        "/api/v1/auth/register",
+        json={"email": "concurrent@example.com", "password": "correct horse battery staple"},
+    ).status_code == 200
+    user_token = user_client.post(
+        "/api/v1/auth/login",
+        json={"email": "concurrent@example.com", "password": "correct horse battery staple"},
+    ).json()["token"]
+    user_headers = {"Authorization": f"Bearer {user_token}"}
+    assert admin_client.post(
+        "/api/admin/licenses/issue",
+        headers=admin_headers,
+        json={"tier": "pro", "email": "lead-1@example.com", "send_email": False},
+    ).status_code == 200
+    assert admin_client.post(
+        "/api/admin/licenses/issue",
+        headers=admin_headers,
+        json={"tier": "pro", "email": "lead-2@example.com", "send_email": False},
+    ).status_code == 200
+
+    def write_license(index):
+        return admin_client.post(
+            "/api/admin/licenses/issue",
+            headers=admin_headers,
+            json={
+                "tier": "pro",
+                "email": f"lead-{index}@example.com",
+                "send_email": False,
+            },
+        ).status_code
+
+    def write_contact(index):
+        return admin_client.patch(
+            f"/api/admin/contacts/lead-{index}@example.com",
+            headers=admin_headers,
+            json={"stage": "qualified"},
+        ).status_code
+
+    def write_vault(index):
+        return user_client.put(
+            "/api/v1/vault",
+            headers=user_headers,
+            content=f"encrypted-{index}".encode(),
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        statuses = list(pool.map(lambda fn: fn(), [
+            lambda: write_license(3),
+            lambda: write_license(4),
+            lambda: write_contact(1),
+            lambda: write_contact(2),
+            lambda: write_vault(1),
+            lambda: write_vault(2),
+        ]))
+
+    assert all(status in {200, 409} for status in statuses)
+    assert admin_client.get("/api/admin/contacts", headers=admin_headers).status_code == 200
+    assert user_client.get("/api/v1/vault", headers=user_headers).status_code == 200
