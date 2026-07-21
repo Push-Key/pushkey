@@ -102,6 +102,8 @@ ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
 ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
 ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"))
 ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
+ADMIN_LOGIN_LOCKOUT_FAILURES = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES", "3"))
+ADMIN_LOGIN_LOCKOUT_MIN = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN", "15"))
 ADMIN_ROLE_PERMISSIONS = {
     "viewer": {"read"},
     "support": {"read", "support"},
@@ -111,6 +113,10 @@ ADMIN_ROLE_PERMISSIONS = {
 }
 if ADMIN_SESSION_TTL_MIN <= 0:
     raise RuntimeError("PUSHKEY_ADMIN_SESSION_TTL_MIN must be greater than zero")
+if ADMIN_LOGIN_LOCKOUT_FAILURES <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES must be greater than zero")
+if ADMIN_LOGIN_LOCKOUT_MIN <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN must be greater than zero")
 if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
     if _DEV_MODE:
         ADMIN_BOOTSTRAP_EMAIL = ADMIN_BOOTSTRAP_EMAIL or "admin@localhost"
@@ -768,12 +774,60 @@ def _save_admin_sessions(data: dict) -> None:
     ADMIN_SESSIONS_FILE.write_text(json.dumps(data, indent=2))
 
 
+def _revoke_admin_sessions(admin_id: str, *, except_hash: str | None = None) -> int:
+    sessions = _load_admin_sessions()
+    revoked = 0
+    for token_hash, session in sessions.items():
+        if token_hash == except_hash:
+            continue
+        if session.get("admin_id") == admin_id and not session.get("revoked"):
+            session["revoked"] = True
+            revoked += 1
+    if revoked:
+        _save_admin_sessions(sessions)
+    return revoked
+
+
 def _admin_by_email(email: str) -> dict | None:
     email = email.strip().lower()
     for admin in _load_admins().values():
         if admin.get("email", "").lower() == email:
             return admin
     return None
+
+
+def _admin_is_locked(admin: dict) -> bool:
+    until = admin.get("lockout_until") or ""
+    return bool(until and until > _utcnow().isoformat())
+
+
+def _record_failed_admin_login(admin: dict, request: Request) -> None:
+    admins = _load_admins()
+    current = admins.get(admin["id"])
+    if not current:
+        return
+    failures = int(current.get("failed_login_count", 0)) + 1
+    current["failed_login_count"] = failures
+    if failures >= ADMIN_LOGIN_LOCKOUT_FAILURES:
+        current["lockout_until"] = (_utcnow() + timedelta(minutes=ADMIN_LOGIN_LOCKOUT_MIN)).isoformat()
+        _log_audit(
+            "admin_login_lockout",
+            current["id"],
+            {"failures": failures},
+            actor=current,
+            request=request,
+        )
+    _save_admins(admins)
+
+
+def _reset_admin_login_failures(admin: dict) -> None:
+    admins = _load_admins()
+    current = admins.get(admin["id"])
+    if not current:
+        return
+    current["failed_login_count"] = 0
+    current["lockout_until"] = ""
+    _save_admins(admins)
 
 
 def _totp_code(secret: str, counter: int) -> str:
@@ -898,10 +952,16 @@ async def admin_login(request: Request):
     password = body.get("password", "")
     mfa_code = body.get("mfa_code", "")
     admin = _admin_by_email(email) if email else None
+    if admin and _admin_is_locked(admin):
+        raise HTTPException(423, "Admin account locked")
     if not admin or admin.get("disabled") or not pwd_ctx.verify(password, admin["hash"]):
+        if admin and not admin.get("disabled"):
+            _record_failed_admin_login(admin, request)
         raise HTTPException(401, "Invalid credentials")
     if not _verify_totp(admin.get("mfa_secret", ""), mfa_code):
+        _record_failed_admin_login(admin, request)
         raise HTTPException(401, "Invalid credentials")
+    _reset_admin_login_failures(admin)
     token, csrf = _issue_admin_session(admin, request)
     response = JSONResponse({
         "ok": True,
@@ -931,9 +991,47 @@ async def admin_logout(
     return {"ok": True}
 
 
+@app.post("/api/admin/auth/refresh")
+async def admin_refresh(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+    pk_admin_session: str = Cookie(default=""),
+):
+    old_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    if old_hash in sessions:
+        sessions[old_hash]["revoked"] = True
+        _save_admin_sessions(sessions)
+    token, csrf = _issue_admin_session(actor, request)
+    response = JSONResponse({"ok": True, "csrf_token": csrf, "admin": actor})
+    _set_admin_cookies(response, token, csrf)
+    _log_audit("admin_session_refresh", actor["id"], actor=actor, request=request)
+    return response
+
+
 @app.get("/api/admin/auth/me")
 async def admin_me(actor: dict = Depends(_require_admin)):
     return {"admin": actor}
+
+
+@app.post("/api/admin/admins/{admin_id}/sessions/revoke")
+async def admin_revoke_sessions(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    if admin_id not in admins:
+        raise HTTPException(404, "Admin not found")
+    revoked = _revoke_admin_sessions(admin_id)
+    _log_audit(
+        "admin_sessions_revoke",
+        admin_id,
+        {"revoked": revoked, "target_email": admins[admin_id].get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin_id": admin_id, "revoked": revoked}
 
 
 SMTP_HOST  = os.environ.get("SMTP_HOST", "")

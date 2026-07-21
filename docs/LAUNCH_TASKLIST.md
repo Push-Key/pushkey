@@ -54,7 +54,8 @@ The 5-task dependency chain lives in [CONSECUTIVE_LAUNCH_TASKS.md](CONSECUTIVE_L
 - [ ] Add individual admin-account lifecycle endpoints.
 - [x] Add least-privilege roles and route permissions.
 - [ ] Add MFA enrollment, recovery codes, and reset flow.
-- [ ] Add session refresh rotation and broad server-side revocation.
+- [x] Add session refresh rotation and broad server-side revocation.
+- [x] Add login throttling, lockout policy, and alert audit events.
 - [x] Record actor ID, role, request ID, IP, and target in admin audit events.
 - [x] Add tests for role boundaries, expired sessions, revoked sessions, disabled admins, CSRF, MFA, and enumeration.
 

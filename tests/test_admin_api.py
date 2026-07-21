@@ -153,6 +153,82 @@ def test_admin_mutation_audit_includes_actor_and_request(client, app_module):
     assert event["actor_role"] == "billing"
 
 
+def test_admin_refresh_rotates_session_and_csrf(client, app_module):
+    old_sessions = app_module._load_admin_sessions()
+    assert len(old_sessions) == 1
+    old_hash = next(iter(old_sessions))
+    old_admin_id = old_sessions[old_hash]["admin_id"]
+    old_csrf = ADMIN["X-CSRF-Token"]
+
+    r = client.post("/api/admin/auth/refresh", headers=ADMIN)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["csrf_token"] != old_csrf
+    sessions = app_module._load_admin_sessions()
+    assert sessions[old_hash]["revoked"] is True
+    live_sessions = [s for s in sessions.values() if not s.get("revoked")]
+    assert len(live_sessions) == 1
+    assert live_sessions[0]["admin_id"] == old_admin_id
+    ADMIN["X-CSRF-Token"] = body["csrf_token"]
+    assert client.get("/api/admin/stats", headers=ADMIN).status_code == 200
+
+
+def test_owner_can_revoke_admin_sessions(client, app_module):
+    from fastapi.testclient import TestClient
+
+    target_id = _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing_client = TestClient(app_module.app)
+    billing = _login_as(billing_client, "billing@example.com", "billing-pass-123")
+    assert billing_client.get("/api/admin/stats", headers=billing).status_code == 200
+
+    r = client.post(f"/api/admin/admins/{target_id}/sessions/revoke", headers=ADMIN)
+
+    assert r.status_code == 200
+    assert r.json()["revoked"] >= 1
+    assert billing_client.get("/api/admin/stats", headers=billing).status_code == 401
+
+
+def test_admin_login_lockout_after_repeated_failures(client, app_module):
+    for _ in range(app_module.ADMIN_LOGIN_LOCKOUT_FAILURES):
+        r = client.post("/api/admin/auth/login", json={
+            "email": "admin@example.com",
+            "password": "wrong-password",
+        })
+        assert r.status_code == 401
+
+    locked = client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    })
+
+    assert locked.status_code == 423
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin["failed_login_count"] == app_module.ADMIN_LOGIN_LOCKOUT_FAILURES
+    assert admin["lockout_until"] > app_module._utcnow().isoformat()
+    audit = app_module._load_audit()
+    assert any(e["action"] == "admin_login_lockout" for e in audit)
+
+
+def test_admin_successful_login_resets_failed_login_state(client, app_module):
+    admin = app_module._admin_by_email("admin@example.com")
+    admins = app_module._load_admins()
+    admins[admin["id"]]["failed_login_count"] = 2
+    admins[admin["id"]]["lockout_until"] = ""
+    app_module._save_admins(admins)
+
+    r = client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    })
+
+    assert r.status_code == 200
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin.get("failed_login_count", 0) == 0
+    assert admin.get("lockout_until", "") == ""
+
+
 # ── License generation ───────────────────────────────────────────
 def test_generate_license(client):
     r = client.post("/api/admin/licenses/generate",

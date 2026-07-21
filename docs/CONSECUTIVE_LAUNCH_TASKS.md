@@ -62,7 +62,7 @@ authoritative.
 - [x] Add individual admin-account lifecycle.
 - [x] Add roles and route permissions.
 - [ ] Add MFA enrollment and recovery codes.
-- [ ] Add refresh rotation and broad session revocation.
+- [x] Add refresh rotation and broad session revocation.
 - [x] Add actor/request attribution to every admin mutation audit event.
 - [x] Add tests for roles, disabled admins, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
 

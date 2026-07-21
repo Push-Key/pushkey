@@ -247,12 +247,12 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add least-privilege roles and route permissions.
 - [ ] Add MFA enrollment, verification, recovery codes, and reset procedures.
 - [x] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
-- [ ] Add refresh rotation and server-side session revocation.
+- [x] Add refresh rotation and server-side session revocation.
 - [x] Add CSRF protection for cookie-authenticated mutations.
 - [x] Remove `X-Admin-Secret` from public browser requests.
 - [x] Remove admin secrets from `localStorage`.
 - [x] Keep a break-glass credential only in the server secret store, not the UI.
-- [ ] Add login throttling, lockout policy, and alerting.
+- [x] Add login throttling, lockout policy, and alerting.
 - [x] Record actor ID, role, request ID, IP, and target in audit events.
 - [x] Add admin account provisioning and offboarding procedures.
 - [x] Add tests for role boundaries, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
