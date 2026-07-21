@@ -98,6 +98,41 @@ CREATE INDEX IF NOT EXISTS idx_audits_target ON audits(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_vault_revisions_user_created ON vault_revisions(user_id, created_at);
 """,
     ),
+    Migration(
+        "003_transactional_revision_outbox",
+        """
+CREATE TABLE IF NOT EXISTS vault_revision_transactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    object_key TEXT NOT NULL,
+    etag TEXT NOT NULL,
+    previous_etag TEXT,
+    object_sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    idempotency_key TEXT,
+    request_id TEXT,
+    audit_id TEXT,
+    committed_at TEXT NOT NULL,
+    UNIQUE(user_id, revision_number),
+    UNIQUE(user_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id TEXT PRIMARY KEY,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    request_id TEXT,
+    created_at TEXT NOT NULL,
+    dispatched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_vault_revision_transactions_user_commit
+    ON vault_revision_transactions(user_id, committed_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_pending
+    ON outbox_events(dispatched_at, created_at);
+""",
+    ),
 )
 
 

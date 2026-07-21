@@ -35,7 +35,7 @@ without pretending production infrastructure exists.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
 - [ ] Load-test expected beta and launch concurrency.
 - [ ] Add transactional audit/outbox behavior.
-- [ ] Store vault revision metadata transactionally in the migration schema.
+- [x] Store vault revision metadata transactionally in the migration schema.
 - [ ] Add dashboard and alert configuration documents.
 - [ ] Add capacity-test and rollback-drill scripts or runbooks.
 
