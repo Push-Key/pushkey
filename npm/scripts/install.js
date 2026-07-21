@@ -15,9 +15,9 @@ const REPO = 'Push-Key/pushkey';
 const BIN_DIR = join(__dirname, '..', 'bin');
 
 const PLATFORM_MAP = {
-  'win32-x64':   { suffix: 'windows-x64.exe', ext: '.exe' },
-  'darwin-x64':  { suffix: 'macos-x64',       ext: '' },
-  'linux-x64':   { suffix: 'linux-x64',       ext: '' },
+  'win32-x64':   { asset: 'pushkey-windows-x64.exe', ext: '.exe' },
+  'darwin-x64':  { asset: 'pushkey-macos-x64',       ext: '' },
+  'linux-x64':   { asset: 'pushkey-linux-x64',       ext: '' },
   'darwin-arm64': null,
   'linux-arm64':  null,
 };
@@ -64,8 +64,7 @@ async function verifyChecksum(dest, checksumUrl) {
 
 async function main() {
   const target = getTarget();
-  const binaryName = `pushkey-${target.suffix}`;
-  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${binaryName}`;
+  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${target.asset}`;
   const checksumUrl = `${url}.sha256`;
   const dest = join(BIN_DIR, `pushkey${target.ext}`);
 

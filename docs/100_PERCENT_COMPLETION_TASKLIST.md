@@ -109,8 +109,8 @@ Goal: make installation and upgrade predictable for alpha users.
 - [x] Verify executable icons and version resources.
 - [x] Produce supported alpha OS/architecture artifacts.
 - [ ] Test upgrade without vault loss.
-- [ ] Align installer asset names with CI release artifacts.
-- [ ] Verify checksums before installation.
+- [x] Align installer asset names with CI release artifacts.
+- [x] Verify checksums before installation.
 - [x] Fail with a nonzero exit code on unsuccessful installation.
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Document arm64 as supported or unsupported.
@@ -118,7 +118,7 @@ Goal: make installation and upgrade predictable for alpha users.
 - [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 - [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and
   `pushkey app`.
-- [ ] Release assets exactly match the npm download map.
+- [x] Release assets exactly match the npm download map.
 
 Evidence:
 

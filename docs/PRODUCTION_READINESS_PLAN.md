@@ -407,7 +407,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## npm wrapper tasks
 
-- [ ] Align installer asset names with CI release artifacts.
+- [x] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums/signatures before installation.
 - [x] Fail with a nonzero exit code on unsuccessful installation.
 - [x] Handle unsupported OS/architecture explicitly.
@@ -424,7 +424,7 @@ npm pack --dry-run
 ```
 
 - [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
-- [ ] Release assets exactly match the npm download map.
+- [x] Release assets exactly match the npm download map.
 
 ## Exit Gate
 

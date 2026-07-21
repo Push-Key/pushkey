@@ -78,7 +78,7 @@ These are locally testable except code signing.
 - [ ] Verify icons and version resources.
 - [ ] Produce supported OS/architecture artifacts.
 - [ ] Test upgrades without vault loss.
-- [ ] Align installer asset names with CI release artifacts.
+- [x] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums/signatures before installation.
 - [ ] Fail with a nonzero exit code on unsuccessful installation.
 - [ ] Handle unsupported OS/architecture explicitly.
