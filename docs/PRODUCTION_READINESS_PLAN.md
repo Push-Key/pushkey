@@ -334,7 +334,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add idempotency keys for retryable mutations.
 - [x] Add SMTP retry, timeout, and dead-letter behavior.
 - [x] Add abuse detection and operational alerts.
-- [ ] Add security regression tests across multiple workers/instances.
+- [x] Add security regression tests across multiple workers/instances.
 
 ## Exit Gate
 

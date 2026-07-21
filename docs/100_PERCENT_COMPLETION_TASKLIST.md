@@ -78,7 +78,7 @@ unit tests.
   creation, and privacy-safe failures.
 - [x] Add admin journey tests for license, contact, audit, settings, support,
   MFA, disabled admins, expired sessions, revoked sessions, and role boundaries.
-- [ ] Add security regression tests across multiple app instances/workers where
+- [x] Add security regression tests across multiple app instances/workers where
   local execution can simulate it.
 - [x] Run the full Python suite.
 - [x] Run both frontend lint/build pipelines.

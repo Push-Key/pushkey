@@ -1,7 +1,11 @@
 import importlib
 import json
+import os
+import runpy
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -257,3 +261,73 @@ def test_concurrent_license_contact_and_vault_writes_do_not_crash(app_module):
     assert all(status in {200, 409} for status in statuses)
     assert admin_client.get("/api/admin/contacts", headers=admin_headers).status_code == 200
     assert user_client.get("/api/v1/vault", headers=user_headers).status_code == 200
+
+
+def _load_isolated_cloud_module(name: str, data_dir: Path):
+    env = {
+        "PUSHKEY_DATA_DIR": str(data_dir),
+        "PUSHKEY_ADMIN_EMAIL": "admin@example.com",
+        "PUSHKEY_ADMIN_PASSWORD": "admin-pass-123",
+        "PUSHKEY_ADMIN_COOKIE_SECURE": "false",
+        "PUSHKEY_JWT_SECRET": "shared-multi-instance-secret",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        module_globals = runpy.run_path(str(Path(__file__).resolve().parents[1] / "pushkey_cloud_api.py"), run_name=name)
+    return type("CloudApiModule", (), module_globals)
+
+
+def test_shared_alpha_data_survives_independent_app_instances(tmp_path):
+    first = _load_isolated_cloud_module("pushkey_cloud_api_instance_a", tmp_path)
+    second = _load_isolated_cloud_module("pushkey_cloud_api_instance_b", tmp_path)
+    first_client = TestClient(first.app)
+    second_client = TestClient(second.app)
+
+    registered = first_client.post(
+        "/api/v1/auth/register",
+        json={"email": "multi@example.com", "password": "correct horse battery staple"},
+    )
+    assert registered.status_code == 200
+    first_token = registered.json()["token"]
+    auth = {"Authorization": f"Bearer {first_token}"}
+
+    uploaded = first_client.put("/api/v1/vault", headers=auth, content=b"encrypted-multi-instance-vault")
+    assert uploaded.status_code == 200
+
+    login_from_second = second_client.post(
+        "/api/v1/auth/login",
+        json={"email": "multi@example.com", "password": "correct horse battery staple"},
+    )
+    assert login_from_second.status_code == 200
+    second_auth = {"Authorization": f"Bearer {login_from_second.json()['token']}"}
+
+    assert second_client.get("/api/v1/vault", headers=second_auth).content == b"encrypted-multi-instance-vault"
+    assert second_client.get("/api/v1/vault/meta", headers=auth).json()["etag"] == uploaded.json()["etag"]
+
+    first_admin_login = first_client.post(
+        "/api/admin/auth/login",
+        json={"email": "admin@example.com", "password": "admin-pass-123"},
+    )
+    assert first_admin_login.status_code == 200
+    admin_headers = {"X-CSRF-Token": first_admin_login.json()["csrf_token"]}
+    issued = first_client.post(
+        "/api/admin/licenses/issue",
+        headers=admin_headers,
+        json={"tier": "starter", "email": "buyer@example.com", "send_email": False},
+    )
+    assert issued.status_code == 200
+    license_key = issued.json()["key"]
+
+    activated = second_client.post(
+        "/api/v1/activate",
+        json={
+            "license_key": license_key,
+            "fingerprint": "shared-device",
+            "platform": "windows",
+            "version": "alpha",
+        },
+    )
+    assert activated.status_code == 200
+
+    logout = first_client.post("/api/admin/auth/logout", headers=admin_headers)
+    assert logout.status_code == 200
+    assert first_client.get("/api/admin/stats", headers=admin_headers).status_code == 401

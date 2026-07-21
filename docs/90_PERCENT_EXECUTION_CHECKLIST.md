@@ -30,7 +30,7 @@ without pretending production infrastructure exists.
 
 - [x] Add SMTP retry, timeout, and dead-letter behavior.
 - [x] Add abuse detection and operational alerts.
-- [ ] Add security regression tests across multiple workers/instances.
+- [x] Add security regression tests across multiple workers/instances.
 - [x] Run concurrent license, contact, and vault writes.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
 - [ ] Load-test expected beta and launch concurrency.
