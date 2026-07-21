@@ -8280,6 +8280,19 @@ class PushkeyApp:
         if callable(cancel):
             cancel()
 
+    def _quit_from_tray(self):
+        """Finish the tray Quit action on the Tk event loop."""
+        self._clip_watcher_running = False
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        self._cancel_active_health_refresh()
+        self._on_exit()
+        self.root.destroy()
+
     def _on_close(self):
         # Check config for tray_on_close; default ON if vault/config available
         cfg = {}
@@ -8334,18 +8347,7 @@ class PushkeyApp:
             self.root.after(0, _do)
 
         def _quit(_icon=None, _item=None):
-            def _do():
-                self._clip_watcher_running = False
-                if self._tray_icon is not None:
-                    try:
-                        self._tray_icon.stop()
-                    except Exception:
-                        pass
-                    self._tray_icon = None
-                self._cancel_active_health_refresh()
-                self._on_exit()
-                self.root.destroy()
-            self.root.after(0, _do)
+            self.root.after(0, self._quit_from_tray)
 
         menu = pystray.Menu(
             pystray.MenuItem("Open Pushkey", _restore, default=True),

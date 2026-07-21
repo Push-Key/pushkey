@@ -88,6 +88,37 @@ def test_shutdown_cancels_active_health_refresh():
     assert cancelled == [True]
 
 
+def test_tray_quit_cancels_health_refresh_before_exit_and_destroy():
+    events = []
+
+    class Root:
+        def after(self, _delay, callback):
+            events.append("after")
+            callback()
+
+        def destroy(self):
+            events.append("destroy")
+
+    class App:
+        root = Root()
+        frame = None
+        _tray_icon = None
+        _clip_watcher_running = True
+
+        def _cancel_active_health_refresh(self):
+            events.append("cancel")
+
+        def _on_exit(self):
+            events.append("exit")
+
+    app = App()
+    # This helper is the callback scheduled by the actual tray Quit menu item.
+    pushkey.PushkeyApp._quit_from_tray(app)
+
+    assert app._clip_watcher_running is False
+    assert events == ["cancel", "exit", "destroy"]
+
+
 def test_toggle_expand_opens_key():
     class FakeApp:
         _expanded_key = None
