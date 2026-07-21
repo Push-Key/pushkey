@@ -145,7 +145,7 @@ Goal: support real alpha users without losing incident visibility.
 - [x] Configure dashboard targets for auth, sync, activation, storage, email,
   errors, rate limits, and alerts.
 - [x] Add an operator alert-routing record.
-- [ ] Run alpha-scale capacity/load test and record results.
+- [x] Run alpha-scale capacity/load test and record results.
 - [ ] Run alpha rollback drill and record result.
 - [ ] Confirm alerts reach an accountable operator.
 - [x] Confirm logs, metrics, alerts, dead letters, and exports contain no
@@ -156,6 +156,8 @@ Evidence:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_admin_api.py tests\test_cloud_vault_sync.py -q
+.\.venv\Scripts\python.exe scripts\alpha_capacity_smoke.py --users 8 --iterations 4 --max-p95-ms 750
+.\.venv\Scripts\python.exe -m pytest tests\test_alpha_capacity_report.py -q
 ```
 
 Roadmap items expected to close:

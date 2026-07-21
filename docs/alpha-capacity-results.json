@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-07-21T08:07:10.075125+00:00",
+  "users": 8,
+  "iterations_per_user": 4,
+  "requests_total": 144,
+  "duration_seconds": 2.981,
+  "throughput_requests_per_second": 48.31,
+  "failures": [],
+  "latency_ms": {
+    "median": 106.52,
+    "p95": 592.97,
+    "max": 1018.1
+  },
+  "operations": {
+    "admin_stats": {
+      "count": 32,
+      "p95_ms": 177.69,
+      "max_ms": 232.9
+    },
+    "login": {
+      "count": 8,
+      "p95_ms": 1018.1,
+      "max_ms": 1018.1
+    },
+    "portal_lookup": {
+      "count": 32,
+      "p95_ms": 147.41,
+      "max_ms": 158.51
+    },
+    "register": {
+      "count": 8,
+      "p95_ms": 967.69,
+      "max_ms": 967.69
+    },
+    "vault_get": {
+      "count": 32,
+      "p95_ms": 119.97,
+      "max_ms": 134.88
+    },
+    "vault_put": {
+      "count": 32,
+      "p95_ms": 150.39,
+      "max_ms": 176.12
+    }
+  }
+}

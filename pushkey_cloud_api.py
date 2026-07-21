@@ -251,16 +251,25 @@ DEVICE_TOKEN_VERSION = 1
 DEVICE_TOKEN_AUDIENCE = "pushkey-device-license-v1"
 _LICENSE_LOCK = threading.RLock()
 _ADMIN_SESSION_LOCK = threading.RLock()
+_USER_LOCK = threading.RLock()
 
 
 # ── User store (flat JSON, fine for <1000 users) ─────────────────
 def _load_users() -> dict:
-    if not USERS_FILE.exists():
-        return {}
-    return json.loads(USERS_FILE.read_text())
+    with _USER_LOCK:
+        if not USERS_FILE.exists():
+            return {}
+        raw = USERS_FILE.read_text()
+        if not raw.strip():
+            return {}
+        return json.loads(raw)
 
 def _save_users(users: dict) -> None:
-    USERS_FILE.write_text(json.dumps(users, indent=2))
+    with _USER_LOCK:
+        USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = USERS_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
+        tmp.write_text(json.dumps(users, indent=2))
+        os.replace(tmp, USERS_FILE)
 
 
 # ── JWT helpers ──────────────────────────────────────────────────
@@ -313,11 +322,12 @@ async def register(request: Request):
     pw    = body.get("password", "")
     if not email or not pw or len(pw) < 8:
         raise HTTPException(400, "email and password (>=8 chars) required")
-    users = _load_users()
-    if email in users:
-        raise HTTPException(409, "email already registered")
-    users[email] = {"hash": pwd_ctx.hash(pw), "created": _utcnow().isoformat()}
-    _save_users(users)
+    with _USER_LOCK:
+        users = _load_users()
+        if email in users:
+            raise HTTPException(409, "email already registered")
+        users[email] = {"hash": pwd_ctx.hash(pw), "created": _utcnow().isoformat()}
+        _save_users(users)
     return {"token": _create_token(email)}
 
 @app.post("/api/v1/auth/login")
@@ -954,14 +964,26 @@ async def deactivate(request: Request):
 
 # ── Admin helpers ────────────────────────────────────────────────
 def _load_licenses() -> dict:
-    if not LICENSES_FILE.exists():
-        return {}
-    return json.loads(LICENSES_FILE.read_text())
+    with _LICENSE_LOCK:
+        if not LICENSES_FILE.exists():
+            return {}
+        last_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                raw = LICENSES_FILE.read_text()
+                return json.loads(raw) if raw.strip() else {}
+            except (PermissionError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if os.name != "nt" or attempt == 4:
+                    break
+                time.sleep(0.02 * (attempt + 1))
+        raise last_error or RuntimeError(f"could not read {LICENSES_FILE}")
 
 def _save_licenses(data: dict) -> None:
-    tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    _replace_file_with_retry(tmp, LICENSES_FILE)
+    with _LICENSE_LOCK:
+        tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        _replace_file_with_retry(tmp, LICENSES_FILE)
 
 
 def _replace_file_with_retry(src: Path, dst: Path) -> None:
