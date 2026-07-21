@@ -19,19 +19,51 @@ Status: Phase 10 initial operations targets.
 - Cloud API RTO: 4 hours during beta.
 - Local vault RTO: user controlled, based on local backups and recovery code.
 
-## Monitoring Targets
+## Alpha Dashboard Targets
 
 Track at minimum:
 
-- activation success/failure count;
-- heartbeat success/failure count;
-- admin login failures;
-- sync upload/download failures;
-- storage write failures;
-- rate-limit events;
-- email send failures;
-- 5xx responses;
-- backup age.
+- Auth: registration, login, reset, admin login, MFA failure, lockout, and
+  session refresh counts.
+- Sync: encrypted vault upload/download count, stale `If-Match` conflicts,
+  idempotent retry count, 404 no-vault count, and blob size distribution.
+- Activation: activation, heartbeat, deactivation, expired-license, revoked
+  license, and device-limit outcomes.
+- Storage: JSON/JSONL write failures, encrypted vault blob write failures,
+  history write failures, backup age, and restore verification age.
+- Email: invite/reset/support send success, failure, and dead-letter count.
+- Errors: 4xx/5xx response families, route-level error counts, and top failing
+  routes.
+- Rate-limit: auth, sync, portal, support, activation, and admin limit events.
+
+The alpha dashboard may be implemented in the hosting platform, Grafana,
+Datadog, or a log-derived dashboard, but every panel must be traceable to
+`GET /api/v1/ops/metrics`, structured request logs, dead letters, or the
+platform volume-backup status.
+
+## Alpha Alert Routing
+
+| Alert | Initial threshold | Primary operator | Secondary operator |
+|---|---:|---|---|
+| Cloud API 5xx rate | 5 in 10 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Auth/admin lockout spike | 5 in 15 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Rate-limit spike | 25 in 15 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Sync write failure | 1 in 10 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Email dead letter | 1 queued item | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Backup age | older than 26 hours | ops-primary@push-key.com | ops-secondary@push-key.com |
+
+The placeholder `@push-key.com` operator aliases must be replaced with live
+mailbox or incident-tool destinations before claiming that alerts reach an
+accountable operator.
+
+## Telemetry Redaction
+
+Logs, metrics, alerts, dead letters, exports, and dashboard labels must not include plaintext secrets.
+This includes request bodies, authorization headers,
+cookies, master passwords, recovery codes, MFA recovery codes, license tokens,
+agent tokens, backup key values, and encrypted vault blob contents. Allowed
+telemetry is limited to route names, status codes, request IDs, coarse result
+types, counts, sizes, hashes/ETags, timestamps, and redacted identifiers.
 
 ## Backup And Restore
 

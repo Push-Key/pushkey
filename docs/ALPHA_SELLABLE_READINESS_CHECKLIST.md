@@ -83,11 +83,11 @@ Do not claim for alpha:
 
 ### Operations
 
-- [ ] Configure actionable dashboards/alert targets for alpha operations.
+- [x] Configure actionable dashboards/alert targets for alpha operations.
 - [ ] Run an alpha-scale capacity test and record results.
 - [ ] Run a rollback drill in the alpha environment.
 - [ ] Confirm alerts reach the accountable operator.
-- [ ] Confirm logs/metrics/alerts contain no plaintext secrets.
+- [x] Confirm logs/metrics/alerts contain no plaintext secrets.
 - [ ] Record backup/restore procedure for the chosen alpha storage mode.
 
 ### Sync And Storage Scope

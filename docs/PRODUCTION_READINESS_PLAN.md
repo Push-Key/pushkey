@@ -512,7 +512,7 @@ npm pack --dry-run
 - [x] Add tracing where it materially improves diagnosis.
 - [x] Add error reporting with secret redaction.
 - [x] Add readiness and liveness checks.
-- [ ] Configure dashboards and actionable alerts.
+- [x] Configure dashboards and actionable alerts.
 - [ ] Configure encrypted database backups and point-in-time recovery.
 - [ ] Configure versioned object-storage backups.
 - [x] Add offsite retention and deletion policies.

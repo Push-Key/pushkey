@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 271/337 production items complete, 80.4%.
+Current result: 272/337 production items complete, 80.7%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
@@ -141,13 +141,13 @@ External dependency:
 
 Goal: support real alpha users without losing incident visibility.
 
-- [ ] Configure dashboard targets for auth, sync, activation, storage, email,
+- [x] Configure dashboard targets for auth, sync, activation, storage, email,
   errors, rate limits, and alerts.
-- [ ] Add an operator alert-routing record.
+- [x] Add an operator alert-routing record.
 - [ ] Run alpha-scale capacity/load test and record results.
 - [ ] Run alpha rollback drill and record result.
 - [ ] Confirm alerts reach an accountable operator.
-- [ ] Confirm logs, metrics, alerts, dead letters, and exports contain no
+- [x] Confirm logs, metrics, alerts, dead letters, and exports contain no
   plaintext secrets.
 - [ ] Record backup/restore procedure for the chosen alpha storage mode.
 
