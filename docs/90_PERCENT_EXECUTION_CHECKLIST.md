@@ -77,7 +77,7 @@ These are locally testable except code signing.
 - [x] Make PyInstaller specs reproducible from a clean checkout.
 - [ ] Verify icons and version resources.
 - [ ] Produce supported OS/architecture artifacts.
-- [ ] Test upgrades without vault loss.
+- [x] Test upgrades without vault loss.
 - [x] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums/signatures before installation.
 - [ ] Fail with a nonzero exit code on unsuccessful installation.

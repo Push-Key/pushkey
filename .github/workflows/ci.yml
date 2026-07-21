@@ -131,6 +131,7 @@ jobs:
         run: |
           python -m pip install dist/*.whl
           pushkey --help
+          python scripts/package_upgrade_smoke.py --wheel "$(ls dist/*.whl)"
 
       - name: Install source distribution and test uninstall
         shell: bash

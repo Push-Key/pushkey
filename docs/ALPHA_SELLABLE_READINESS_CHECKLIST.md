@@ -74,7 +74,7 @@ Do not claim for alpha:
 - [x] Make PyInstaller builds reproducible from a clean checkout.
 - [x] Verify executable icons and version resources.
 - [x] Produce the supported alpha OS/architecture artifacts.
-- [ ] Test upgrade without vault loss.
+- [x] Test upgrade without vault loss.
 - [x] Ensure installer/download failures exit nonzero.
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Document arm64 as supported or unsupported for alpha.

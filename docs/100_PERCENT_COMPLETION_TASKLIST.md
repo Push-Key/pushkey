@@ -108,7 +108,7 @@ Goal: make installation and upgrade predictable for alpha users.
 - [x] Make PyInstaller builds reproducible from a clean checkout.
 - [x] Verify executable icons and version resources.
 - [x] Produce supported alpha OS/architecture artifacts.
-- [ ] Test upgrade without vault loss.
+- [x] Test upgrade without vault loss.
 - [x] Align installer asset names with CI release artifacts.
 - [x] Verify checksums before installation.
 - [x] Fail with a nonzero exit code on unsuccessful installation.
