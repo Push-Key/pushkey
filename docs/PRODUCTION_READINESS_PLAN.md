@@ -358,7 +358,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add keyboard navigation and focus management.
 - [ ] Meet WCAG 2.2 AA for critical journeys.
 - [x] Add responsive layouts for supported viewport sizes.
-- [ ] Add Playwright coverage for core vault journeys.
+- [x] Add Playwright coverage for core vault journeys.
 
 ## Marketing/admin/portal tasks
 
@@ -633,7 +633,7 @@ critical-path items.
 
 ## Product
 
-- [ ] Core local workflows complete
+- [x] Core local workflows complete
 - [x] Recovery proven
 - [x] Sync conflict handling complete
 - [x] Paid entitlement behavior server-authoritative
