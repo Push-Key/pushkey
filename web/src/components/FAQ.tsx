@@ -28,12 +28,8 @@ const FAQS = [
     a: "PushKey auto-detects 25+ providers including OpenAI, Anthropic, Stripe, AWS, Vercel, Supabase, GitHub, GitLab, Alpaca, OANDA, Coinbase, Twilio, Sendgrid, and more. Any key not matching a known provider still works — it just won't have a direct dashboard link.",
   },
   {
-    q: "How does CI/CD sync work?",
-    a: "Pro+ plans can push secrets directly to GitHub Actions secrets, Vercel environment variables, and Railway variables from inside PushKey. You authorize the integrations once, then manage secrets in one place instead of separate dashboards for each CI provider.",
-  },
-  {
-    q: "What is the Vault Key USB?",
-    a: "The Vault Key USB is a physical hardware product for users who want a fully off-grid setup. Your encrypted vault lives exclusively on the USB drive — nothing is stored on your machine. Plug it in to access your keys, unplug and they vanish from memory entirely. It ships pre-imaged with Pushkey and includes a 12-month Pro license. Ideal for security researchers, journalists, or anyone handling high-value production secrets.",
+    q: "What does encrypted cloud backup mean?",
+    a: "Starter+ plans can store an encrypted vault blob for recovery across your own devices. The backup is opt-in and zero-knowledge: PushKey receives ciphertext, not your master password or plaintext secrets.",
   },
   {
     q: "Is there a lifetime deal option?",

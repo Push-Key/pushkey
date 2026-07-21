@@ -53,7 +53,7 @@ Do not claim for alpha:
 - [x] Verify secret values do not enter analytics, browser logs, persistent state,
   or screenshots.
 - [x] Remove or disable unimplemented “coming soon” controls from alpha surfaces.
-- [ ] Validate all website/admin/product claims against tested capabilities.
+- [x] Validate all website/admin/product claims against tested capabilities.
 - [ ] Add basic keyboard navigation and focus checks for critical journeys.
 - [ ] Validate responsive layouts for supported alpha viewport sizes.
 

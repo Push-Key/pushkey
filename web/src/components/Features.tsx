@@ -1,7 +1,7 @@
 "use client"
 import {
   ShieldCheck, RefreshCw, FolderSync, Link2, GitBranch, Cloud,
-  Users, KeyRound, Lock, Code2, Fingerprint, Eye, Terminal, Bot
+  KeyRound, Lock, Code2, Eye, Terminal, Bot
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -11,13 +11,11 @@ const FEATURES: { icon: LucideIcon; title: string; desc: string; accent: string 
   { icon: RefreshCw, title: "Rotation Health Tracking", desc: "Green / yellow / red status dots. See at a glance which keys are fresh, aging, or overdue for rotation.", accent: "#00DC82" },
   { icon: Link2, title: "Provider Dashboard Links", desc: "One click opens the exact page to generate a new key for 25+ providers: OpenAI, Stripe, AWS, Vercel, and more.", accent: "#A78BFA" },
   { icon: GitBranch, title: "Git History Scanner", desc: "Scans your commit history for accidentally committed secrets. Flags exposed keys before they become a breach.", accent: "#A78BFA" },
-  { icon: Cloud, title: "CI/CD Sync", desc: "Push secrets to GitHub Actions, Vercel environment variables, and Railway directly from the vault — no copy-paste in CI.", accent: "#A78BFA" },
-  { icon: Users, title: "Team RBAC", desc: "Share vaults with your team. Role-based access control — admins set policies, devs get read-only access to their keys.", accent: "#F59E0B" },
-  { icon: KeyRound, title: "TOTP MFA", desc: "Two-factor authentication on vault unlock. Works with any TOTP app (Authy, Google Authenticator, 1Password).", accent: "#F59E0B" },
+  { icon: Cloud, title: "Encrypted Backup", desc: "Optional cloud backup stores ciphertext only. Your master password and plaintext secrets stay on your device.", accent: "#A78BFA" },
+  { icon: KeyRound, title: "Admin MFA", desc: "Admin accounts support TOTP verification, recovery codes, revocation, session expiry, and audit attribution.", accent: "#F59E0B" },
   { icon: Lock, title: "Clipboard Auto-clear", desc: "Copied keys automatically cleared from clipboard after 30 seconds. Revealed keys auto-hide after 10 seconds.", accent: "#00DC82" },
   { icon: Code2, title: "Open Source Core", desc: "The crypto layer and vault are MIT licensed. Audit every line that touches your keys — no trust required.", accent: "#A78BFA" },
-  { icon: Fingerprint, title: "Hardware MFA (Enterprise)", desc: "YubiKey and hardware security key support for vaults that need the highest level of authentication assurance.", accent: "#F59E0B" },
-  { icon: Eye, title: "Encrypted Audit Log", desc: "Every vault access, key rotation, and team action is logged in an encrypted audit trail for compliance.", accent: "#F59E0B" },
+  { icon: Eye, title: "Encrypted Audit Log", desc: "Vault access and key rotation events are written to an encrypted local audit trail.", accent: "#F59E0B" },
   { icon: Terminal, title: "Full-featured CLI", desc: "pushkey-cli ships alongside the GUI — scriptable, pipeable, CI-ready. Add, rotate, inject, and export keys from any terminal or pipeline.", accent: "#00DC82" },
   { icon: Bot, title: "Claude Code MCP Server", desc: "Built-in MCP server gives Claude Code and VS Code Copilot direct vault access. AI can list, fetch, inject .env, and flag stale keys — without leaving your editor.", accent: "#A78BFA" },
 ]

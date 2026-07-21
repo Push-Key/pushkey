@@ -41,13 +41,13 @@ claims.
 
 - [ ] Reconcile every local web app operation with `docs/local-api-v1.md`.
 - [ ] Complete loading, empty, error, locked, offline, and conflict states.
-- [ ] Add safe secret reveal/copy timeouts.
-- [ ] Prove secret values do not enter analytics, browser logs, local storage,
+- [x] Add safe secret reveal/copy timeouts.
+- [x] Prove secret values do not enter analytics, browser logs, local storage,
   session storage, screenshots, or persistent app state.
 - [ ] Add keyboard navigation and focus management for critical journeys.
 - [ ] Validate supported alpha responsive viewports.
-- [ ] Remove or disable unimplemented “coming soon” controls.
-- [ ] Validate all product/admin/website claims against tested capability.
+- [x] Remove or disable unimplemented “coming soon” controls.
+- [x] Validate all product/admin/website claims against tested capability.
 - [ ] Configure metadata, canonical URLs, sitemap, robots, Open Graph, and error pages.
 - [ ] Add CSP-compatible analytics and consent behavior if analytics remains enabled.
 - [ ] Replace boilerplate `web/README.md` with an operator/developer runbook.
