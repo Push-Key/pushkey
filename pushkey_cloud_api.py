@@ -952,7 +952,21 @@ def _load_licenses() -> dict:
 def _save_licenses(data: dict) -> None:
     tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
     tmp.write_text(json.dumps(data, indent=2))
-    os.replace(tmp, LICENSES_FILE)
+    _replace_file_with_retry(tmp, LICENSES_FILE)
+
+
+def _replace_file_with_retry(src: Path, dst: Path) -> None:
+    last_error: PermissionError | None = None
+    for attempt in range(5):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if os.name != "nt" or attempt == 4:
+                break
+            time.sleep(0.02 * (attempt + 1))
+    raise last_error or PermissionError(f"could not replace {dst}")
 
 
 def _mutate_licenses(mutator):
@@ -1000,7 +1014,7 @@ def _save_admin_sessions(data: dict) -> None:
     with _ADMIN_SESSION_LOCK:
         tmp = ADMIN_SESSIONS_FILE.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, ADMIN_SESSIONS_FILE)
+        _replace_file_with_retry(tmp, ADMIN_SESSIONS_FILE)
 
 
 def _revoke_admin_sessions(admin_id: str, *, except_hash: str | None = None) -> int:

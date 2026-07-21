@@ -847,6 +847,24 @@ def test_heartbeat_rate_limit(client, monkeypatch):
     assert r.status_code == 429
 
 
+def test_license_save_retries_transient_windows_replace_error(app_module, monkeypatch):
+    calls = {"count": 0}
+    real_replace = app_module.os.replace
+
+    def flaky_replace(src, dst):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise PermissionError("transient Windows replace denial")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(app_module.os, "replace", flaky_replace)
+
+    app_module._save_licenses({"retry-key": {"status": "active"}})
+
+    assert calls["count"] == 2
+    assert app_module._load_licenses()["retry-key"]["status"] == "active"
+
+
 def test_heartbeat_requires_license_key(client):
     r = client.post("/v1/heartbeat", json={})
     assert r.status_code == 400

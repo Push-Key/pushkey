@@ -65,7 +65,7 @@ Do not claim for alpha:
   and privacy-safe failures.
 - [ ] Add admin journey tests for license, contact, audit, settings, support, and
   MFA/session boundaries.
-- [ ] Run the full Python suite.
+- [x] Run the full Python suite.
 - [ ] Run both frontend lint/build pipelines.
 - [ ] Run package/install smoke tests from a clean environment.
 

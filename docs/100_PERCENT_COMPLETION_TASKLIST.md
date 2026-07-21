@@ -80,7 +80,7 @@ unit tests.
   MFA, disabled admins, expired sessions, revoked sessions, and role boundaries.
 - [ ] Add security regression tests across multiple app instances/workers where
   local execution can simulate it.
-- [ ] Run the full Python suite.
+- [x] Run the full Python suite.
 - [ ] Run both frontend lint/build pipelines.
 - [ ] Run package/install smoke tests from a clean environment.
 
