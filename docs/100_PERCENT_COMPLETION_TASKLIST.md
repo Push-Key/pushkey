@@ -81,7 +81,7 @@ unit tests.
 - [ ] Add security regression tests across multiple app instances/workers where
   local execution can simulate it.
 - [x] Run the full Python suite.
-- [ ] Run both frontend lint/build pipelines.
+- [x] Run both frontend lint/build pipelines.
 - [ ] Run package/install smoke tests from a clean environment.
 
 Evidence:

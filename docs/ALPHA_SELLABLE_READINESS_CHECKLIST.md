@@ -66,7 +66,7 @@ Do not claim for alpha:
 - [x] Add admin journey tests for license, contact, audit, settings, support, and
   MFA/session boundaries.
 - [x] Run the full Python suite.
-- [ ] Run both frontend lint/build pipelines.
+- [x] Run both frontend lint/build pipelines.
 - [ ] Run package/install smoke tests from a clean environment.
 
 ### Packaging And Install
