@@ -63,7 +63,7 @@ Do not claim for alpha:
   unlock, list, add, rotate, reveal timeout, inject, lock, and offline handling.
 - [x] Add portal tests for license lookup, renewal request, support ticket creation,
   and privacy-safe failures.
-- [ ] Add admin journey tests for license, contact, audit, settings, support, and
+- [x] Add admin journey tests for license, contact, audit, settings, support, and
   MFA/session boundaries.
 - [x] Run the full Python suite.
 - [ ] Run both frontend lint/build pipelines.

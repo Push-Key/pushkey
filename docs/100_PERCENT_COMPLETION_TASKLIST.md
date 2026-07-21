@@ -76,7 +76,7 @@ unit tests.
   unlock, list, add, rotate, reveal timeout, inject, lock, offline.
 - [x] Add portal tests for license lookup, renewal request, support ticket
   creation, and privacy-safe failures.
-- [ ] Add admin journey tests for license, contact, audit, settings, support,
+- [x] Add admin journey tests for license, contact, audit, settings, support,
   MFA, disabled admins, expired sessions, revoked sessions, and role boundaries.
 - [ ] Add security regression tests across multiple app instances/workers where
   local execution can simulate it.
