@@ -226,15 +226,15 @@ git commit -m "Publish health sidecar atomically"
 - Modify: `tests/test_local_api.py`
 - Modify: `tests/test_health_sidecar.py`
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Cover every plaintext-aware save path publishing v1, safe warning on publication failure, opaque backup import invalidation, successful unlock republish, and no test profile escape.
 
-- [ ] **Step 2: Write failing loopback HTTP tests**
+- [x] **Step 2: Write failing loopback HTTP tests**
 
 Cover valid v1 response, valid empty snapshot, fixed 503 unavailable body for missing, malformed, stale, future-skewed, and oversized input, exact content type, no-store, nosniff, exact content length, no wildcard CORS, and rejection of non-GET methods.
 
-- [ ] **Step 3: Run integration tests and verify RED**
+- [x] **Step 3: Run integration tests and verify RED**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health_sidecar.py tests\test_cli.py tests\test_mcp.py tests\test_local_api.py -k "health or backup" -v
@@ -242,19 +242,19 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health
 
 Expected: FAIL because callers still use the GUI-only writer or raw file endpoint.
 
-- [ ] **Step 4: Replace the GUI-only writer**
+- [x] **Step 4: Replace the GUI-only writer**
 
 Remove the old inline `write_health_sidecar` implementation. On GUI login and save, use the shared owner. Schedule a six-hour refresh only while the unlocked desktop session exists; cancel it on lock and shutdown.
 
-- [ ] **Step 5: Integrate non-GUI mutation paths**
+- [x] **Step 5: Integrate non-GUI mutation paths**
 
 Use the shared post-save hook for CLI, MCP, and local API mutations. Return only `health_publication_failed` or another stable safe warning, never a secret name or raw exception.
 
-- [ ] **Step 6: Harden the loopback health server**
+- [x] **Step 6: Harden the loopback health server**
 
 Serve only validated canonical v1 bytes. Return a fixed 503 JSON body for unavailable data. Remove `Access-Control-Allow-Origin: *` and add the required response headers.
 
-- [ ] **Step 7: Run integration tests and verify GREEN**
+- [x] **Step 7: Run integration tests and verify GREEN**
 
 ```powershell
 C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health_sidecar.py tests\test_cli.py tests\test_mcp.py tests\test_local_api.py -k "health or backup" -v
@@ -262,7 +262,7 @@ C:\Users\aware\bots\pushkey\.venv\Scripts\python.exe -m pytest tests\test_health
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit cross-interface integration**
+- [x] **Step 8: Commit cross-interface integration**
 
 ```powershell
 git add pushkey.py pushkey_cli.py pushkey_mcp.py pushkey_local_api.py tests/test_health_sidecar.py tests/test_cli.py tests/test_mcp.py tests/test_local_api.py

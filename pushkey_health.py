@@ -424,6 +424,20 @@ def write_health_sidecar(vault, path=None, *, generated_at=None, expected_vault_
                 pass
 
 
+def publish_saved_vault(vault, *, generated_at=None):
+    """Publish the public snapshot after a successful plaintext-aware save.
+
+    Encrypted vault writes intentionally invalidate the sidecar. Callers that
+    still hold the plaintext vault use this narrow hook to republish it.
+    """
+    revision = getattr(vault, "_pushkey_revision", None)
+    if not isinstance(revision, bytes):
+        raise HealthUnavailableError("health_vault_revision_missing")
+    return write_health_sidecar(
+        vault, generated_at=generated_at, expected_vault_revision=revision
+    )
+
+
 def invalidate_health_sidecar(path=None, *, expected_vault_revision: bytes):
     """Remove exactly the health sidecar for the specified current vault revision."""
     path, _ = _safe_health_paths(path, create_parent=True)

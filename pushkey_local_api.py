@@ -54,7 +54,7 @@ from pushkey_vault import (
     replace_encrypted_vault_bytes,
     VaultBusyError,
 )
-from pushkey_health import HealthUnavailableError
+from pushkey_health import HealthSidecarError, HealthUnavailableError, publish_saved_vault
 
 
 AUTOLOCK_SECONDS_DEFAULT = 15 * 60
@@ -644,6 +644,12 @@ def create_app() -> FastAPI:
     def _save(sess: _Session) -> None:
         from pushkey_vault import save_vault as _save_vault
         _save_vault(sess.vault, sess.password, vault_key=sess.vault_key)
+        try:
+            publish_saved_vault(sess.vault)
+            sess.health_warning = None
+        except HealthSidecarError:
+            # Mutation remains successful; do not disclose health path or errors.
+            sess.health_warning = "health_publication_failed"
 
     def _restore_bytes(path: Path, original: Optional[bytes]) -> None:
         if original is None:

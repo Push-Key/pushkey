@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import http.client
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from pushkey_health import (
     read_health_sidecar,
     write_health_sidecar,
     invalidate_health_sidecar,
+    publish_saved_vault,
 )
 
 
@@ -68,6 +70,53 @@ def test_valid_empty_document_round_trips_to_canonical_json():
     document = {"schema_version": 1, "generated_at": "2026-01-10T12:00:00Z", "keys": {}}
     assert decode_health_document(encode_health_document(document)) == document
     assert encode_health_document(document) == b'{"generated_at":"2026-01-10T12:00:00Z","keys":{},"schema_version":1}\n'
+
+
+def test_publish_saved_vault_requires_current_revision_and_writes_v1(tmp_path, monkeypatch):
+    import pushkey_shared as shared
+    from pushkey_vault import load_vault, save_vault
+    monkeypatch.setattr(shared, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(shared, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(shared, "HEALTH_FILE", tmp_path / "health.json")
+    shared.ensure_vault_dir()
+    save_vault({"KEY": {"value": "secret", "created": NOW.isoformat()}}, "password")
+    vault, _ = load_vault("password")
+    document = publish_saved_vault(vault, generated_at=NOW)
+    assert document["schema_version"] == 1
+    assert document["keys"]["KEY"] == {"status": "healthy", "days_old": 0, "provider": None}
+
+
+def test_loopback_health_server_serves_canonical_v1_or_sanitized_503(tmp_path, monkeypatch):
+    import pushkey
+    path = tmp_path / "health.json"
+    monkeypatch.setattr(pushkey, "HEALTH_FILE", path)
+    server = pushkey._start_health_server(0)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        conn.request("GET", "/health")
+        response = conn.getresponse()
+        assert response.status == 503
+        assert response.read() == b'{"error":"health_unavailable"}\n'
+        assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+        assert response.getheader("Cache-Control") == "no-store"
+        assert response.getheader("X-Content-Type-Options") == "nosniff"
+        assert response.getheader("Access-Control-Allow-Origin") is None
+        conn.close()
+        fresh = {
+            "schema_version": 1,
+            "generated_at": datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "keys": {},
+        }
+        path.write_bytes(encode_health_document(fresh))
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        conn.request("GET", "/health")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.read() == encode_health_document(fresh)
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.parametrize("generated_at", [NOW, None, 0])
