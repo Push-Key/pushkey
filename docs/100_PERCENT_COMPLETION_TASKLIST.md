@@ -105,7 +105,7 @@ Roadmap items expected to close:
 
 Goal: make installation and upgrade predictable for alpha users.
 
-- [ ] Make PyInstaller builds reproducible from a clean checkout.
+- [x] Make PyInstaller builds reproducible from a clean checkout.
 - [x] Verify executable icons and version resources.
 - [x] Produce supported alpha OS/architecture artifacts.
 - [ ] Test upgrade without vault loss.

@@ -397,7 +397,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Executable tasks
 
-- [ ] Make PyInstaller specs reproducible from a clean checkout.
+- [x] Make PyInstaller specs reproducible from a clean checkout.
 - [x] Embed the exact local web build.
 - [x] Verify icons and version resources.
 - [x] Produce supported OS/architecture artifacts.

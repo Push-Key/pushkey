@@ -74,7 +74,7 @@ npm --prefix web run build
 
 These are locally testable except code signing.
 
-- [ ] Make PyInstaller specs reproducible from a clean checkout.
+- [x] Make PyInstaller specs reproducible from a clean checkout.
 - [ ] Verify icons and version resources.
 - [ ] Produce supported OS/architecture artifacts.
 - [ ] Test upgrades without vault loss.

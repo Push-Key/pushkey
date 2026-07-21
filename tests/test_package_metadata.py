@@ -86,3 +86,12 @@ def test_pyinstaller_build_includes_windows_version_resources():
     assert "FileVersion" in source
     assert "ProductVersion" in source
     assert "pyproject.toml" in source
+
+
+def test_pyinstaller_build_uses_clean_cache_free_invocations():
+    source = (ROOT / "build_exe.py").read_text(encoding="utf-8")
+
+    assert "--noconfirm" in source
+    assert "--clean" in source
+    assert "Pushkey.spec" not in source
+    assert "pushkey-cli.spec" not in source

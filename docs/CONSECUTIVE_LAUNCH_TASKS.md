@@ -102,7 +102,7 @@ Goal: package, verify, operate, review, and launch.
 - [ ] Complete frontend states, accessibility, and Playwright coverage.
 - [ ] Decide extension scope: ship, beta, or defer.
 - [x] Build and install-test sdist/wheel.
-- [ ] Reproduce PyInstaller builds from clean checkout.
+- [x] Reproduce PyInstaller builds from clean checkout.
 - [ ] Align npm wrapper asset names and checksum/signature verification.
 - [x] Add CI matrices, security scans, SBOM, and provenance.
 - [ ] Configure monitoring, backups, restore drill, and rollback drill.

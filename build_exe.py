@@ -80,7 +80,7 @@ VSVersionInfo(
 
 def _common_flags(root):
     """Flags shared by both GUI and CLI builds."""
-    flags = ["--noconfirm", "--collect-all", "cryptography", "--collect-all", "customtkinter"]
+    flags = ["--noconfirm", "--clean", "--collect-all", "cryptography", "--collect-all", "customtkinter"]
     for mod in SUBMODULES:
         flags += ["--hidden-import", mod]
     providers_path = root / "providers.json"

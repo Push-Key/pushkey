@@ -71,7 +71,7 @@ Do not claim for alpha:
 
 ### Packaging And Install
 
-- [ ] Make PyInstaller builds reproducible from a clean checkout.
+- [x] Make PyInstaller builds reproducible from a clean checkout.
 - [x] Verify executable icons and version resources.
 - [x] Produce the supported alpha OS/architecture artifacts.
 - [ ] Test upgrade without vault loss.
