@@ -636,7 +636,7 @@ critical-path items.
 - [ ] Core local workflows complete
 - [x] Recovery proven
 - [ ] Sync conflict handling complete
-- [ ] Paid entitlement behavior server-authoritative
+- [x] Paid entitlement behavior server-authoritative
 - [x] Deferred features absent from launch claims
 
 ## Security
