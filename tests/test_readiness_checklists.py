@@ -23,3 +23,22 @@ def test_90_percent_checklist_records_dashboard_alert_runbook_evidence():
     assert "- [x] Add dashboard and alert configuration documents." in checklist
     for required in ("alpha dashboard targets", "alpha alert routing", "primary operator", "secondary operator"):
         assert required in ops
+
+
+def test_90_percent_checklist_records_packaging_evidence_without_signing_claims():
+    checklist = (ROOT / "docs" / "90_PERCENT_EXECUTION_CHECKLIST.md").read_text(encoding="utf-8")
+
+    for completed in (
+        "Verify icons and version resources.",
+        "Produce supported OS/architecture artifacts.",
+        "Fail with a nonzero exit code on unsuccessful installation.",
+        "Handle unsupported OS/architecture explicitly.",
+        "Add arm64 support or document it as unsupported.",
+        "Prevent Windows shim self-resolution loops.",
+        "Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.",
+        "Release assets exactly match the npm download map.",
+    ):
+        assert f"- [x] {completed}" in checklist
+
+    assert "- [ ] Verify checksums/signatures before installation." in checklist
+    assert "- [ ] Sign Windows and macOS artifacts requires signing credentials." in checklist

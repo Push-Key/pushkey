@@ -8,9 +8,9 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 287/337 production items complete, 85.2%.
+Current result: 289/337 production items complete, 85.8%.
 90% target: 304/337 production items complete.
-Remaining needed for 90%: 17 additional verified items.
+Remaining needed for 90%: 15 additional verified items.
 
 ## Ground Rule
 
@@ -77,18 +77,18 @@ npm --prefix web run build
 These are locally testable except code signing.
 
 - [x] Make PyInstaller specs reproducible from a clean checkout.
-- [ ] Verify icons and version resources.
-- [ ] Produce supported OS/architecture artifacts.
+- [x] Verify icons and version resources.
+- [x] Produce supported OS/architecture artifacts.
 - [x] Test upgrades without vault loss.
 - [x] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums/signatures before installation.
-- [ ] Fail with a nonzero exit code on unsuccessful installation.
-- [ ] Handle unsupported OS/architecture explicitly.
-- [ ] Add arm64 support or document it as unsupported.
-- [ ] Prevent Windows shim self-resolution loops.
+- [x] Fail with a nonzero exit code on unsuccessful installation.
+- [x] Handle unsupported OS/architecture explicitly.
+- [x] Add arm64 support or document it as unsupported.
+- [x] Prevent Windows shim self-resolution loops.
 - [x] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
-- [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
-- [ ] Release assets exactly match the npm download map.
+- [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
+- [x] Release assets exactly match the npm download map.
 
 External blocker:
 
