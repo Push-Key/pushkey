@@ -2,6 +2,25 @@
 
 Status: Phase 10 operations draft.
 
+## Alpha Storage Mode
+
+Alpha uses the single-machine flat-file cloud mode documented in
+`docs/release-readiness.md`: account/license metadata, audit JSONL, and
+encrypted vault blobs remain on the application volume until the
+PostgreSQL/object-storage migration is promoted for GA. Cloud sync is limited
+to opt-in encrypted backup beta. Operators must not market this mode as
+durable multi-device production sync.
+
+Every alpha backup record must include:
+
+- storage mode: `alpha-flat-file`
+- backup ID and application commit
+- encrypted vault blob count and aggregate SHA-256 hash
+- account/license metadata file checksums
+- operator, start time, completion time, and storage location
+- restore smoke result for health, license activation, admin login, and
+  encrypted backup beta read/write
+
 ## Backup Procedure
 
 - Snapshot flat-file cloud metadata daily until PostgreSQL migration is complete.
@@ -18,7 +37,8 @@ Status: Phase 10 operations draft.
 3. Restore the newest backup that satisfies the target RPO.
 4. Reconcile record counts and encrypted blob hashes.
 5. Run smoke tests for health, license activation, admin login, and support
-   ticket reads.
+   ticket reads. For alpha, also run encrypted backup beta upload/download
+   smoke against the restored flat-file volume.
 6. Record RPO/RTO, operator, backup ID, restored commit, and residual risk.
 
 ## Rollback Procedure

@@ -88,7 +88,7 @@ Do not claim for alpha:
 - [ ] Run a rollback drill in the alpha environment.
 - [ ] Confirm alerts reach the accountable operator.
 - [x] Confirm logs/metrics/alerts contain no plaintext secrets.
-- [ ] Record backup/restore procedure for the chosen alpha storage mode.
+- [x] Record backup/restore procedure for the chosen alpha storage mode.
 
 ### Sync And Storage Scope
 

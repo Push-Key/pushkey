@@ -150,7 +150,7 @@ Goal: support real alpha users without losing incident visibility.
 - [ ] Confirm alerts reach an accountable operator.
 - [x] Confirm logs, metrics, alerts, dead letters, and exports contain no
   plaintext secrets.
-- [ ] Record backup/restore procedure for the chosen alpha storage mode.
+- [x] Record backup/restore procedure for the chosen alpha storage mode.
 
 Evidence:
 

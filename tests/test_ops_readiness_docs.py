@@ -34,3 +34,19 @@ def test_ops_readiness_forbids_plaintext_secret_telemetry():
     assert "request bodies" in text
     assert "authorization headers" in text
     assert "encrypted vault blob contents" in text
+
+
+def test_backup_restore_runbook_records_alpha_storage_mode():
+    text = (ROOT / "docs" / "backup-restore-runbook.md").read_text(encoding="utf-8").lower()
+
+    for required in (
+        "alpha-flat-file",
+        "encrypted backup beta",
+        "aggregate sha-256 hash",
+        "application commit",
+        "health",
+        "license activation",
+        "admin login",
+        "upload/download",
+    ):
+        assert required in text
