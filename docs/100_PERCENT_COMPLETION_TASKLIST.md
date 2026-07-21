@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 274/337 production items complete, 81.3%.
+Current result: 275/337 production items complete, 81.6%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
@@ -116,7 +116,7 @@ Goal: make installation and upgrade predictable for alpha users.
 - [x] Document arm64 as supported or unsupported.
 - [x] Prevent Windows shim self-resolution loops.
 - [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
-- [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and
+- [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and
   `pushkey app`.
 - [ ] Release assets exactly match the npm download map.
 

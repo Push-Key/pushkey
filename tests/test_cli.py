@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import pushkey_shared
 import pushkey_cli as cli
-from pushkey_vault import save_vault
+from pushkey_vault import load_vault, save_vault
 from pushkey_crypto import _V3_MAGIC, decrypt_data_v3
 
 
@@ -100,6 +100,23 @@ def test_cmd_init_noninteractive_creates_v3_without_printing_recovery(monkeypatc
     output = capsys.readouterr().out
     recovery = recovery_file.read_text().strip()
     assert recovery not in output
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    assert json.loads(plaintext)["keys"] == {}
+
+
+def test_cmd_init_accepts_explicit_password_without_prompt(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: pytest.fail("prompted"))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+
+    recovery_file = tmp_path / "recovery.txt"
+    cli._cmd_init(str(recovery_file), password="new-password")
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    recovery = recovery_file.read_text(encoding="ascii").strip()
+    output = capsys.readouterr().out
+    assert recovery not in output
+    vault, _ = load_vault("new-password")
+    assert vault == {}
     plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
     assert json.loads(plaintext)["keys"] == {}
 

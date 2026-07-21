@@ -388,7 +388,8 @@ def main():
         return _repl(args)
 
     if args.command == "init":
-        return _cmd_init(args.recovery_file)
+        init_password = os.environ.get("PUSHKEY_MASTER") or args.password
+        return _cmd_init(args.recovery_file, password=init_password)
 
     if args.command == "app":
         return _cmd_app(blocking=True)
@@ -439,26 +440,29 @@ def _write_recovery_file(path, recovery_code):
     return destination
 
 
-def _cmd_init(recovery_file=None):
+def _cmd_init(recovery_file=None, password=None):
     _s.ensure_vault_dir()
     if _s.VAULT_FILE.exists():
         print(f"{C_RED}Vault already exists at {_s.VAULT_FILE}{C_RESET}", file=sys.stderr)
         sys.exit(1)
-    try:
-        pw1 = getpass.getpass("Choose master password (>=8 chars): ")
-        if len(pw1) < 8:
-            print(f"{C_RED}Password too short.{C_RESET}", file=sys.stderr)
+    if password is not None:
+        pw1 = password
+    else:
+        try:
+            pw1 = getpass.getpass("Choose master password (>=8 chars): ")
+            pw2 = getpass.getpass("Confirm password: ")
+        except (EOFError, KeyboardInterrupt):
+            print("Aborted.", file=sys.stderr)
             sys.exit(1)
-        pw2 = getpass.getpass("Confirm password: ")
-    except (EOFError, KeyboardInterrupt):
-        print("Aborted.", file=sys.stderr)
-        sys.exit(1)
-    if pw1 != pw2:
-        print(f"{C_RED}Passwords do not match.{C_RESET}", file=sys.stderr)
+        if pw1 != pw2:
+            print(f"{C_RED}Passwords do not match.{C_RESET}", file=sys.stderr)
+            sys.exit(1)
+    if len(pw1) < 8:
+        print(f"{C_RED}Password too short.{C_RESET}", file=sys.stderr)
         sys.exit(1)
     recovery_code = generate_recovery_code()
     recovery_destination = None
-    if _stdin_is_interactive():
+    if _stdin_is_interactive() and not recovery_file:
         print(
             "\nRecovery code (store this offline; it is the only way to reset "
             "a forgotten password):"

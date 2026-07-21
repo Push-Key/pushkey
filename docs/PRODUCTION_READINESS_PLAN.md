@@ -423,7 +423,7 @@ python -m twine check dist/*
 npm pack --dry-run
 ```
 
-- [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
+- [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
 - [ ] Release assets exactly match the npm download map.
 
 ## Exit Gate
