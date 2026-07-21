@@ -36,7 +36,7 @@ without pretending production infrastructure exists.
 - [ ] Load-test expected beta and launch concurrency.
 - [ ] Add transactional audit/outbox behavior.
 - [x] Store vault revision metadata transactionally in the migration schema.
-- [ ] Add dashboard and alert configuration documents.
+- [x] Add dashboard and alert configuration documents.
 - [x] Add capacity-test and rollback-drill scripts or runbooks.
 
 Verification:
