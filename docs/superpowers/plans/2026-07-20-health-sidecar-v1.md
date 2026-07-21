@@ -216,6 +216,12 @@ git commit -m "Publish health sidecar atomically"
 
 ### Task 4: Integrate Desktop, CLI, MCP, Local API, And Loopback HTTP
 
+**Compliance closure:** Commit `3ded3db` completes the Task 4 review follow-up.
+The Local API uses the stable `X-Pushkey-Warning: health_publication_failed`
+response header for post-save publication failures so existing response bodies,
+including `204` responses, remain compatible. Loopback contract tests now prove
+the full unavailable-input and method-rejection behavior.
+
 **Files:**
 - Modify: `pushkey.py`
 - Modify: `pushkey_cli.py`
