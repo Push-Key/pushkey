@@ -207,6 +207,13 @@ def test_admin_mutation_audit_includes_actor_and_request(client, app_module):
     assert event["actor_email"] == "billing@example.com"
     assert event["actor_role"] == "billing"
 
+    outbox = app_module._load_outbox()
+    outbox_event = next(e for e in outbox if e["event_type"] == "generate_license")
+    assert outbox_event["aggregate_type"] == "audit"
+    assert outbox_event["aggregate_id"] == event["target"]
+    assert outbox_event["request_id"] == "req-test-123"
+    assert outbox_event["payload"]["actor_email"] == "billing@example.com"
+
 
 def test_admin_refresh_rotates_session_and_csrf(client, app_module):
     old_sessions = app_module._load_admin_sessions()
@@ -866,7 +873,7 @@ def test_portal_renewal_unknown_license_failure_is_privacy_safe(client):
     assert "PRO-DOES-NOT-EXIST" not in combined
 
 
-def test_portal_renewal_audit_uses_request_context_without_customer_message(client):
+def test_portal_renewal_audit_uses_request_context_without_customer_message(client, app_module):
     key = _make_key(client, tier="pro", email="audit-renew@example.com")
     secret_message = "renew me but do not put this private support text in audit"
 
@@ -884,6 +891,8 @@ def test_portal_renewal_audit_uses_request_context_without_customer_message(clie
     assert event["request_id"] == "portal-renewal-1"
     assert "audit-renew@example.com" in encoded
     assert secret_message not in encoded
+    outbox = json.dumps([e for e in app_module._load_outbox() if e["event_type"] == "portal_renewal_request"])
+    assert secret_message not in outbox
 
 
 def test_csv_export(client):
@@ -1021,6 +1030,7 @@ def test_backup_returns_tarball(client):
     with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as t:
         names = t.getnames()
         assert "licenses.json" in names
+        assert "outbox.jsonl" in names
 
 
 def test_admin_backup_excludes_zero_knowledge_vault_blobs(client):

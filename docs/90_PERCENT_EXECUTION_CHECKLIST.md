@@ -34,7 +34,7 @@ without pretending production infrastructure exists.
 - [x] Run concurrent license, contact, and vault writes.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
 - [ ] Load-test expected beta and launch concurrency.
-- [ ] Add transactional audit/outbox behavior.
+- [x] Add transactional audit/outbox behavior.
 - [x] Store vault revision metadata transactionally in the migration schema.
 - [x] Add dashboard and alert configuration documents.
 - [x] Add capacity-test and rollback-drill scripts or runbooks.

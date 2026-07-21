@@ -597,11 +597,39 @@ async def ops_metrics():
 # ── Event log (append-only JSONL for analytics) ──────────────────
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 AUDIT_FILE  = DATA_DIR / "audit.jsonl"
+OUTBOX_FILE = DATA_DIR / "outbox.jsonl"
+_LOG_LOCK = threading.RLock()
+
+def _append_jsonl(path: Path, entry: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def _log_outbox(
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    payload: dict,
+    request_id: str = "",
+) -> dict:
+    entry = {
+        "id": secrets.token_hex(16),
+        "aggregate_type": aggregate_type,
+        "aggregate_id": aggregate_id,
+        "event_type": event_type,
+        "payload": payload,
+        "request_id": request_id,
+        "created_at": _utcnow().isoformat(),
+        "dispatched_at": None,
+    }
+    _append_jsonl(OUTBOX_FILE, entry)
+    return entry
 
 def _log_event(event_type: str, data: dict) -> None:
     entry = {"ts": _utcnow().isoformat(), "type": event_type, **data}
-    with EVENTS_FILE.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _LOG_LOCK:
+        _append_jsonl(EVENTS_FILE, entry)
+        _log_outbox("event", event_type, event_type, data, data.get("request_id", ""))
 
 def _load_events() -> list[dict]:
     if not EVENTS_FILE.exists():
@@ -623,7 +651,9 @@ def _log_audit(
     request: Request | None = None,
 ) -> None:
     """Record admin action for compliance audit trail."""
+    request_id = request.headers.get("x-request-id", "") if request else ""
     entry = {
+        "id":      secrets.token_hex(16),
         "ts":      _utcnow().isoformat(),
         "action":  action,
         "target":  target,
@@ -631,16 +661,29 @@ def _log_audit(
         "actor_id": actor.get("id", "system") if actor else "system",
         "actor_email": actor.get("email", "") if actor else "",
         "actor_role": actor.get("role", "") if actor else "",
-        "request_id": request.headers.get("x-request-id", "") if request else "",
+        "request_id": request_id,
         "ip": request.client.host if request and request.client else "",
     }
-    with AUDIT_FILE.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _LOG_LOCK:
+        _append_jsonl(AUDIT_FILE, entry)
+        _log_outbox("audit", target, action, entry, request_id)
 
 def _load_audit() -> list[dict]:
     if not AUDIT_FILE.exists():
         return []
     lines = AUDIT_FILE.read_text().splitlines()
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+def _load_outbox() -> list[dict]:
+    if not OUTBOX_FILE.exists():
+        return []
+    lines = OUTBOX_FILE.read_text(encoding="utf-8").splitlines()
     out = []
     for line in lines:
         try:
@@ -2132,7 +2175,7 @@ async def admin_backup(request: Request, actor: dict = Depends(_require_admin_pe
     import tarfile, io
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for fname in ("licenses.json", "tickets.json", "audit.jsonl", "events.jsonl", "users.json"):
+        for fname in ("licenses.json", "tickets.json", "audit.jsonl", "events.jsonl", "outbox.jsonl", "users.json"):
             fpath = DATA_DIR / fname
             if fpath.exists():
                 tar.add(fpath, arcname=fname)

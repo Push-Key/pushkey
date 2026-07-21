@@ -288,7 +288,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Return conflict responses without destroying either revision.
 - [x] Add per-account storage quotas and maximum request sizes.
 - [x] Add version history and retention policy.
-- [ ] Add transactional audit/outbox behavior.
+- [x] Add transactional audit/outbox behavior.
 - [x] Add a one-time importer from existing JSON/JSONL/blob storage.
 - [x] Add migration dry-run, reconciliation, rollback, and idempotency.
 - [x] Verify the server never receives password, salt, decrypted vault, or vault key.

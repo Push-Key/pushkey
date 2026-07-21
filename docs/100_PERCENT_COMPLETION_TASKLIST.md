@@ -202,7 +202,7 @@ Goal: move from alpha to full production/GA.
 
 - [ ] Migrate encrypted vault blobs to object storage.
 - [ ] Store vault revision metadata transactionally in PostgreSQL.
-- [ ] Add transactional audit/outbox behavior.
+- [x] Add transactional audit/outbox behavior.
 - [ ] Remove production flat-file write paths after migration.
 - [ ] Complete distributed rate limiting through Redis or API gateway.
 - [ ] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
