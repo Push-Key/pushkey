@@ -57,9 +57,9 @@ careful UI verification.
 - [ ] Add keyboard navigation and focus management.
 - [ ] Validate responsive layouts.
 - [ ] Add Playwright coverage for core vault journeys.
-- [ ] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
+- [x] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
 - [ ] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
-- [ ] Replace boilerplate `web/README.md` with an operator/developer runbook.
+- [x] Replace boilerplate `web/README.md` with an operator/developer runbook.
 
 Verification:
 

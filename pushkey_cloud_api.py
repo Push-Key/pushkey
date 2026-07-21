@@ -2320,7 +2320,7 @@ async def portal_request_renewal(request: Request):
     }
     tickets.append(ticket)
     _save_tickets(tickets)
-    _log_audit("portal_renewal_request", key, {"email": email})
+    _log_audit("portal_renewal_request", key, {"email": email}, request=request)
     return {"ok": True, "ticket_id": ticket["id"]}
 
 

@@ -851,6 +851,41 @@ def test_portal_renewal_request_creates_internal_ticket(client):
     assert "Please renew my alpha license." in ticket["message"]
 
 
+def test_portal_renewal_unknown_license_failure_is_privacy_safe(client):
+    real_key = _make_key(client, email="real-renew@example.com")
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        json={"license_key": "PRO-DOES-NOT-EXIST", "message": "renewal please"},
+    )
+
+    assert r.status_code == 404
+    combined = json.dumps(r.json())
+    assert "real-renew@example.com" not in combined
+    assert real_key not in combined
+    assert "PRO-DOES-NOT-EXIST" not in combined
+
+
+def test_portal_renewal_audit_uses_request_context_without_customer_message(client):
+    key = _make_key(client, tier="pro", email="audit-renew@example.com")
+    secret_message = "renew me but do not put this private support text in audit"
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        headers={"X-Request-ID": "portal-renewal-1"},
+        json={"license_key": key, "message": secret_message},
+    )
+
+    assert r.status_code == 200
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    event = next(e for e in audit if e["action"] == "portal_renewal_request")
+    encoded = json.dumps(event)
+    assert event["target"] == key
+    assert event["request_id"] == "portal-renewal-1"
+    assert "audit-renew@example.com" in encoded
+    assert secret_message not in encoded
+
+
 def test_csv_export(client):
     _make_key(client, email="ex@x.com")
     r = client.get("/api/admin/export", headers=ADMIN)
