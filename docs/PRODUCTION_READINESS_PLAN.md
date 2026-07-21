@@ -277,11 +277,11 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Tasks
 
-- [ ] Select managed PostgreSQL and object storage providers.
-- [ ] Design schemas for users, admins, sessions, licenses, devices, contacts, tickets, settings, audits, and vault revisions.
-- [ ] Add a formal migration framework.
-- [ ] Create initial schema migrations with constraints and indexes.
-- [ ] Store only hashed license keys and reset tokens.
+- [x] Select managed PostgreSQL and object storage providers.
+- [x] Design schemas for users, admins, sessions, licenses, devices, contacts, tickets, settings, audits, and vault revisions.
+- [x] Add a formal migration framework.
+- [x] Create initial schema migrations with constraints and indexes.
+- [x] Store only hashed license keys and reset tokens.
 - [ ] Migrate encrypted vault blobs to object storage.
 - [ ] Store vault revision metadata transactionally in PostgreSQL.
 - [x] Add conditional writes using revision or `If-Match`.
@@ -289,15 +289,15 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add per-account storage quotas and maximum request sizes.
 - [x] Add version history and retention policy.
 - [ ] Add transactional audit/outbox behavior.
-- [ ] Add a one-time importer from existing JSON/JSONL/blob storage.
-- [ ] Add migration dry-run, reconciliation, rollback, and idempotency.
+- [x] Add a one-time importer from existing JSON/JSONL/blob storage.
+- [x] Add migration dry-run, reconciliation, rollback, and idempotency.
 - [x] Verify the server never receives password, salt, decrypted vault, or vault key.
 - [x] Define account export and deletion workflows.
 - [ ] Remove production flat-file write paths after migration.
 
 ## Verification
 
-- [ ] Import a seeded legacy dataset and reconcile record counts and hashes.
+- [x] Import a seeded legacy dataset and reconcile record counts and hashes.
 - [ ] Run concurrent license, contact, and vault writes.
 - [x] Prove stale revisions cannot overwrite newer vaults.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
@@ -307,7 +307,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [ ] Transactional operational data
 - [x] Conflict-safe vault sync
-- [ ] Reversible, tested migration
+- [x] Reversible, tested migration
 - [ ] No production dependency on JSON/JSONL read-modify-write storage
 
 ---
@@ -320,12 +320,12 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [x] Replace 30-day bearer-only JWT behavior with short access tokens and revocable sessions.
 - [x] Add issuer, audience, subject, expiry, issued-at, and unique token IDs.
-- [ ] Add signing-key rotation.
+- [x] Add signing-key rotation.
 - [x] Revoke sessions on password change, reset, compromise, and account closure.
 - [ ] Add distributed rate limiting through Redis or the API gateway.
-- [ ] Configure trusted proxies before using forwarded client IPs.
-- [ ] Add per-endpoint limits, quotas, and `Retry-After`.
-- [ ] Rate-limit registration, login, reset, activation, heartbeat, sync, portal, support, and admin endpoints.
+- [x] Configure trusted proxies before using forwarded client IPs.
+- [x] Add per-endpoint limits, quotas, and `Retry-After`.
+- [x] Rate-limit registration, login, reset, activation, heartbeat, sync, portal, support, and admin endpoints.
 - [x] Add request body, header, and upload limits.
 - [x] Enumerate allowed CORS origins, headers, and methods.
 - [x] Add trusted-host enforcement.

@@ -711,6 +711,7 @@ def test_auth_login_rate_limit(low_rate_limit_app):
     # Third hits the limiter
     r3 = client.post("/api/v1/auth/login", json=body)
     assert r3.status_code == 429
+    assert r3.headers["retry-after"] == str(low_rate_limit_app.AUTH_RATE_WINDOW_SEC)
     assert "try again" in r3.json()["detail"].lower()
 
 

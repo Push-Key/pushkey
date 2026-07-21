@@ -8,7 +8,7 @@ Measured production-readiness progress:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 239/340 production items complete, 70.3%.
+Current result: 252/340 production items complete, 74.1%.
 
 ## Completed in this execution pass
 
@@ -33,6 +33,8 @@ Current result: 239/340 production items complete, 70.3%.
 - [x] Add structured request logs, request IDs, and operational metrics.
 - [x] Replace web-app `next lint` with ESLint 9 flat config and CI lint coverage.
 - [x] Add release-candidate scope, threat-model, legal/commercial, and backup/restore runbooks.
+- [x] Add migration framework, schema baseline, dry-run importer, and reconciliation tests.
+- [x] Add user JWT signing-key rotation and `Retry-After` rate-limit headers.
 
 ## Active priority queue
 

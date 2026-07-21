@@ -115,3 +115,21 @@ def test_user_tokens_include_standard_claims_and_unique_ids(app_module):
     assert payload["jti"]
     assert payload["jti"] != app_module.jwt.get_unverified_claims(token_b)["jti"]
     assert app_module.TOKEN_TTL_HOURS <= 1
+
+
+def test_user_token_decode_accepts_previous_signing_key_during_rotation(app_module):
+    token = app_module.jwt.encode(
+        {
+            "iss": app_module.TOKEN_ISSUER,
+            "aud": app_module.TOKEN_AUDIENCE,
+            "sub": "user@example.com",
+            "iat": 1,
+            "exp": 4102444800,
+            "jti": "old-key-token",
+        },
+        "previous-secret",
+        algorithm=app_module.ALGORITHM,
+    )
+    app_module.TOKEN_SIGNING_KEYS[:] = [app_module.SECRET_KEY, "previous-secret"]
+
+    assert app_module._decode_token(token) == "user@example.com"

@@ -120,6 +120,20 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    headers = dict(exc.headers or {})
+    if exc.status_code == 429:
+        path = request.url.path
+        retry_after = RATE_LIMIT_WINDOW_SEC
+        if path.startswith("/api/v1/auth") or path.startswith("/api/admin/auth"):
+            retry_after = AUTH_RATE_WINDOW_SEC
+        elif path.startswith("/api/portal"):
+            retry_after = PORTAL_RATE_WINDOW_SEC
+        headers.setdefault("Retry-After", str(retry_after))
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=headers)
+
+
 @app.middleware("http")
 async def _cloud_security_boundary(request: Request, call_next):
     started = time.perf_counter()
@@ -199,6 +213,11 @@ if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
             "Generate a password: python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
             "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
         )
+TOKEN_SIGNING_KEYS = [
+    key.strip()
+    for key in (SECRET_KEY + "," + os.environ.get("PUSHKEY_JWT_PREVIOUS_SECRETS", "")).split(",")
+    if key.strip()
+]
 _KNOWN_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
 TIER_PREFIXES = {tier: _KNOWN_PREFIXES[tier] for tier in PRODUCT_TIERS}
 DEVICE_LIMITS = {
@@ -235,22 +254,24 @@ def _create_token(email: str) -> str:
             "exp": int(exp.timestamp()),
             "jti": secrets.token_urlsafe(16),
         },
-        SECRET_KEY,
+        TOKEN_SIGNING_KEYS[0],
         algorithm=ALGORITHM,
     )
 
 def _decode_token(token: str) -> str:
-    try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
-            audience=TOKEN_AUDIENCE,
-            issuer=TOKEN_ISSUER,
-        )
-        return payload["sub"]
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    for signing_key in TOKEN_SIGNING_KEYS:
+        try:
+            payload = jwt.decode(
+                token,
+                signing_key,
+                algorithms=[ALGORITHM],
+                audience=TOKEN_AUDIENCE,
+                issuer=TOKEN_ISSUER,
+            )
+            return payload["sub"]
+        except JWTError:
+            continue
+    raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 def _current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
     email = _decode_token(creds.credentials)
