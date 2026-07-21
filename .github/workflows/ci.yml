@@ -141,6 +141,9 @@ jobs:
           pushkey --help
           python -m pip uninstall -y pushkey
 
+      - name: Smoke npm wrapper install, upgrade, and uninstall
+        run: python scripts/npm_package_smoke.py
+
   security:
     name: Security scans
     runs-on: ubuntu-latest

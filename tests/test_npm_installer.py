@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +39,7 @@ def test_release_workflow_publishes_assets_used_by_npm_installer():
     ]
 
     assert "--cli-only" in workflow
-    assert "actions/download-artifact@v4" in workflow
+    assert re.search(r"actions/download-artifact@[0-9a-f]{40}", workflow)
     assert '"$file.sha256"' in workflow
     for asset in assets:
         assert asset in workflow
@@ -50,4 +51,9 @@ def test_npm_shims_prevent_self_resolution_loops():
         text = shim.read_text(encoding="utf-8")
         assert "realpathSync" in text
         assert "process.execPath" in text
+        assert "spawnSync('pushkey'" not in text
         assert "bin !== __filename" not in text
+
+
+def test_npm_package_does_not_ship_unix_binary_placeholder():
+    assert not (ROOT / "npm" / "bin" / "pushkey").exists()

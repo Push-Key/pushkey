@@ -115,7 +115,7 @@ Goal: make installation and upgrade predictable for alpha users.
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Document arm64 as supported or unsupported.
 - [x] Prevent Windows shim self-resolution loops.
-- [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
+- [x] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 - [x] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and
   `pushkey app`.
 - [x] Release assets exactly match the npm download map.

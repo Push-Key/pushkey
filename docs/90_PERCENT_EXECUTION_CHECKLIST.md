@@ -84,7 +84,7 @@ These are locally testable except code signing.
 - [ ] Handle unsupported OS/architecture explicitly.
 - [ ] Add arm64 support or document it as unsupported.
 - [ ] Prevent Windows shim self-resolution loops.
-- [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
+- [x] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 - [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and `pushkey app`.
 - [ ] Release assets exactly match the npm download map.
 

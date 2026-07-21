@@ -413,7 +413,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Add arm64 support or document it as unsupported.
 - [x] Prevent Windows shim self-resolution loops.
-- [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
+- [x] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 
 ## Verification
 

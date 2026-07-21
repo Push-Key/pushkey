@@ -25,10 +25,12 @@ for (const bin of candidates) {
   }
 }
 
-// Fall back to pip-installed CLI
-const result = spawnSync('pushkey', process.argv.slice(2), { stdio: 'inherit', shell: true });
-if (result.error) {
-  console.error('[pushkey] Could not find pushkey. Try: pip install pushkey');
-  process.exit(1);
+// Fall back to pip-installed CLI without resolving back to this npm shim.
+for (const python of ['python', 'python3']) {
+  const result = spawnSync(python, ['-m', 'pushkey_cli', ...process.argv.slice(2)], { stdio: 'inherit' });
+  if (!result.error) {
+    process.exit(result.status ?? 1);
+  }
 }
-process.exit(result.status ?? 1);
+console.error('[pushkey] Could not find a Pushkey binary or Python package. Try: pip install pushkey');
+process.exit(1);
