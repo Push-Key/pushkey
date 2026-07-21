@@ -77,6 +77,15 @@ export default function Page() {
   }
 
   if (error && !status) {
+    if (error.startsWith("401:")) {
+      return (
+        <StatePanel
+          title="Vault session ended"
+          detail="The local browser session is locked or expired. Reopen the app from the Pushkey CLI to start a new secure session."
+        />
+      );
+    }
+
     return (
       <div className="flex h-screen items-center justify-center p-4">
         <div className="max-w-md rounded-lg border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-6 text-sm">

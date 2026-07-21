@@ -59,7 +59,7 @@ Do not claim for alpha:
 
 ### Tests And E2E
 
-- [ ] Add Playwright coverage for local vault journeys:
+- [x] Add Playwright coverage for local vault journeys:
   unlock, list, add, rotate, reveal timeout, inject, lock, and offline handling.
 - [x] Add portal tests for license lookup, renewal request, support ticket creation,
   and privacy-safe failures.

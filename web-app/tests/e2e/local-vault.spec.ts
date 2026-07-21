@@ -121,6 +121,12 @@ test("local vault browser journey unlocks, mutates, injects, and locks", async (
     const revealed = await api<{ value: string }>(page, "/api/keys/NEW_KEY");
     expect(revealed.value).toBe("sk-rotated");
 
+    await page.getByRole("button", { name: "Open Vault" }).click();
+    await expect(page.getByText("NEW_KEY")).toBeVisible();
+    await page.getByRole("button", { name: "Reveal NEW_KEY" }).click();
+    await expect(page.getByText("sk-rotated")).toBeVisible();
+    await expect(page.getByText("sk-rotated")).toBeHidden({ timeout: 12_000 });
+
     await api(page, "/api/projects", {
       method: "POST",
       body: JSON.stringify({ path: projectDir, name: "E2E Project" }),
@@ -136,12 +142,17 @@ test("local vault browser journey unlocks, mutates, injects, and locks", async (
     );
     expect(injected).toMatchObject({ injected: ["NEW_KEY"], wrote: true });
 
-    const locked = await api<{ locked: boolean }>(
-      page,
-      "/api/lock",
-      { method: "POST", body: JSON.stringify({}) },
-    );
-    expect(locked.locked).toBe(true);
+    await page.route("**/api/status", (route) => route.abort());
+    await page.reload();
+    await expect(page.getByText("Cannot reach Pushkey local API")).toBeVisible();
+    await expect(page.getByText("pushkey app")).toBeVisible();
+    await page.unroute("**/api/status");
+
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Lock vault" })).toBeVisible();
+    await page.getByRole("button", { name: "Lock vault" }).click();
+    await expect(page.getByText("Vault session ended")).toBeVisible();
+    await expect(page.getByText("locked or expired")).toBeVisible();
   } finally {
     await stopServer(server);
   }

@@ -72,7 +72,7 @@ Roadmap items expected to close:
 Goal: prove critical user journeys work from browser/API boundaries, not just
 unit tests.
 
-- [ ] Add Playwright coverage for local vault journeys:
+- [x] Add Playwright coverage for local vault journeys:
   unlock, list, add, rotate, reveal timeout, inject, lock, offline.
 - [x] Add portal tests for license lookup, renewal request, support ticket
   creation, and privacy-safe failures.
