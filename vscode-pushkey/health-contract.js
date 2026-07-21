@@ -99,18 +99,30 @@ function normalizeRecord(record, strict) {
     const validDays = daysOld === null || (Number.isInteger(daysOld) && daysOld >= 0 && daysOld <= 365000);
     const provider = record.provider;
     const validProvider = provider === null || (typeof provider === 'string' && PROVIDER.test(provider));
-    if (!status || !validDays || !validProvider) return null;
-    return { status, days_old: daysOld, provider };
+    if (!status || (strict && (!validDays || !validProvider))) return null;
+    return {
+        status,
+        days_old: validDays ? daysOld : null,
+        provider: validProvider ? provider : null,
+    };
 }
 
 function normalizeKeys(keys, strict) {
     if (!keys || typeof keys !== 'object' || Array.isArray(keys) || Object.keys(keys).length > 10000) return null;
-    const normalized = {};
+    const normalized = Object.create(null);
     for (const [name, record] of Object.entries(keys)) {
-        if (!KEY_NAME.test(name)) return null;
+        if (!KEY_NAME.test(name)) {
+            if (strict) return null;
+            continue;
+        }
         const item = normalizeRecord(record, strict);
         if (!item) return null;
-        normalized[name] = item;
+        Object.defineProperty(normalized, name, {
+            value: item,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+        });
     }
     return normalized;
 }
@@ -125,7 +137,7 @@ function parseHealthBytes(raw, { now = new Date(), legacyGeneratedAt = null } = 
         document = JSON.parse(text);
     } catch (_) { return unavailable('health_malformed_json'); }
     if (!document || typeof document !== 'object' || Array.isArray(document)) return unavailable('health_schema_invalid');
-    if (Object.prototype.hasOwnProperty.call(document, 'schema_version')) {
+    if ([...ROOT_FIELDS].some(field => Object.prototype.hasOwnProperty.call(document, field))) {
         if (document.schema_version !== 1 || Object.keys(document).length !== 3 || Object.keys(document).some(field => !ROOT_FIELDS.has(field))) {
             return unavailable('health_unsupported_version');
         }
@@ -186,15 +198,27 @@ class HealthWatcher {
     }
     attach() {
         if (this.disposed) return;
-        if (this.fileWatcher) this.fileWatcher.close();
+        this.closeWatcher();
         try {
-            this.fileWatcher = this.fs.watch(path.dirname(this.healthFile), (_event, filename) => {
+            const watcher = this.fs.watch(path.dirname(this.healthFile), (_event, filename) => {
                 if (filename !== null && filename !== undefined && String(filename) !== path.basename(this.healthFile)) return;
                 this.schedule(() => this.refresh(), this.debounceMs);
             });
+            watcher.on('error', () => {
+                if (this.disposed || this.fileWatcher !== watcher) return;
+                this.closeWatcher();
+                this.schedule(() => this.attach(), this.retryMs);
+            });
+            this.fileWatcher = watcher;
         } catch (_) {
             this.schedule(() => this.attach(), this.retryMs);
         }
+    }
+    closeWatcher() {
+        if (!this.fileWatcher) return;
+        const watcher = this.fileWatcher;
+        this.fileWatcher = null;
+        try { watcher.close(); } catch (_) {}
     }
     schedule(callback, delay) {
         if (this.timer !== null) this.clearTimeout(this.timer);
@@ -203,7 +227,8 @@ class HealthWatcher {
     dispose() {
         this.disposed = true;
         if (this.timer !== null) this.clearTimeout(this.timer);
-        if (this.fileWatcher) this.fileWatcher.close();
+        this.timer = null;
+        this.closeWatcher();
     }
 }
 

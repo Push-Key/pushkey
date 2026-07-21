@@ -26,7 +26,9 @@ test('parses a strict v1 document including a valid empty snapshot', () => {
     assert.deepEqual(result.keys.STRIPE_KEY, {
         status: 'warning', days_old: 67, provider: 'Stripe',
     });
-    assert.deepEqual(parseHealthBytes(envelope(), { now: NOW }).keys, {});
+    const empty = parseHealthBytes(envelope(), { now: NOW }).keys;
+    assert.equal(Object.getPrototypeOf(empty), null);
+    assert.deepEqual(Object.keys(empty), []);
 });
 
 test('rejects malformed, mixed, unsupported, and oversized documents', () => {
@@ -54,6 +56,40 @@ test('normalizes legacy data using mtime freshness and unknown statuses', () => 
     assert.deepEqual(result.keys.LEGACY_KEY, {
         status: 'unknown', days_old: 4, provider: 'Legacy',
     });
+});
+
+test('normalizes legacy optional fields and omits ineligible names safely', () => {
+    const raw = Buffer.from('{"LEGACY_MISSING":{"status":"healthy"},"LEGACY_INVALID":{"status":"warning","days_old":-1,"provider":"\\ninvalid"},"NOT-AN-ENV-NAME":{"status":"healthy","days_old":1,"provider":"Ignored"},"__proto__":{"status":"critical","days_old":5,"provider":"Prototype Safe"}}');
+    const result = parseHealthBytes(raw, {
+        now: NOW,
+        legacyGeneratedAt: new Date('2026-07-20T11:00:00Z'),
+    });
+    assert.equal(result.state, 'available');
+    assert.deepEqual(result.keys.LEGACY_MISSING, {
+        status: 'healthy', days_old: null, provider: null,
+    });
+    assert.deepEqual(result.keys.LEGACY_INVALID, {
+        status: 'warning', days_old: null, provider: null,
+    });
+    assert.equal(Object.hasOwn(result.keys, 'NOT-AN-ENV-NAME'), false);
+    assert.equal(Object.getPrototypeOf(result.keys), null);
+    assert.equal(Object.hasOwn(result.keys, '__proto__'), true);
+    assert.deepEqual(result.keys.__proto__, {
+        status: 'critical', days_old: 5, provider: 'Prototype Safe',
+    });
+});
+
+test('rejects every mixed legacy and envelope root shape', () => {
+    for (const reservedField of ['schema_version', 'generated_at', 'keys']) {
+        const result = parseHealthBytes(Buffer.from(JSON.stringify({
+            LEGACY_KEY: { status: 'healthy', days_old: 0, provider: null },
+            [reservedField]: reservedField === 'keys' ? {} : 'reserved',
+        })), {
+            now: NOW,
+            legacyGeneratedAt: new Date('2026-07-20T11:00:00Z'),
+        });
+        assert.equal(result.state, 'unavailable', reservedField);
+    }
 });
 
 test('rejects stale and future v1 snapshots', () => {
@@ -86,7 +122,7 @@ test('watcher debounces atomic replacement reads and reattaches after directory 
             watchCalls += 1;
             if (watchCalls === 1) throw new Error('directory missing');
             watcherCallback = callback;
-            return { close() {} };
+            return { close() {}, on() {} };
         },
     };
     const schedule = callback => { const id = ++nextTimer; timers.set(id, callback); return id; };
@@ -126,7 +162,7 @@ test('watcher retries a transient atomic replacement read before clearing state'
         healthFile: 'health.json',
         read: () => results.shift(),
         onUpdate: result => assert.equal(result.state, 'available'),
-        fsModule: { watch: () => ({ close() {} }) },
+        fsModule: { watch: () => ({ close() {}, on() {} }) },
         setTimeoutFn: callback => { const id = ++nextTimer; timers.set(id, callback); return id; },
         clearTimeoutFn: id => timers.delete(id),
     });
@@ -135,4 +171,45 @@ test('watcher retries a transient atomic replacement read before clearing state'
     timers.delete(id);
     callback();
     watcher.dispose();
+});
+
+test('watcher closes and reattaches after a live watcher error', () => {
+    const timers = new Map();
+    let nextTimer = 0;
+    let watchCalls = 0;
+    const watchers = [];
+    const fakeFs = {
+        watch() {
+            const handlers = new Map();
+            const watcher = {
+                closed: false,
+                close() { this.closed = true; },
+                on(event, handler) { handlers.set(event, handler); },
+                emit(event, error) { handlers.get(event)(error); },
+            };
+            watchers.push(watcher);
+            watchCalls += 1;
+            return watcher;
+        },
+    };
+    const schedule = callback => { const id = ++nextTimer; timers.set(id, callback); return id; };
+    const watcher = new HealthWatcher({
+        healthFile: path.join('pushkey', 'health.json'),
+        fsModule: fakeFs,
+        read: () => ({ state: 'available', keys: {} }),
+        onUpdate() {},
+        setTimeoutFn: schedule,
+        clearTimeoutFn: id => timers.delete(id),
+    });
+    watcher.start();
+    watchers[0].emit('error', new Error('directory removed'));
+    assert.equal(watchers[0].closed, true);
+    assert.equal(timers.size, 1);
+    const [id, callback] = timers.entries().next().value;
+    timers.delete(id);
+    callback();
+    assert.equal(watchCalls, 2);
+    watcher.dispose();
+    assert.equal(watchers[1].closed, true);
+    assert.equal(timers.size, 0);
 });
