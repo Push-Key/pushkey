@@ -44,8 +44,8 @@ claims.
 - [x] Add safe secret reveal/copy timeouts.
 - [x] Prove secret values do not enter analytics, browser logs, local storage,
   session storage, screenshots, or persistent app state.
-- [ ] Add keyboard navigation and focus management for critical journeys.
-- [ ] Validate supported alpha responsive viewports.
+- [x] Add keyboard navigation and focus management for critical journeys.
+- [x] Validate supported alpha responsive viewports.
 - [x] Remove or disable unimplemented “coming soon” controls.
 - [x] Validate all product/admin/website claims against tested capability.
 - [x] Configure metadata, canonical URLs, sitemap, robots, Open Graph, and error pages.

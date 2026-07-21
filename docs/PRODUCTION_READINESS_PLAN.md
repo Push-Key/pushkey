@@ -355,9 +355,9 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add safe secret reveal/copy timeouts.
 - [x] Prevent secret values from entering analytics, browser logs, or persistent state.
 - [x] Replace obsolete `next lint` with the working ESLint pattern from `web`.
-- [ ] Add keyboard navigation and focus management.
+- [x] Add keyboard navigation and focus management.
 - [ ] Meet WCAG 2.2 AA for critical journeys.
-- [ ] Add responsive layouts for supported viewport sizes.
+- [x] Add responsive layouts for supported viewport sizes.
 - [ ] Add Playwright coverage for core vault journeys.
 
 ## Marketing/admin/portal tasks

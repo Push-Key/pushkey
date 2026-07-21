@@ -54,8 +54,8 @@ Do not claim for alpha:
   or screenshots.
 - [x] Remove or disable unimplemented “coming soon” controls from alpha surfaces.
 - [x] Validate all website/admin/product claims against tested capabilities.
-- [ ] Add basic keyboard navigation and focus checks for critical journeys.
-- [ ] Validate responsive layouts for supported alpha viewport sizes.
+- [x] Add basic keyboard navigation and focus checks for critical journeys.
+- [x] Validate responsive layouts for supported alpha viewport sizes.
 
 ### Tests And E2E
 

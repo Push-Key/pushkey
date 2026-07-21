@@ -298,16 +298,17 @@ export function VaultTab() {
         </TableCell>
         <TableCell className="text-right">
           <div className="flex justify-end gap-0.5 flex-wrap">
-            <Button variant="ghost" size="icon" onClick={() => reveal(k.name)} title="Reveal">
+            <Button variant="ghost" size="icon" onClick={() => reveal(k.name)} title="Reveal" aria-label={`Reveal ${k.name}`}>
               {revealed[k.name] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => copy(k.name)} title="Copy">
+            <Button variant="ghost" size="icon" onClick={() => copy(k.name)} title="Copy" aria-label={`Copy ${k.name}`}>
               {copied === k.name ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
               size="icon"
               title="Edit metadata"
+              aria-label={`Edit metadata for ${k.name}`}
               onClick={() => toggleEdit(k)}
             >
               <Pencil className="h-4 w-4" />
@@ -316,6 +317,7 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Set backup"
+              aria-label={`Set backup for ${k.name}`}
               className="text-cyan-400 hover:text-cyan-300"
               onClick={() => toggleBackup(k.name)}
             >
@@ -326,6 +328,7 @@ export function VaultTab() {
                 variant="ghost"
                 size="icon"
                 title="Promote backup"
+                aria-label={`Promote backup for ${k.name}`}
                 className="text-emerald-400 hover:text-emerald-300"
                 onClick={() => handlePromote(k.name)}
                 disabled={promoteLoading === k.name}
@@ -337,6 +340,7 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Rotate"
+              aria-label={`Rotate ${k.name}`}
               className="text-orange-400 hover:text-orange-300"
               onClick={() => toggleRotate(k.name)}
             >
@@ -346,6 +350,7 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Delete"
+              aria-label={`Delete ${k.name}`}
               className="text-red-400 hover:text-red-300"
               onClick={() => handleDelete(k.name)}
             >

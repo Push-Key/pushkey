@@ -91,7 +91,7 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
   };
 
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r bg-[var(--color-card)]">
+    <aside className="flex w-full md:w-56 shrink-0 flex-col border-b bg-[var(--color-card)] md:h-screen md:border-b-0 md:border-r">
       <div className="flex items-center gap-2 px-4 py-4">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="Pushkey" className="h-8 w-8 shrink-0" />
@@ -105,6 +105,8 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
         {items.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
+            aria-current={active === id ? "page" : undefined}
+            aria-label={`Open ${label}`}
             onClick={() => onSelect(id)}
             className={cn(
               "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
@@ -122,6 +124,7 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
 
       <div className="border-t p-3 space-y-2">
         <button
+          aria-label="Lock vault"
           onClick={onLock}
           className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[var(--color-muted-foreground)] hover:bg-[var(--color-muted)] hover:text-[var(--color-destructive)]"
         >
@@ -130,6 +133,7 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
         <div className="flex items-center justify-between px-3 text-[10px] text-[var(--color-muted-foreground)]/70">
           <span>v0.1.0</span>
           <button
+            aria-label="Open Settings"
             onClick={() => onSelect("settings")}
             className="hover:text-[var(--color-foreground)] hover:underline"
           >

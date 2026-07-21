@@ -111,9 +111,9 @@ export default function Page() {
   }
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen flex-col md:flex-row">
       <Sidebar active={tab} onSelect={setTab} onLock={lock} keyCount={status.key_count} />
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-4 md:p-6">
         {tab === "dashboard" && <DashboardTab onNavigate={(t) => setTab(t as Tab)} />}
         {tab === "vault"     && <VaultTab />}
         {tab === "projects"  && <ProjectsTab />}
