@@ -129,6 +129,14 @@ jobs:
           python -m pip install dist/*.whl
           pushkey --help
 
+      - name: Install source distribution and test uninstall
+        shell: bash
+        run: |
+          python -m pip uninstall -y pushkey
+          python -m pip install dist/*.tar.gz
+          pushkey --help
+          python -m pip uninstall -y pushkey
+
   security:
     name: Security scans
     runs-on: ubuntu-latest
@@ -141,6 +149,16 @@ jobs:
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Export public repository boundary
+        run: python scripts/public_export.py public-export
+
+      - name: Secret scan public export
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --source public-export --no-git --redact
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

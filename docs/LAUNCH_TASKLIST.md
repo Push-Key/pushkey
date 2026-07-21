@@ -8,7 +8,7 @@ Measured production-readiness progress:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 140/340 production items complete, 41.2%.
+Current result: 170/340 production items complete, 50.0%.
 
 ## Completed in this execution pass
 
@@ -21,6 +21,12 @@ Current result: 140/340 production items complete, 41.2%.
 - [x] Add MCP allowlisted project-path validation and hostile input tests.
 - [x] Add admin role permissions and actor/request audit attribution tests.
 - [x] Add packaging smoke and security scan CI follow-up.
+- [x] Add admin MFA enrollment, recovery codes, login enforcement, and reset tests.
+- [x] Harden cloud API request limits, CORS, trusted hosts, security headers, and readiness checks.
+- [x] Remove the Git-sourced package dependency and test package metadata/entry points.
+- [x] Add release workflow checksums, SBOM/provenance attestations, and public-export secret scanning.
+- [x] Replace browser extension key-list `innerHTML` rendering with safe DOM/text APIs.
+- [x] Add data-governance coverage for privacy, retention, export, deletion, and subprocessors.
 
 ## Active priority queue
 
@@ -53,7 +59,7 @@ The 5-task dependency chain lives in [CONSECUTIVE_LAUNCH_TASKS.md](CONSECUTIVE_L
 - [x] Define admin user, role, session, MFA, recovery, and audit models.
 - [ ] Add individual admin-account lifecycle endpoints.
 - [x] Add least-privilege roles and route permissions.
-- [ ] Add MFA enrollment, recovery codes, and reset flow.
+- [x] Add MFA enrollment, recovery codes, and reset flow.
 - [x] Add session refresh rotation and broad server-side revocation.
 - [x] Add login throttling, lockout policy, and alert audit events.
 - [x] Record actor ID, role, request ID, IP, and target in admin audit events.

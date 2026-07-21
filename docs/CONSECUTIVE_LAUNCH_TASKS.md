@@ -61,7 +61,7 @@ authoritative.
 - [x] Remove browser-held admin secret.
 - [x] Add individual admin-account lifecycle.
 - [x] Add roles and route permissions.
-- [ ] Add MFA enrollment and recovery codes.
+- [x] Add MFA enrollment and recovery codes.
 - [x] Add refresh rotation and broad session revocation.
 - [x] Add actor/request attribution to every admin mutation audit event.
 - [x] Add tests for roles, disabled admins, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
@@ -85,8 +85,9 @@ public infrastructure.
 - [ ] Add importer from existing JSON/JSONL/blob storage.
 - [ ] Remove production flat-file write paths.
 - [ ] Add distributed rate limiting.
-- [ ] Add trusted proxy/host/CORS/security-header policy.
-- [ ] Add request limits, idempotency keys, SMTP retry, and abuse alerts.
+- [x] Add trusted proxy/host/CORS/security-header policy.
+- [ ] Add idempotency keys, SMTP retry, and abuse alerts.
+- [x] Add request limits.
 
 Exit gate:
 
@@ -100,12 +101,12 @@ Goal: package, verify, operate, review, and launch.
 
 - [ ] Complete frontend states, accessibility, and Playwright coverage.
 - [ ] Decide extension scope: ship, beta, or defer.
-- [ ] Build and install-test sdist/wheel.
+- [x] Build and install-test sdist/wheel.
 - [ ] Reproduce PyInstaller builds from clean checkout.
 - [ ] Align npm wrapper asset names and checksum/signature verification.
-- [ ] Add CI matrices, security scans, SBOM, and provenance.
+- [x] Add CI matrices, security scans, SBOM, and provenance.
 - [ ] Configure monitoring, backups, restore drill, and rollback drill.
-- [ ] Complete legal/privacy/support docs.
+- [x] Complete legal/privacy/support docs.
 - [ ] Commission independent security review.
 - [ ] Resolve critical/high findings.
 - [ ] Run private beta.

@@ -62,6 +62,33 @@ def test_admin_endpoints_reject_missing_secret(client):
     assert r.status_code == 401
 
 
+def test_cloud_api_applies_security_headers_and_readiness(client):
+    r = client.get("/api/v1/health")
+
+    assert r.status_code == 200
+    assert r.headers["strict-transport-security"] == "max-age=31536000; includeSubDomains"
+    assert r.headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["referrer-policy"] == "no-referrer"
+
+
+def test_cloud_api_rejects_oversized_request_body(app_module):
+    from fastapi.testclient import TestClient
+
+    app_module.MAX_REQUEST_BYTES = 8
+    client = TestClient(app_module.app)
+
+    r = client.post(
+        "/api/v1/auth/register",
+        headers={"Content-Length": "9"},
+        content=b"123456789",
+    )
+
+    assert r.status_code == 413
+    assert r.json() == {"detail": "Request body too large"}
+
+
 def test_admin_endpoints_reject_wrong_secret(client):
     r = client.post("/api/admin/licenses/generate", json={"tier": "pro"}, headers={"X-CSRF-Token": "wrong"})
     assert r.status_code == 403
@@ -227,6 +254,51 @@ def test_admin_successful_login_resets_failed_login_state(client, app_module):
     admin = app_module._admin_by_email("admin@example.com")
     assert admin.get("failed_login_count", 0) == 0
     assert admin.get("lockout_until", "") == ""
+
+
+def test_admin_mfa_enrollment_and_login_flow(client, app_module):
+    setup = client.post("/api/admin/auth/mfa/setup", headers=ADMIN)
+    assert setup.status_code == 200
+    secret = setup.json()["secret"]
+    recovery_codes = setup.json()["recovery_codes"]
+    assert len(recovery_codes) == app_module.ADMIN_MFA_RECOVERY_CODE_COUNT
+    assert all(code.startswith("PK-MFA-") for code in recovery_codes)
+
+    code = app_module._totp_code(secret, int(app_module.time.time() // 30))
+    confirm = client.post("/api/admin/auth/mfa/confirm", headers=ADMIN, json={"code": code})
+    assert confirm.status_code == 200
+    assert confirm.json()["enabled"] is True
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin["mfa_secret"] == secret
+    assert "mfa_pending_secret" not in admin
+    assert all("recovery_codes" not in session for session in app_module._load_admin_sessions().values())
+
+    client.cookies.clear()
+    assert client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    }).status_code == 401
+    assert client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+        "mfa_code": app_module._totp_code(secret, int(app_module.time.time() // 30)),
+    }).status_code == 200
+
+
+def test_owner_can_reset_admin_mfa(client, app_module):
+    target_id = _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    admins = app_module._load_admins()
+    admins[target_id]["mfa_secret"] = "JBSWY3DPEHPK3PXP"
+    admins[target_id]["mfa_recovery_hashes"] = ["hash"]
+    app_module._save_admins(admins)
+
+    r = client.post(f"/api/admin/admins/{target_id}/mfa/reset", headers=ADMIN)
+
+    assert r.status_code == 200
+    assert r.json()["reset"] is True
+    target = app_module._load_admins()[target_id]
+    assert target.get("mfa_secret", "") == ""
+    assert target.get("mfa_recovery_hashes", []) == []
 
 
 # ── License generation ───────────────────────────────────────────

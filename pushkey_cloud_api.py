@@ -45,6 +45,7 @@ try:
     from fastapi.responses import JSONResponse, Response
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.middleware.trustedhost import TrustedHostMiddleware
     from passlib.context import CryptContext
     from jose import jwt, JWTError
 except ImportError:
@@ -74,24 +75,58 @@ DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
 VAULTS_DIR = DATA_DIR / "vaults"
 VAULTS_DIR.mkdir(exist_ok=True)
+MAX_REQUEST_BYTES = int(os.environ.get("PUSHKEY_MAX_REQUEST_BYTES", str(1024 * 1024)))
+TRUSTED_HOSTS = [
+    host.strip()
+    for host in os.environ.get("PUSHKEY_TRUSTED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    if host.strip()
+]
+ALLOWED_CORS_ORIGINS = [
+    origin
+    for origin in [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://www.push-key.com",
+        "https://push-key.com",
+        os.environ.get("ADMIN_ORIGIN", "").strip(),
+    ]
+    if origin
+]
+if MAX_REQUEST_BYTES <= 0:
+    raise RuntimeError("PUSHKEY_MAX_REQUEST_BYTES must be greater than zero")
 
 pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
 
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "https://www.push-key.com",
-        "https://push-key.com",
-        os.environ.get("ADMIN_ORIGIN", ""),
-    ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Device-ID", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
+
+
+@app.middleware("http")
+async def _cloud_security_boundary(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+
+    response = await call_next(request)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
 
 # ── Admin config ─────────────────────────────────────────────────
 LICENSES_FILE = DATA_DIR / "licenses.json"
@@ -104,6 +139,7 @@ ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"
 ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
 ADMIN_LOGIN_LOCKOUT_FAILURES = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES", "3"))
 ADMIN_LOGIN_LOCKOUT_MIN = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN", "15"))
+ADMIN_MFA_RECOVERY_CODE_COUNT = int(os.environ.get("PUSHKEY_ADMIN_MFA_RECOVERY_CODE_COUNT", "8"))
 ADMIN_ROLE_PERMISSIONS = {
     "viewer": {"read"},
     "support": {"read", "support"},
@@ -117,6 +153,8 @@ if ADMIN_LOGIN_LOCKOUT_FAILURES <= 0:
     raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES must be greater than zero")
 if ADMIN_LOGIN_LOCKOUT_MIN <= 0:
     raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN must be greater than zero")
+if ADMIN_MFA_RECOVERY_CODE_COUNT <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_MFA_RECOVERY_CODE_COUNT must be greater than zero")
 if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
     if _DEV_MODE:
         ADMIN_BOOTSTRAP_EMAIL = ADMIN_BOOTSTRAP_EMAIL or "admin@localhost"
@@ -850,6 +888,18 @@ def _verify_totp(secret: str, code: str, now: int | None = None) -> bool:
     return any(hmac.compare_digest(_totp_code(secret, step + drift), code) for drift in (-1, 0, 1))
 
 
+def _new_mfa_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _new_mfa_recovery_codes() -> list[str]:
+    return [f"PK-MFA-{secrets.token_urlsafe(10).replace('-', '').replace('_', '')[:12].upper()}" for _ in range(ADMIN_MFA_RECOVERY_CODE_COUNT)]
+
+
+def _hash_mfa_recovery_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
 def _issue_admin_session(admin: dict, request: Request) -> tuple[str, str]:
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
@@ -1014,6 +1064,47 @@ async def admin_me(actor: dict = Depends(_require_admin)):
     return {"admin": actor}
 
 
+@app.post("/api/admin/auth/mfa/setup")
+async def admin_mfa_setup(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+):
+    secret = _new_mfa_secret()
+    codes = _new_mfa_recovery_codes()
+    admins = _load_admins()
+    admin = admins.get(actor["id"])
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    admin["mfa_pending_secret"] = secret
+    admin["mfa_pending_recovery_hashes"] = [_hash_mfa_recovery_code(code) for code in codes]
+    _save_admins(admins)
+    _log_audit("admin_mfa_setup", actor["id"], actor=actor, request=request)
+    return {"secret": secret, "recovery_codes": codes}
+
+
+@app.post("/api/admin/auth/mfa/confirm")
+async def admin_mfa_confirm(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+):
+    body = await request.json()
+    code = str(body.get("code", ""))
+    admins = _load_admins()
+    admin = admins.get(actor["id"])
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    secret = admin.get("mfa_pending_secret", "")
+    if not secret or not _verify_totp(secret, code):
+        raise HTTPException(400, "Invalid MFA confirmation code")
+    admin["mfa_secret"] = secret
+    admin["mfa_recovery_hashes"] = admin.get("mfa_pending_recovery_hashes", [])
+    admin.pop("mfa_pending_secret", None)
+    admin.pop("mfa_pending_recovery_hashes", None)
+    _save_admins(admins)
+    _log_audit("admin_mfa_confirm", actor["id"], actor=actor, request=request)
+    return {"enabled": True}
+
+
 @app.post("/api/admin/admins/{admin_id}/sessions/revoke")
 async def admin_revoke_sessions(
     admin_id: str,
@@ -1032,6 +1123,25 @@ async def admin_revoke_sessions(
         request=request,
     )
     return {"ok": True, "admin_id": admin_id, "revoked": revoked}
+
+
+@app.post("/api/admin/admins/{admin_id}/mfa/reset")
+async def admin_reset_mfa(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    if admin_id not in admins:
+        raise HTTPException(404, "Admin not found")
+    target = admins[admin_id]
+    target["mfa_secret"] = ""
+    target["mfa_recovery_hashes"] = []
+    target.pop("mfa_pending_secret", None)
+    target.pop("mfa_pending_recovery_hashes", None)
+    _save_admins(admins)
+    _log_audit("admin_mfa_reset", admin_id, {"target_email": target.get("email", "")}, actor=actor, request=request)
+    return {"ok": True, "admin_id": admin_id, "reset": True}
 
 
 SMTP_HOST  = os.environ.get("SMTP_HOST", "")

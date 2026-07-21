@@ -245,7 +245,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Store newly created admin password hashes with Argon2id while retaining legacy bcrypt verification.
 - [x] Add individual admin accounts.
 - [x] Add least-privilege roles and route permissions.
-- [ ] Add MFA enrollment, verification, recovery codes, and reset procedures.
+- [x] Add MFA enrollment, verification, recovery codes, and reset procedures.
 - [x] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
 - [x] Add refresh rotation and server-side session revocation.
 - [x] Add CSRF protection for cookie-authenticated mutations.
@@ -286,7 +286,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [ ] Store vault revision metadata transactionally in PostgreSQL.
 - [ ] Add conditional writes using revision or `If-Match`.
 - [ ] Return conflict responses without destroying either revision.
-- [ ] Add per-account storage quotas and maximum request sizes.
+- [x] Add per-account storage quotas and maximum request sizes.
 - [ ] Add version history and retention policy.
 - [ ] Add transactional audit/outbox behavior.
 - [ ] Add a one-time importer from existing JSON/JSONL/blob storage.
@@ -326,11 +326,11 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [ ] Configure trusted proxies before using forwarded client IPs.
 - [ ] Add per-endpoint limits, quotas, and `Retry-After`.
 - [ ] Rate-limit registration, login, reset, activation, heartbeat, sync, portal, support, and admin endpoints.
-- [ ] Add request body, header, and upload limits.
-- [ ] Enumerate allowed CORS origins, headers, and methods.
-- [ ] Add trusted-host enforcement.
-- [ ] Add HSTS, CSP, frame, referrer, and content-type headers.
-- [ ] Add dependency/readiness health checks.
+- [x] Add request body, header, and upload limits.
+- [x] Enumerate allowed CORS origins, headers, and methods.
+- [x] Add trusted-host enforcement.
+- [x] Add HSTS, CSP, frame, referrer, and content-type headers.
+- [x] Add dependency/readiness health checks.
 - [ ] Add idempotency keys for retryable mutations.
 - [ ] Add SMTP retry, timeout, and dead-letter behavior.
 - [ ] Add abuse detection and operational alerts.
@@ -387,22 +387,22 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [x] Replace placeholder author metadata.
 - [x] Reconcile minimum Python version across code, package, CI, and docs.
-- [ ] Define core and optional dependency groups.
-- [ ] Remove or pin the Git-sourced `graphifyy` dependency.
-- [ ] Include every required runtime module and static artifact.
-- [ ] Decide which entry points ship in the public package.
+- [x] Define core and optional dependency groups.
+- [x] Remove or pin the Git-sourced `graphifyy` dependency.
+- [x] Include every required runtime module and static artifact.
+- [x] Decide which entry points ship in the public package.
 - [x] Build sdist and wheel.
-- [ ] Install both into fresh virtual environments.
-- [ ] Test upgrade and uninstall behavior.
+- [x] Install both into fresh virtual environments.
+- [x] Test upgrade and uninstall behavior.
 
 ## Executable tasks
 
 - [ ] Make PyInstaller specs reproducible from a clean checkout.
-- [ ] Embed the exact local web build.
+- [x] Embed the exact local web build.
 - [ ] Verify icons and version resources.
 - [ ] Produce supported OS/architecture artifacts.
 - [ ] Sign Windows and macOS artifacts.
-- [ ] Generate SHA-256 checksums, signatures, provenance, and SBOMs.
+- [x] Generate SHA-256 checksums, signatures, provenance, and SBOMs.
 - [ ] Test upgrades without vault loss.
 
 ## npm wrapper tasks
@@ -451,18 +451,18 @@ npm pack --dry-run
 - [x] Add Trivy container/filesystem scanning.
 - [x] Generate CycloneDX or SPDX SBOMs.
 - [ ] Pin CI actions by immutable commit SHA.
-- [ ] Add dependency update automation with review gates.
-- [ ] Add artifact provenance and release attestations.
-- [ ] Add a release workflow requiring an approved version tag.
-- [ ] Add an automated public-repository export from an allowlist.
-- [ ] Secret-scan and clean-room-test the exported public repository.
+- [x] Add dependency update automation with review gates.
+- [x] Add artifact provenance and release attestations.
+- [x] Add a release workflow requiring an approved version tag.
+- [x] Add an automated public-repository export from an allowlist.
+- [x] Secret-scan and clean-room-test the exported public repository.
 - [ ] Protect the main branch and require all release gates.
 
 ## Exit Gate
 
 - [ ] No release can bypass tests, scans, signing, or approval
-- [ ] Public/private boundary is executable and tested
-- [ ] Build provenance is available for every artifact
+- [x] Public/private boundary is executable and tested
+- [x] Build provenance is available for every artifact
 
 ---
 
@@ -484,7 +484,7 @@ npm pack --dry-run
 
 - [ ] Authenticate localhost health requests or limit the response to harmless metadata.
 - [ ] Validate allowed origins.
-- [ ] Replace `innerHTML` rendering of key-controlled content with safe DOM/text APIs.
+- [x] Replace `innerHTML` rendering of key-controlled content with safe DOM/text APIs.
 - [ ] Test missing local server, malformed data, and port changes.
 - [ ] Add Playwright extension tests.
 - [ ] Verify Chrome and Edge.
@@ -544,16 +544,16 @@ npm pack --dry-run
 - [ ] Update V3 architecture and migration documentation.
 - [ ] Update CLI, MCP, local app, sync, recovery, and extension docs.
 - [x] Rewrite deployment docs for the canonical architecture.
-- [ ] Add administrator, backup, restore, and incident runbooks.
+- [x] Add administrator, backup, restore, and incident runbooks.
 - [x] Add supported-platform and lifecycle policy.
 - [x] Add vulnerability reporting and disclosure procedure.
-- [ ] Verify privacy policy covers accounts, metadata, logs, support, and encrypted blobs.
-- [ ] Add data retention, export, deletion, and subprocessors disclosures.
+- [x] Verify privacy policy covers accounts, metadata, logs, support, and encrypted blobs.
+- [x] Add data retention, export, deletion, and subprocessors disclosures.
 - [ ] Review terms, licensing, refund, and acceptable-use policies.
 - [x] Create support severity levels and response targets.
 - [x] Prepare status-page and incident communication templates.
 - [ ] Verify billing/tier enforcement if paid plans launch.
-- [ ] Remove mojibake and validate repository text as UTF-8.
+- [x] Remove mojibake and validate repository text as UTF-8.
 
 ## Exit Gate
 
@@ -655,7 +655,7 @@ critical-path items.
 
 - [ ] CI/CD protected
 - [ ] Artifacts signed and checksummed
-- [ ] SBOM and provenance published
+- [x] SBOM and provenance published
 - [ ] Upgrade and rollback tested
 
 ## Operations
