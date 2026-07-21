@@ -36,3 +36,22 @@ def test_public_package_identity_and_entry_points_are_explicit():
         "pushkey": "pushkey_cli:main",
         "pushkey-gui": "pushkey:main",
     }
+
+
+def test_packaged_modules_include_cli_runtime_imports():
+    import ast
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    packaged = set(metadata["tool"]["setuptools"]["py-modules"])
+    cli_imports = set()
+    tree = ast.parse((ROOT / "pushkey_cli.py").read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            cli_imports.update(
+                alias.name for alias in node.names if alias.name.startswith("pushkey_")
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("pushkey_"):
+            cli_imports.add(node.module)
+
+    assert cli_imports - packaged == set()

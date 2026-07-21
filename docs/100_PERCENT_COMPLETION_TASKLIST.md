@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 255/337 production items complete, 75.7%.
+Current result: 271/337 production items complete, 80.4%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
@@ -82,7 +82,7 @@ unit tests.
   local execution can simulate it.
 - [x] Run the full Python suite.
 - [x] Run both frontend lint/build pipelines.
-- [ ] Run package/install smoke tests from a clean environment.
+- [x] Run package/install smoke tests from a clean environment.
 
 Evidence:
 
@@ -92,6 +92,7 @@ npm --prefix web-app run lint
 npm --prefix web-app run build
 npm --prefix web run lint
 npm --prefix web run build
+.\.venv\Scripts\python.exe -m build --outdir dist\python
 ```
 
 Roadmap items expected to close:

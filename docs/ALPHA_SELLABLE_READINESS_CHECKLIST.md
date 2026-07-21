@@ -67,7 +67,7 @@ Do not claim for alpha:
   MFA/session boundaries.
 - [x] Run the full Python suite.
 - [x] Run both frontend lint/build pipelines.
-- [ ] Run package/install smoke tests from a clean environment.
+- [x] Run package/install smoke tests from a clean environment.
 
 ### Packaging And Install
 
