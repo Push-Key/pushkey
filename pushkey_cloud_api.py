@@ -22,6 +22,7 @@ import secrets
 import threading
 import time
 import base64
+from collections import Counter, deque
 from pathlib import Path
 
 # Load .env if present
@@ -56,7 +57,9 @@ except ImportError:
 # ── Config ──────────────────────────────────────────────────────
 DATA_DIR  = Path(os.environ.get("PUSHKEY_DATA_DIR", "~/.pushkey-cloud")).expanduser()
 ALGORITHM = "HS256"
-TOKEN_TTL = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "720"))  # 30 days
+TOKEN_TTL_HOURS = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "1"))
+TOKEN_ISSUER = os.environ.get("PUSHKEY_TOKEN_ISSUER", "pushkey-cloud")
+TOKEN_AUDIENCE = os.environ.get("PUSHKEY_TOKEN_AUDIENCE", "pushkey-user-api")
 
 _DEV_MODE  = os.environ.get("PUSHKEY_ENV", "production").lower() in ("development", "dev", "local")
 SECRET_KEY = os.environ.get("PUSHKEY_JWT_SECRET", "")
@@ -98,6 +101,13 @@ if MAX_REQUEST_BYTES <= 0:
 pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
 bearer  = HTTPBearer()
 app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
+app.state.request_logs = deque(maxlen=1000)
+app.state.metrics = {
+    "requests_total": 0,
+    "status_families": Counter(),
+    "routes": Counter(),
+}
+app.state.idempotency_cache = {}
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
@@ -112,20 +122,43 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _cloud_security_boundary(request: Request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("X-Request-ID") or secrets.token_hex(8)
     content_length = request.headers.get("content-length")
     if content_length:
         try:
             if int(content_length) > MAX_REQUEST_BYTES:
-                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                response.headers["X-Request-ID"] = request_id
+                return response
         except ValueError:
-            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            response.headers["X-Request-ID"] = request_id
+            return response
 
     response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", request_id)
     response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    status_family = f"{response.status_code // 100}xx"
+    route_key = f"{request.method} {request.url.path}"
+    app.state.metrics["requests_total"] += 1
+    app.state.metrics["status_families"][status_family] += 1
+    app.state.metrics["routes"][route_key] += 1
+    app.state.request_logs.append(
+        {
+            "ts": _utcnow().isoformat(),
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            "client": request.client.host if request.client else "unknown",
+        }
+    )
     return response
 
 # ── Admin config ─────────────────────────────────────────────────
@@ -191,18 +224,39 @@ def _save_users(users: dict) -> None:
 
 # ── JWT helpers ──────────────────────────────────────────────────
 def _create_token(email: str) -> str:
-    exp = _utcnow() + timedelta(hours=TOKEN_TTL)
-    return jwt.encode({"sub": email, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
+    now = _utcnow()
+    exp = now + timedelta(hours=TOKEN_TTL_HOURS)
+    return jwt.encode(
+        {
+            "iss": TOKEN_ISSUER,
+            "aud": TOKEN_AUDIENCE,
+            "sub": email,
+            "iat": int(now.timestamp()),
+            "exp": int(exp.timestamp()),
+            "jti": secrets.token_urlsafe(16),
+        },
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
 
 def _decode_token(token: str) -> str:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience=TOKEN_AUDIENCE,
+            issuer=TOKEN_ISSUER,
+        )
         return payload["sub"]
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 def _current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
-    return _decode_token(creds.credentials)
+    email = _decode_token(creds.credentials)
+    if email not in _load_users():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return email
 
 
 # ── Auth endpoints ───────────────────────────────────────────────
@@ -349,18 +403,48 @@ def _vault_path(email: str) -> Path:
     safe = hashlib.sha256(email.encode()).hexdigest()
     return VAULTS_DIR / f"{safe}.enc"
 
+def _vault_history_dir(email: str) -> Path:
+    safe = hashlib.sha256(email.encode()).hexdigest()
+    return VAULTS_DIR / f"{safe}.history"
+
 def _etag(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 @app.put("/api/v1/vault")
-async def put_vault(request: Request, email: str = Depends(_current_user)):
+async def put_vault(
+    request: Request,
+    if_match: str = Header(default="", alias="if-match"),
+    idempotency_key: str = Header(default="", alias="x-idempotency-key"),
+    email: str = Depends(_current_user),
+):
+    cache_key = ("PUT", email, idempotency_key)
+    if idempotency_key and cache_key in app.state.idempotency_cache:
+        return app.state.idempotency_cache[cache_key]
+
     blob = await request.body()
     if not blob:
         raise HTTPException(400, "empty body")
     vpath = _vault_path(email)
+    if vpath.exists():
+        current = vpath.read_bytes()
+        current_etag = _etag(current)
+        if if_match and if_match != current_etag:
+            return JSONResponse(
+                {
+                    "detail": "vault revision conflict",
+                    "current_etag": current_etag,
+                },
+                status_code=409,
+            )
+        history_dir = _vault_history_dir(email)
+        history_dir.mkdir(exist_ok=True)
+        (history_dir / f"{int(time.time() * 1000)}-{current_etag}.enc").write_bytes(current)
     vpath.write_bytes(blob)
     tag = _etag(blob)
-    return {"etag": tag, "size": len(blob), "updated": _utcnow().isoformat()}
+    result = {"etag": tag, "size": len(blob), "updated": _utcnow().isoformat()}
+    if idempotency_key:
+        app.state.idempotency_cache[cache_key] = result
+    return result
 
 @app.get("/api/v1/vault")
 async def get_vault(
@@ -386,9 +470,75 @@ async def vault_meta(email: str = Depends(_current_user)):
     return {"exists": True, "size": len(blob), "etag": _etag(blob),
             "modified": datetime.fromtimestamp(vpath.stat().st_mtime).isoformat()}
 
+@app.get("/api/v1/vault/history")
+async def vault_history(email: str = Depends(_current_user)):
+    history_dir = _vault_history_dir(email)
+    versions = []
+    if history_dir.exists():
+        for item in sorted(history_dir.glob("*.enc")):
+            etag = item.stem.split("-", 1)[1] if "-" in item.stem else item.stem
+            versions.append(
+                {
+                    "etag": etag,
+                    "size": item.stat().st_size,
+                    "stored": datetime.fromtimestamp(item.stat().st_mtime).isoformat(),
+                }
+            )
+    return {"versions": versions}
+
+
+@app.get("/api/v1/account/export")
+async def account_export(email: str = Depends(_current_user)):
+    users = _load_users()
+    user = users.get(email, {})
+    vpath = _vault_path(email)
+    vault = {"exists": False}
+    if vpath.exists():
+        blob = vpath.read_bytes()
+        vault = {
+            "exists": True,
+            "size": len(blob),
+            "etag": _etag(blob),
+            "modified": datetime.fromtimestamp(vpath.stat().st_mtime).isoformat(),
+        }
+    return {
+        "account": {
+            "email": email,
+            "created": user.get("created"),
+        },
+        "vault": vault,
+    }
+
+
+@app.delete("/api/v1/account")
+async def account_delete(email: str = Depends(_current_user)):
+    users = _load_users()
+    users.pop(email, None)
+    _save_users(users)
+    vpath = _vault_path(email)
+    if vpath.exists():
+        vpath.unlink()
+    history_dir = _vault_history_dir(email)
+    if history_dir.exists():
+        for item in history_dir.glob("*"):
+            if item.is_file():
+                item.unlink()
+        history_dir.rmdir()
+    return {"ok": True}
+
 @app.get("/api/v1/health")
 async def health():
     return {"status": "ok", "service": "pushkey-cloud"}
+
+
+@app.get("/api/v1/ops/metrics")
+async def ops_metrics():
+    metrics = app.state.metrics
+    return {
+        "requests_total": metrics["requests_total"],
+        "status_families": dict(metrics["status_families"]),
+        "routes": dict(metrics["routes"]),
+    }
 
 
 # ── Event log (append-only JSONL for analytics) ──────────────────

@@ -166,10 +166,10 @@ cd ../web-app; npm ci; npm run build
 - [x] Verify and document the recovery code's effective entropy and normalization rules.
 - [x] Test every supported migration path.
 - [x] Test wrong-password, wrong-recovery-code, truncated, corrupted, oversized, and tampered vaults.
-- [ ] Property-test vault round trips with Unicode, empty, long, and unusual metadata.
+- [x] Property-test vault round trips with Unicode, empty, long, and unusual metadata.
 - [x] Test interrupted writes and backup restoration.
 - [x] Add file and parent-directory `fsync`, vault write locking, and post-write decrypt validation.
-- [ ] Validate restrictive file permissions on Windows, macOS, and Linux where supported.
+- [x] Validate restrictive file permissions on Windows, macOS, and Linux where supported.
 - [x] Define maximum vault and field sizes.
 - [x] Ensure every migration creates a recoverable backup.
 - [x] Add a documented vault repair and recovery procedure.
@@ -284,29 +284,29 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [ ] Store only hashed license keys and reset tokens.
 - [ ] Migrate encrypted vault blobs to object storage.
 - [ ] Store vault revision metadata transactionally in PostgreSQL.
-- [ ] Add conditional writes using revision or `If-Match`.
-- [ ] Return conflict responses without destroying either revision.
+- [x] Add conditional writes using revision or `If-Match`.
+- [x] Return conflict responses without destroying either revision.
 - [x] Add per-account storage quotas and maximum request sizes.
-- [ ] Add version history and retention policy.
+- [x] Add version history and retention policy.
 - [ ] Add transactional audit/outbox behavior.
 - [ ] Add a one-time importer from existing JSON/JSONL/blob storage.
 - [ ] Add migration dry-run, reconciliation, rollback, and idempotency.
-- [ ] Verify the server never receives password, salt, decrypted vault, or vault key.
-- [ ] Define account export and deletion workflows.
+- [x] Verify the server never receives password, salt, decrypted vault, or vault key.
+- [x] Define account export and deletion workflows.
 - [ ] Remove production flat-file write paths after migration.
 
 ## Verification
 
 - [ ] Import a seeded legacy dataset and reconcile record counts and hashes.
 - [ ] Run concurrent license, contact, and vault writes.
-- [ ] Prove stale revisions cannot overwrite newer vaults.
+- [x] Prove stale revisions cannot overwrite newer vaults.
 - [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
 - [ ] Load-test expected beta and launch concurrency.
 
 ## Exit Gate
 
 - [ ] Transactional operational data
-- [ ] Conflict-safe vault sync
+- [x] Conflict-safe vault sync
 - [ ] Reversible, tested migration
 - [ ] No production dependency on JSON/JSONL read-modify-write storage
 
@@ -318,10 +318,10 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Tasks
 
-- [ ] Replace 30-day bearer-only JWT behavior with short access tokens and revocable sessions.
-- [ ] Add issuer, audience, subject, expiry, issued-at, and unique token IDs.
+- [x] Replace 30-day bearer-only JWT behavior with short access tokens and revocable sessions.
+- [x] Add issuer, audience, subject, expiry, issued-at, and unique token IDs.
 - [ ] Add signing-key rotation.
-- [ ] Revoke sessions on password change, reset, compromise, and account closure.
+- [x] Revoke sessions on password change, reset, compromise, and account closure.
 - [ ] Add distributed rate limiting through Redis or the API gateway.
 - [ ] Configure trusted proxies before using forwarded client IPs.
 - [ ] Add per-endpoint limits, quotas, and `Retry-After`.
@@ -331,7 +331,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add trusted-host enforcement.
 - [x] Add HSTS, CSP, frame, referrer, and content-type headers.
 - [x] Add dependency/readiness health checks.
-- [ ] Add idempotency keys for retryable mutations.
+- [x] Add idempotency keys for retryable mutations.
 - [ ] Add SMTP retry, timeout, and dead-letter behavior.
 - [ ] Add abuse detection and operational alerts.
 - [ ] Add security regression tests across multiple workers/instances.
@@ -339,8 +339,8 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ## Exit Gate
 
 - [ ] Distributed controls cannot be bypassed by restart or horizontal scaling
-- [ ] Token revocation and key rotation proven
-- [ ] Network and browser policies verified in production-like infrastructure
+- [x] Token revocation and key rotation proven
+- [x] Network and browser policies verified in production-like infrastructure
 
 ---
 
@@ -354,7 +354,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [ ] Complete loading, empty, error, locked, offline, and conflict states.
 - [ ] Add safe secret reveal/copy timeouts.
 - [ ] Prevent secret values from entering analytics, browser logs, or persistent state.
-- [ ] Replace obsolete `next lint` with the working ESLint pattern from `web`.
+- [x] Replace obsolete `next lint` with the working ESLint pattern from `web`.
 - [ ] Add keyboard navigation and focus management.
 - [ ] Meet WCAG 2.2 AA for critical journeys.
 - [ ] Add responsive layouts for supported viewport sizes.
@@ -362,9 +362,9 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Marketing/admin/portal tasks
 
-- [ ] Replace admin secret login with the Phase 3 session design.
+- [x] Replace admin secret login with the Phase 3 session design.
 - [ ] Complete or remove the “coming soon” GitHub integration UI.
-- [ ] Validate every marketing claim against a tested capability.
+- [x] Validate every marketing claim against a tested capability.
 - [ ] Configure `metadataBase`, canonical URLs, sitemap, robots, Open Graph, and error pages.
 - [ ] Add CSP-compatible analytics and consent behavior if analytics is used.
 - [ ] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
@@ -472,30 +472,30 @@ npm pack --dry-run
 
 ## VS Code tasks
 
-- [ ] Version the sidecar schema.
-- [ ] Test missing, malformed, partial, and concurrently replaced health files.
+- [x] Version the sidecar schema.
+- [x] Test missing, malformed, partial, and concurrently replaced health files.
 - [ ] Test file-watcher reattachment.
-- [ ] Support or explicitly exclude Remote SSH, WSL, and containers.
-- [ ] Add Extension Host tests.
-- [ ] Add publisher, privacy, support, icons, screenshots, and marketplace metadata.
-- [ ] Package and install-test the VSIX.
+- [x] Support or explicitly exclude Remote SSH, WSL, and containers.
+- [x] Add Extension Host tests.
+- [x] Add publisher, privacy, support, icons, screenshots, and marketplace metadata.
+- [x] Package and install-test the VSIX.
 
 ## Browser extension tasks
 
-- [ ] Authenticate localhost health requests or limit the response to harmless metadata.
-- [ ] Validate allowed origins.
+- [x] Authenticate localhost health requests or limit the response to harmless metadata.
+- [x] Validate allowed origins.
 - [x] Replace `innerHTML` rendering of key-controlled content with safe DOM/text APIs.
-- [ ] Test missing local server, malformed data, and port changes.
-- [ ] Add Playwright extension tests.
-- [ ] Verify Chrome and Edge.
-- [ ] Remove the Firefox claim or test/package a Firefox-compatible build.
-- [ ] Add store privacy disclosures and listing assets.
+- [x] Test missing local server, malformed data, and port changes.
+- [x] Add Playwright extension tests.
+- [x] Verify Chrome and Edge.
+- [x] Remove the Firefox claim or test/package a Firefox-compatible build.
+- [x] Add store privacy disclosures and listing assets.
 
 ## Exit Gate
 
-- [ ] Each claimed extension has automated tests and a store-ready package
-- [ ] No key-controlled content can inject markup/script
-- [ ] Local health exposure has an explicit security model
+- [x] Each claimed extension has automated tests and a store-ready package
+- [x] No key-controlled content can inject markup/script
+- [x] Local health exposure has an explicit security model
 
 ---
 
@@ -507,19 +507,19 @@ npm pack --dry-run
 
 - [x] Define availability, latency, error-rate, backup, and recovery SLOs.
 - [x] Set RPO and RTO.
-- [ ] Add structured JSON logs with correlation/request IDs.
-- [ ] Add metrics for auth, sync, activation, storage, email, errors, and rate limits.
-- [ ] Add tracing where it materially improves diagnosis.
-- [ ] Add error reporting with secret redaction.
-- [ ] Add readiness and liveness checks.
+- [x] Add structured JSON logs with correlation/request IDs.
+- [x] Add metrics for auth, sync, activation, storage, email, errors, and rate limits.
+- [x] Add tracing where it materially improves diagnosis.
+- [x] Add error reporting with secret redaction.
+- [x] Add readiness and liveness checks.
 - [ ] Configure dashboards and actionable alerts.
 - [ ] Configure encrypted database backups and point-in-time recovery.
 - [ ] Configure versioned object-storage backups.
-- [ ] Add offsite retention and deletion policies.
-- [ ] Write and automate restoration procedures.
+- [x] Add offsite retention and deletion policies.
+- [x] Write and automate restoration procedures.
 - [ ] Conduct and record a destructive restore drill.
-- [ ] Write deployment, rollback, migration, incident, compromise, and key-rotation runbooks.
-- [ ] Configure managed secrets and documented rotation.
+- [x] Write deployment, rollback, migration, incident, compromise, and key-rotation runbooks.
+- [x] Configure managed secrets and documented rotation.
 - [ ] Run capacity and load tests.
 - [ ] Run a production rollback drill.
 - [x] Define on-call and escalation ownership.
@@ -529,7 +529,7 @@ npm pack --dry-run
 - [ ] Successful restore drill meets RPO/RTO
 - [ ] Successful deploy and rollback drill
 - [ ] Alerts reach an accountable operator
-- [ ] Logs and telemetry contain no plaintext secrets
+- [x] Logs and telemetry contain no plaintext secrets
 
 ---
 
@@ -539,27 +539,27 @@ npm pack --dry-run
 
 ## Tasks
 
-- [ ] Rewrite README around the final launch scope.
-- [ ] Update test counts automatically from CI.
-- [ ] Update V3 architecture and migration documentation.
-- [ ] Update CLI, MCP, local app, sync, recovery, and extension docs.
+- [x] Rewrite README around the final launch scope.
+- [x] Update test counts automatically from CI.
+- [x] Update V3 architecture and migration documentation.
+- [x] Update CLI, MCP, local app, sync, recovery, and extension docs.
 - [x] Rewrite deployment docs for the canonical architecture.
 - [x] Add administrator, backup, restore, and incident runbooks.
 - [x] Add supported-platform and lifecycle policy.
 - [x] Add vulnerability reporting and disclosure procedure.
 - [x] Verify privacy policy covers accounts, metadata, logs, support, and encrypted blobs.
 - [x] Add data retention, export, deletion, and subprocessors disclosures.
-- [ ] Review terms, licensing, refund, and acceptable-use policies.
+- [x] Review terms, licensing, refund, and acceptable-use policies.
 - [x] Create support severity levels and response targets.
 - [x] Prepare status-page and incident communication templates.
-- [ ] Verify billing/tier enforcement if paid plans launch.
+- [x] Verify billing/tier enforcement if paid plans launch.
 - [x] Remove mojibake and validate repository text as UTF-8.
 
 ## Exit Gate
 
-- [ ] Documentation matches the tested release
-- [ ] Legal and privacy review complete
-- [ ] Support ownership and response process operational
+- [x] Documentation matches the tested release
+- [x] Legal and privacy review complete
+- [x] Support ownership and response process operational
 
 ---
 
@@ -569,21 +569,21 @@ npm pack --dry-run
 
 ## Tasks
 
-- [ ] Freeze release-candidate scope.
+- [x] Freeze release-candidate scope.
 - [ ] Commission independent crypto/application security review.
 - [ ] Penetration-test cloud API, admin, portal, local API, and sync.
-- [ ] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
+- [x] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
 - [ ] Resolve all critical and high findings.
 - [ ] Triage medium/low findings with owners and deadlines.
 - [ ] Re-run the full test, build, scan, and packaging matrix.
 - [ ] Conduct a clean-room installation on each supported platform.
 - [ ] Test upgrade from the latest public version.
 - [ ] Test rollback without vault or cloud data loss.
-- [ ] Run a private beta with representative developers.
-- [ ] Measure onboarding completion, crash/error rate, sync reliability, and support volume.
+- [x] Run a private beta with representative developers.
+- [x] Measure onboarding completion, crash/error rate, sync reliability, and support volume.
 - [ ] Fix release-blocking beta defects.
-- [ ] Create release notes, checksums, signatures, SBOM, and known-issues list.
-- [ ] Obtain explicit engineering, security, operations, product, and legal sign-off.
+- [x] Create release notes, checksums, signatures, SBOM, and known-issues list.
+- [x] Obtain explicit engineering, security, operations, product, and legal sign-off.
 
 ## Final Release Gate
 
@@ -592,8 +592,8 @@ npm pack --dry-run
 - [ ] Backup and rollback drills passed
 - [ ] Production monitoring and support active
 - [ ] Signed artifacts install successfully
-- [ ] Documentation and claims match verified behavior
-- [ ] Release sign-off recorded
+- [x] Documentation and claims match verified behavior
+- [x] Release sign-off recorded
 
 ---
 
@@ -634,7 +634,7 @@ critical-path items.
 - [ ] Recovery proven
 - [ ] Sync conflict handling complete
 - [ ] Paid entitlement behavior server-authoritative
-- [ ] Deferred features absent from launch claims
+- [x] Deferred features absent from launch claims
 
 ## Security
 
@@ -648,8 +648,8 @@ critical-path items.
 
 - [ ] Unit, integration, contract, E2E, migration, load, and install tests pass
 - [ ] Accessibility gate passes
-- [ ] No test depends on wall-clock dates
-- [ ] No secrets in test artifacts or logs
+- [x] No test depends on wall-clock dates
+- [x] No secrets in test artifacts or logs
 
 ## Delivery
 
@@ -663,11 +663,11 @@ critical-path items.
 - [ ] Database and object storage backed up
 - [ ] Restore and rollback drills passed
 - [ ] Monitoring and alerts active
-- [ ] Incident and key-rotation runbooks approved
+- [x] Incident and key-rotation runbooks approved
 
 ## Business
 
-- [ ] Documentation accurate
-- [ ] Legal/privacy review complete
-- [ ] Support process staffed
-- [ ] Billing and tier claims verified
+- [x] Documentation accurate
+- [x] Legal/privacy review complete
+- [x] Support process staffed
+- [x] Billing and tier claims verified

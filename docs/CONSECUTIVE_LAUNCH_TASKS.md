@@ -81,7 +81,7 @@ public infrastructure.
 - [ ] Choose object-storage provider.
 - [ ] Design schemas and migrations.
 - [ ] Migrate encrypted vault blobs to object storage.
-- [ ] Add revision/`If-Match` conflict-safe sync.
+- [x] Add revision/`If-Match` conflict-safe sync.
 - [ ] Add importer from existing JSON/JSONL/blob storage.
 - [ ] Remove production flat-file write paths.
 - [ ] Add distributed rate limiting.

@@ -2,6 +2,9 @@ from pathlib import Path
 import base64
 import hashlib
 import json
+import os
+
+import pytest
 
 import pushkey
 
@@ -23,7 +26,55 @@ def test_save_and_load_vault_roundtrip(tmp_path: Path, monkeypatch):
     assert bad is None
 
 
-import pytest
+@pytest.mark.parametrize(
+    "vault",
+    [
+        {},
+        {"UNICODE_秘密": {"value": "sk-test-雪", "notes": "emoji-free unicode: café"}},
+        {"EMPTY_VALUE": {"value": "", "created": "", "provider": None, "projects": []}},
+        {
+            "LONG_METADATA": {
+                "value": "x" * 8192,
+                "created": "2026-07-21T12:00:00",
+                "rotated": "2026-07-21T12:30:00",
+                "provider": "Custom",
+                "env": "production",
+                "projects": ["C:/work/project", "\\\\server\\share\\project"],
+                "notes": "line1\nline2\n" + ("metadata " * 200),
+                "rotation_count": 999,
+                "nested": {"labels": ["alpha", "beta"], "enabled": True},
+            }
+        },
+    ],
+)
+def test_vault_round_trips_unusual_metadata(tmp_path, monkeypatch, vault):
+    monkeypatch.setattr(pushkey_shared, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(pushkey_shared, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(pushkey_shared, "SALT_FILE", tmp_path / ".salt")
+
+    save_vault(vault, "password123", recovery_code=generate_recovery_code())
+
+    loaded, vault_key = load_vault("password123")
+    assert loaded == vault
+    assert len(vault_key) == 32
+
+
+def test_vault_files_are_created_with_restrictive_permissions_where_supported(tmp_path, monkeypatch):
+    monkeypatch.setattr(pushkey_shared, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(pushkey_shared, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(pushkey_shared, "SALT_FILE", tmp_path / ".salt")
+
+    save_vault({"K": {"value": "v"}}, "password123", recovery_code=generate_recovery_code())
+
+    if os.name == "nt":
+        assert pushkey_shared.VAULT_FILE.exists()
+        assert pushkey_shared.SALT_FILE.exists()
+        return
+
+    assert (pushkey_shared.VAULT_FILE.stat().st_mode & 0o077) == 0
+    assert (pushkey_shared.SALT_FILE.stat().st_mode & 0o077) == 0
+
+
 import pushkey_shared
 from pushkey_crypto import (
     generate_recovery_code,

@@ -89,6 +89,34 @@ def test_cloud_api_rejects_oversized_request_body(app_module):
     assert r.json() == {"detail": "Request body too large"}
 
 
+def test_cloud_api_records_structured_redacted_request_logs(client, app_module):
+    r = client.get(
+        "/api/v1/health",
+        headers={"X-Request-ID": "req-test-1", "Authorization": "Bearer secret-token"},
+    )
+
+    assert r.status_code == 200
+    assert r.headers["x-request-id"] == "req-test-1"
+    event = app_module.app.state.request_logs[-1]
+    assert event["request_id"] == "req-test-1"
+    assert event["method"] == "GET"
+    assert event["path"] == "/api/v1/health"
+    assert event["status_code"] == 200
+    assert "secret-token" not in json.dumps(event)
+
+
+def test_cloud_api_exposes_operational_metrics(client):
+    client.get("/api/v1/health", headers={"X-Request-ID": "metrics-1"})
+
+    r = client.get("/api/v1/ops/metrics")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["requests_total"] >= 1
+    assert body["status_families"]["2xx"] >= 1
+    assert body["routes"]["GET /api/v1/health"] >= 1
+
+
 def test_admin_endpoints_reject_wrong_secret(client):
     r = client.post("/api/admin/licenses/generate", json={"tier": "pro"}, headers={"X-CSRF-Token": "wrong"})
     assert r.status_code == 403

@@ -8,7 +8,7 @@ Measured production-readiness progress:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 170/340 production items complete, 50.0%.
+Current result: 239/340 production items complete, 70.3%.
 
 ## Completed in this execution pass
 
@@ -27,6 +27,12 @@ Current result: 170/340 production items complete, 50.0%.
 - [x] Add release workflow checksums, SBOM/provenance attestations, and public-export secret scanning.
 - [x] Replace browser extension key-list `innerHTML` rendering with safe DOM/text APIs.
 - [x] Add data-governance coverage for privacy, retention, export, deletion, and subprocessors.
+- [x] Add vault unusual-metadata and restrictive-permission regression tests.
+- [x] Add browser extension health-payload sanitization tests.
+- [x] Add cloud sync `If-Match`, conflict, history, idempotency, export, and deletion tests.
+- [x] Add structured request logs, request IDs, and operational metrics.
+- [x] Replace web-app `next lint` with ESLint 9 flat config and CI lint coverage.
+- [x] Add release-candidate scope, threat-model, legal/commercial, and backup/restore runbooks.
 
 ## Active priority queue
 
