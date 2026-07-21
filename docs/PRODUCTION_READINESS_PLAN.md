@@ -351,7 +351,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ## Local web app tasks
 
 - [x] Reconcile all UI operations with the versioned local API.
-- [ ] Complete loading, empty, error, locked, offline, and conflict states.
+- [x] Complete loading, empty, error, locked, offline, and conflict states.
 - [x] Add safe secret reveal/copy timeouts.
 - [x] Prevent secret values from entering analytics, browser logs, or persistent state.
 - [x] Replace obsolete `next lint` with the working ESLint pattern from `web`.

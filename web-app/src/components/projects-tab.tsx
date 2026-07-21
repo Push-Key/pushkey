@@ -37,7 +37,7 @@ function InjectResult({
       </p>
       {result.skipped_existing.length > 0 && (
         <p className="text-orange-400">
-          Skipped existing: {result.skipped_existing.join(", ")}
+          Conflict: existing values kept for {result.skipped_existing.join(", ")}
         </p>
       )}
     </div>

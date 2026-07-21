@@ -15,6 +15,23 @@ import { SettingsTab } from "@/components/settings-tab";
 import { api, type StatusResp } from "@/lib/api";
 import { bootstrapSession } from "@/lib/auth";
 
+function StatePanel({
+  title,
+  detail,
+}: {
+  title: string;
+  detail: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-screen items-center justify-center p-4">
+      <div className="max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-6 text-sm">
+        <div className="font-semibold text-[var(--color-foreground)]">{title}</div>
+        <div className="mt-2 text-[var(--color-muted-foreground)]">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
 export default function Page() {
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -50,7 +67,14 @@ export default function Page() {
     refreshStatus();
   };
 
-  if (!tokenReady) return null;
+  if (!tokenReady) {
+    return (
+      <StatePanel
+        title="Preparing secure local session"
+        detail="Exchanging the one-time launch token for a browser session."
+      />
+    );
+  }
 
   if (error && !status) {
     return (
@@ -66,10 +90,24 @@ export default function Page() {
     );
   }
 
-  if (!status) return null;
+  if (!status) {
+    return (
+      <StatePanel
+        title="Loading vault status"
+        detail="Checking lock state, vault availability, and write permissions."
+      />
+    );
+  }
 
   if (status.locked) {
-    return <LoginScreen hasVault={status.has_vault} onUnlocked={refreshStatus} />;
+    return (
+      <div className="min-h-screen">
+        <div className="border-b border-[var(--color-border)] bg-[var(--color-card)] px-4 py-2 text-xs text-[var(--color-muted-foreground)]">
+          Offline or locked: unlock locally to load vault data and write changes.
+        </div>
+        <LoginScreen hasVault={status.has_vault} onUnlocked={refreshStatus} />
+      </div>
+    );
   }
 
   return (
