@@ -986,3 +986,31 @@ def test_backup_returns_tarball(client):
     with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as t:
         names = t.getnames()
         assert "licenses.json" in names
+
+
+def test_admin_backup_excludes_zero_knowledge_vault_blobs(client):
+    blob = b"plaintext-looking-secret=sk-admin-backup-leak-check"
+    assert client.post(
+        "/api/v1/auth/register",
+        json={"email": "vault-user@example.com", "password": "correct horse battery staple"},
+    ).status_code == 200
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "vault-user@example.com", "password": "correct horse battery staple"},
+    )
+    assert login.status_code == 200
+    assert client.put(
+        "/api/v1/vault",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+        content=blob,
+    ).status_code == 200
+
+    backup = client.get("/api/admin/backup", headers=ADMIN)
+
+    assert backup.status_code == 200
+    assert blob not in backup.content
+    import tarfile, io
+    with tarfile.open(fileobj=io.BytesIO(backup.content), mode="r:gz") as archive:
+        names = archive.getnames()
+    assert all(not name.startswith("vaults/") for name in names)
+    assert all("vault" not in name.lower() for name in names)

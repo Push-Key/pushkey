@@ -179,7 +179,7 @@ If enabled:
 
 - [x] Document encrypted-blob-only behavior.
 - [x] Document conflict behavior and user-facing limitations.
-- [ ] Add zero-knowledge regression checks for API, logs, database migration
+- [x] Add zero-knowledge regression checks for API, logs, database migration
   metadata, and object-storage abstraction.
 
 If disabled:
