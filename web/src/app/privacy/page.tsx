@@ -12,7 +12,7 @@ export default function PrivacyPage() {
         <div className="space-y-6 leading-relaxed" style={{ color: "#CBD5E1" }}>
           <section>
             <h2 className="text-xl font-semibold mb-3" style={{ color: "#F8FAFC" }}>The short version</h2>
-            <p>PushKey is a local-first encrypted vault. Your master password and unencrypted secrets <strong>never leave your device</strong>. The only data we receive is what you explicitly send us — an email if you sign up for cloud sync, billing info via Stripe, and encrypted ciphertext blobs if you opt into cloud backup.</p>
+            <p>PushKey is a local-first encrypted vault. Your master password and unencrypted secrets <strong>never leave your device</strong>. The only data we receive is what you explicitly send us — an email if you sign up for encrypted backup beta, billing info via Stripe, and encrypted ciphertext blobs if you opt into cloud backup.</p>
           </section>
 
           <section>

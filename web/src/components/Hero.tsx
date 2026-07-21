@@ -11,7 +11,7 @@ const TERMINAL_LINES = [
   { text: "$ pushkey inject --project ./my-app", delay: 2000, color: "#94A3B8" },
   { text: "✓ Writing .env to ./my-app/.env", delay: 2600, color: "#00DC82" },
   { text: "✓ Added OPENAI_API_KEY to .gitignore", delay: 3000, color: "#00DC82" },
-  { text: "✓ 3 projects synced", delay: 3400, color: "#00DC82" },
+  { text: "✓ 3 projects updated", delay: 3400, color: "#00DC82" },
 ]
 
 function TerminalWindow() {

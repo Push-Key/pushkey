@@ -21,7 +21,7 @@
 > Pushkey stores, rotates, and injects your API keys using **AES-256-GCM** encryption with **Argon2id** key derivation ,
 > the same primitives used in password managers you already trust.
 > The vault never writes plaintext to disk.
-> The cloud sync backend is zero-knowledge: even we can't read your keys.
+> The encrypted backup beta stores ciphertext only: even we can't read your keys.
 
 <br/>
 
@@ -240,8 +240,8 @@ V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 **🔐 Auth & Sync**
 - TOTP MFA (Google Authenticator compatible)
 - FIDO2/YubiKey (Enterprise)
-- Zero-knowledge cloud sync
-- CI/CD push to GitHub Actions, Vercel, Netlify (Pro+)
+- Encrypted cloud backup beta
+- CI/CD export workflow planned after alpha
 
 </td>
 </tr>
@@ -258,8 +258,8 @@ V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 | Keys | 15 | 50 | ∞ | ∞ | ∞ |
 | Projects | 1 | 3 | ∞ | ∞ | ∞ |
 | Devices | 1 | 1 | 3 | 5 | ∞ |
-| ☁️ Cloud sync | ❌ | ✅ | ✅ | ✅ | ✅ |
-| ⚡ CI/CD sync | ❌ | ❌ | ✅ | ✅ | ✅ |
+| ☁️ Encrypted backup beta | ❌ | ✅ | ✅ | ✅ | ✅ |
+| ⚡ CI/CD export workflow | ❌ | ❌ | Planned | Planned | Planned |
 | 🕵️ Git scan | ❌ | ✅ | ✅ | ✅ | ✅ |
 | 👥 Team RBAC | ❌ | ❌ | ❌ | ✅ | ✅ |
 | 🔐 TOTP MFA | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -371,7 +371,7 @@ Pushkey is **open-core**, the security-critical layer is fully open so you can a
 | `pushkey_providers.py`, 32+ providers | ✅ | Community can add new providers |
 | `providers.json`, pattern registry | ✅ | Community contributions welcome |
 | Desktop GUI | ❌ | Free tier (15 keys) → paid for full access |
-| Cloud sync backend | ❌ | Starter+ |
+| Encrypted backup beta | ❌ | Starter+ |
 | CI/CD push, Team RBAC, SSO | ❌ | Pro / Team / Enterprise |
 
 The CLI has **no key limit** and **no feature gates**. The GUI is where the tier system lives.

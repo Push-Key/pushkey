@@ -173,7 +173,7 @@ Goal: make the alpha sync claim precise.
 Choose one:
 
 - [x] Cloud sync enabled for alpha as encrypted-blob sync with documented limits.
-- [ ] Cloud sync disabled/beta-scoped for alpha, with marketing/onboarding claims removed.
+- [x] Cloud sync disabled/beta-scoped for alpha, with marketing/onboarding claims removed.
 
 If enabled:
 
@@ -184,8 +184,8 @@ If enabled:
 
 If disabled:
 
-- [ ] Remove sync claims from alpha product and docs.
-- [ ] Keep cloud sync visible only as beta/internal.
+- [x] Remove sync claims from alpha product and docs.
+- [x] Keep cloud sync visible only as beta/internal.
 
 Roadmap items expected to close:
 

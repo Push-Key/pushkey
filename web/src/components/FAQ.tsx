@@ -5,7 +5,7 @@ import { ChevronDown } from "lucide-react"
 const FAQS = [
   {
     q: "Is PushKey open source?",
-    a: "Yes — the desktop app and crypto layer are MIT licensed on GitHub. The AES-256-GCM vault, Argon2id key derivation, and all code that touches your secrets is fully auditable. You don't have to trust our claims. The cloud sync backend is proprietary — that's how we fund development and keep the core app free forever.",
+    a: "Yes — the desktop app and crypto layer are MIT licensed on GitHub. The AES-256-GCM vault, Argon2id key derivation, and all code that touches your secrets is fully auditable. You don't have to trust our claims. The encrypted backup beta backend is proprietary — that's how we fund development and keep the core app free forever.",
   },
   {
     q: "Is PushKey really local-only? No cloud at all?",

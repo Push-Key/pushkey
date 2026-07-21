@@ -9,6 +9,18 @@ PUBLIC_PATHS = [
     WEB_SRC / "app" / "privacy",
     WEB_SRC / "app" / "terms",
 ]
+SYNC_CLAIM_PATHS = PUBLIC_PATHS + [
+    ROOT / "README.md",
+    ROOT / "docs" / "org-profile-readme.md",
+]
+
+SYNC_ALPHA_CLAIMS = [
+    "Cloud sync",
+    "cloud sync",
+    "Zero-knowledge cloud sync",
+    "Zero-knowledge sync",
+    "CI/CD sync",
+]
 
 DEFERRED_ALPHA_CLAIMS = [
     "CI/CD sync",
@@ -24,15 +36,28 @@ DEFERRED_ALPHA_CLAIMS = [
 
 
 def test_public_alpha_copy_does_not_claim_deferred_features_are_available():
+    combined = _combined(PUBLIC_PATHS)
+
+    for claim in DEFERRED_ALPHA_CLAIMS:
+        assert claim not in combined
+
+
+def test_public_alpha_copy_scopes_sync_as_encrypted_backup_beta():
+    combined = _combined(SYNC_CLAIM_PATHS)
+
+    for claim in SYNC_ALPHA_CLAIMS:
+        assert claim not in combined
+    assert "Encrypted backup beta" in combined
+    assert "encrypted backup beta" in combined
+
+
+def _combined(paths):
     files = []
-    for path in PUBLIC_PATHS:
+    for path in paths:
         if path.is_file():
             files.append(path)
         else:
             files.extend(path.rglob("*.tsx"))
             files.extend(path.rglob("*.ts"))
 
-    combined = "\n".join(path.read_text(encoding="utf-8") for path in files)
-
-    for claim in DEFERRED_ALPHA_CLAIMS:
-        assert claim not in combined
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)

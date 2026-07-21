@@ -19,9 +19,9 @@ const STEPS: { number: string; icon: LucideIcon; title: string; description: str
   {
     number: "03",
     icon: Zap,
-    title: "Auto-sync on rotation",
-    description: "When you rotate a key, PushKey saves the old value, timestamps the rotation, and pushes the new .env to every linked project instantly.",
-    code: `$ pushkey rotate STRIPE_SECRET_KEY\n✓ Old value backed up\n✓ 3 projects updated\n✓ Sync complete in 0.2s`,
+    title: "Update projects on rotation",
+    description: "When you rotate a key, PushKey saves the old value, timestamps the rotation, and writes the new .env to every linked project instantly.",
+    code: `$ pushkey rotate STRIPE_SECRET_KEY\n✓ Old value backed up\n✓ 3 projects updated\n✓ Rotation complete in 0.2s`,
   },
 ]
 
