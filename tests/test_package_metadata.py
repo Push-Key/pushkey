@@ -55,3 +55,34 @@ def test_packaged_modules_include_cli_runtime_imports():
             cli_imports.add(node.module)
 
     assert cli_imports - packaged == set()
+
+
+def test_pyinstaller_hidden_imports_include_packaged_runtime_modules():
+    import ast
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    packaged = {
+        module
+        for module in metadata["tool"]["setuptools"]["py-modules"]
+        if module.startswith("pushkey_")
+    }
+    tree = ast.parse((ROOT / "build_exe.py").read_text(encoding="utf-8"))
+    submodules = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "SUBMODULES":
+                    submodules = set(ast.literal_eval(node.value))
+
+    assert submodules
+    assert packaged - submodules == {"pushkey_cli"}
+
+
+def test_pyinstaller_build_includes_windows_version_resources():
+    source = (ROOT / "build_exe.py").read_text(encoding="utf-8")
+
+    assert "--version-file" in source
+    assert "FileVersion" in source
+    assert "ProductVersion" in source
+    assert "pyproject.toml" in source

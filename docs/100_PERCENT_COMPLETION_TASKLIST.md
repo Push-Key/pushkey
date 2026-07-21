@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 272/337 production items complete, 80.7%.
+Current result: 274/337 production items complete, 81.3%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
@@ -106,8 +106,8 @@ Roadmap items expected to close:
 Goal: make installation and upgrade predictable for alpha users.
 
 - [ ] Make PyInstaller builds reproducible from a clean checkout.
-- [ ] Verify executable icons and version resources.
-- [ ] Produce supported alpha OS/architecture artifacts.
+- [x] Verify executable icons and version resources.
+- [x] Produce supported alpha OS/architecture artifacts.
 - [ ] Test upgrade without vault loss.
 - [ ] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums before installation.
@@ -125,6 +125,7 @@ Evidence:
 ```powershell
 .\.venv\Scripts\python.exe -m build
 .\.venv\Scripts\python.exe build_exe.py
+.\dist\pushkey-cli.exe --help
 ```
 
 Roadmap items expected to close:

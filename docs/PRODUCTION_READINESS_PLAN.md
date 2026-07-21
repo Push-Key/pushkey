@@ -399,8 +399,8 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [ ] Make PyInstaller specs reproducible from a clean checkout.
 - [x] Embed the exact local web build.
-- [ ] Verify icons and version resources.
-- [ ] Produce supported OS/architecture artifacts.
+- [x] Verify icons and version resources.
+- [x] Produce supported OS/architecture artifacts.
 - [ ] Sign Windows and macOS artifacts.
 - [x] Generate SHA-256 checksums, signatures, provenance, and SBOMs.
 - [ ] Test upgrades without vault loss.
