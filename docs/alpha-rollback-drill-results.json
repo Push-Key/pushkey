@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-07-21T08:12:08.294555+00:00",
+  "storage_mode": "alpha-flat-file",
+  "scenario": "restore volume snapshot after bad deploy mutation",
+  "duration_seconds": 0.389,
+  "restored": true,
+  "checks": [
+    "health",
+    "vault",
+    "activation_heartbeat",
+    "support_ticket",
+    "admin"
+  ],
+  "rpo_seconds": 0,
+  "rto_seconds": 0.389,
+  "residual_risk": "In-process drill; production rollback still requires hosted environment evidence."
+}

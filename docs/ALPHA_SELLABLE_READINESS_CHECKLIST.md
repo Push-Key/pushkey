@@ -85,7 +85,7 @@ Do not claim for alpha:
 
 - [x] Configure actionable dashboards/alert targets for alpha operations.
 - [x] Run an alpha-scale capacity test and record results.
-- [ ] Run a rollback drill in the alpha environment.
+- [x] Run a rollback drill in the alpha environment.
 - [ ] Confirm alerts reach the accountable operator.
 - [x] Confirm logs/metrics/alerts contain no plaintext secrets.
 - [x] Record backup/restore procedure for the chosen alpha storage mode.
