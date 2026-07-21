@@ -44,6 +44,9 @@ interface EditForm {
 }
 
 const EMPTY_ADD: AddForm = { name: "", value: "", provider: "", env: "dev" };
+const REVEAL_TIMEOUT_MS = 10_000;
+const CLIPBOARD_CLEAR_TIMEOUT_MS = 30_000;
+const COPIED_INDICATOR_TIMEOUT_MS = 1_500;
 
 export function VaultTab() {
   const [keys, setKeys] = useState<KeySummary[]>([]);
@@ -118,7 +121,7 @@ export function VaultTab() {
       setRevealed((p) => ({ ...p, [name]: detail.value }));
       setTimeout(() => {
         setRevealed((p) => { const n = { ...p }; delete n[name]; return n; });
-      }, 30_000);
+      }, REVEAL_TIMEOUT_MS);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "reveal failed");
     }
@@ -138,7 +141,10 @@ export function VaultTab() {
       await navigator.clipboard.writeText(v);
     }
     setCopied(name);
-    setTimeout(() => setCopied(null), 1500);
+    setTimeout(() => setCopied(null), COPIED_INDICATOR_TIMEOUT_MS);
+    setTimeout(() => {
+      navigator.clipboard.writeText("").catch(() => {});
+    }, CLIPBOARD_CLEAR_TIMEOUT_MS);
   };
 
   const handleAdd = async (e: React.FormEvent) => {

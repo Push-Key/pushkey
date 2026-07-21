@@ -4,7 +4,7 @@ import { useRouter, usePathname } from "next/navigation"
 import Link from "next/link"
 import Image from "next/image"
 import {
-  LayoutGrid, XCircle, KeyRound, BarChart2, GitBranch, Headphones, Users,
+  LayoutGrid, XCircle, KeyRound, BarChart2, Headphones, Users,
   Settings as SettingsIcon, FileText, ShieldCheck,
 } from "lucide-react"
 import { AdminProvider, useAdmin } from "./_context"
@@ -79,7 +79,6 @@ function Sidebar() {
           <p className="text-[9px] tracking-widest uppercase text-[#94A3B8]/50 px-3 pb-2">Tools</p>
           {navItem("/admin/analytics", <BarChart2 size={15} />, "Analytics")}
           {navItem("/admin/audit", <ShieldCheck size={15} />, "Audit Log")}
-          {navItem("/admin/github", <GitBranch size={15} />, "GitHub Hub")}
           {navItem("/admin/support", <Headphones size={15} />, "Support")}
           {navItem("/admin/community", <Users size={15} />, "Community")}
         </div>

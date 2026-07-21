@@ -49,10 +49,10 @@ Do not claim for alpha:
 
 - [ ] Reconcile every local web app operation with `docs/local-api-v1.md`.
 - [ ] Add loading, empty, error, locked, offline, and conflict states for core flows.
-- [ ] Add safe reveal/copy timeouts for secret values.
-- [ ] Verify secret values do not enter analytics, browser logs, persistent state,
+- [x] Add safe reveal/copy timeouts for secret values.
+- [x] Verify secret values do not enter analytics, browser logs, persistent state,
   or screenshots.
-- [ ] Remove or disable unimplemented “coming soon” controls from alpha surfaces.
+- [x] Remove or disable unimplemented “coming soon” controls from alpha surfaces.
 - [ ] Validate all website/admin/product claims against tested capabilities.
 - [ ] Add basic keyboard navigation and focus checks for critical journeys.
 - [ ] Validate responsive layouts for supported alpha viewport sizes.

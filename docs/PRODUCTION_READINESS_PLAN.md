@@ -352,8 +352,8 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [ ] Reconcile all UI operations with the versioned local API.
 - [ ] Complete loading, empty, error, locked, offline, and conflict states.
-- [ ] Add safe secret reveal/copy timeouts.
-- [ ] Prevent secret values from entering analytics, browser logs, or persistent state.
+- [x] Add safe secret reveal/copy timeouts.
+- [x] Prevent secret values from entering analytics, browser logs, or persistent state.
 - [x] Replace obsolete `next lint` with the working ESLint pattern from `web`.
 - [ ] Add keyboard navigation and focus management.
 - [ ] Meet WCAG 2.2 AA for critical journeys.
@@ -363,7 +363,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ## Marketing/admin/portal tasks
 
 - [x] Replace admin secret login with the Phase 3 session design.
-- [ ] Complete or remove the “coming soon” GitHub integration UI.
+- [x] Complete or remove the “coming soon” GitHub integration UI.
 - [x] Validate every marketing claim against a tested capability.
 - [ ] Configure `metadataBase`, canonical URLs, sitemap, robots, Open Graph, and error pages.
 - [ ] Add CSP-compatible analytics and consent behavior if analytics is used.
@@ -375,7 +375,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [ ] Critical UI journeys pass in Chromium, Firefox, and WebKit where applicable
 - [ ] WCAG audit has no critical failures
-- [ ] No unimplemented controls appear as functional production features
+- [x] No unimplemented controls appear as functional production features
 
 ---
 
