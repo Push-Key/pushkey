@@ -323,12 +323,12 @@ git commit -m "Add versioned agent permission catalog"
 ### Task 3: Replace The Agent Token Store With Schema v2
 
 **Files:**
-- Create: `pushkey_locking.py`
+- Modify: `pushkey_locking.py` *(CP1 introduced this module; CP3 extends it)*
 - Modify: `pushkey_agent_tokens.py`
 - Modify: `pushkey_shared.py`
 - Modify: `pushkey_vault.py`
 - Modify: `tests/conftest.py`
-- Create: `tests/test_locking.py`
+- Modify: `tests/test_locking.py` *(extend with token-lock tests)*
 - Create: `tests/test_agent_token_v2.py`
 - Modify: `tests/test_agent_tokens.py`
 - Modify: `pyproject.toml`

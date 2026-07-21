@@ -15,6 +15,7 @@ SUBMODULES = [
     "pushkey_local_api",
     "pushkey_agent_tokens",
     "pushkey_locking",
+    "pushkey_health",
 ]
 
 

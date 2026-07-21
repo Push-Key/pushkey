@@ -325,11 +325,11 @@ git commit -m "Validate health sidecar in VS Code"
 - Modify: `browser-pushkey/popup.js`
 - Modify: `browser-pushkey/README.md`
 
-- [ ] **Step 1: Add failing Node contract tests**
+- [x] **Step 1: Add failing Node contract tests**
 
 Cover v1 parsing, legacy fallback, 26-hour expiry, five-minute future skew, unavailable HTTP result, malformed document, oversized input, mixed legacy/envelope shape, unsupported version, unknown status, aggregate counts, and a key name containing markup-like text.
 
-- [ ] **Step 2: Run browser contract tests and verify RED**
+- [x] **Step 2: Run browser contract tests and verify RED**
 
 ```powershell
 Set-Location browser-pushkey
@@ -338,15 +338,15 @@ node --test test/health-contract.test.js
 
 Expected: FAIL because the parser module does not exist.
 
-- [ ] **Step 3: Implement bounded normalized response handling**
+- [x] **Step 3: Implement bounded normalized response handling**
 
 The background worker validates each response before storage and stores only normalized keys, counts, schema version, and poll time. Unavailable data clears stored health rather than retaining stale metadata.
 
-- [ ] **Step 4: Replace unsafe dynamic HTML rendering**
+- [x] **Step 4: Replace unsafe dynamic HTML rendering**
 
 Keep static extension-owned offline templates if needed. Create key rows with `document.createElement` and assign all sidecar-derived names with `textContent`; map status to a fixed allowlist of CSS classes.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 Set-Location browser-pushkey

@@ -116,6 +116,52 @@ cd ../web-app; npm ci; npm run build
 
 ---
 
+# CP1, Health Sidecar V1 — Checkpoint Record
+
+**Objective:** Deliver a versioned, privacy-minimized, atomically published `health.json` v1 sidecar that all bundled local consumers validate consistently.
+
+**Branch:** `feat/agentic-auth-foundation`
+**Status:** Complete (Tasks 1–8)
+**Date:** 2026-07-20
+
+## Implemented Guarantees
+
+| Property | Detail |
+|---|---|
+| Schema | Strict v1 envelope: `{schema_version: 1, generated_at, keys}` with sorted keys and 1 MiB bound |
+| Privacy | No secrets, paths, projects, notes, timestamps, or token material published |
+| Freshness | 26-hour maximum age, 5-minute future skew tolerance |
+| Publication | Atomic temp-file → replace → fsync, bound by encrypted vault revision |
+| Invalidation | Opaque vault replacement removes `health.json`; subsequent unlock republishes |
+| Lock order | Process-local vault lock → `.vault.lock` → `.health.lock` |
+| Loopback | Canonical v1 bytes only; fixed 503 for missing/malformed/stale/oversized; `nosnniff`, `no-store`, no wildcard CORS |
+| VS Code consumer | Bounded parser, atomic watcher replacement, untrusted hover content |
+| Browser consumer | Normalized storage only, `textContent` rendering, STATUS_CLASSES allowlist, clears on unavailable |
+| Cross-interface | GUI, CLI, MCP, and Local API all publish through the shared post-save hook with `health_publication_failed` warning |
+
+## Files Introduced
+
+- `pushkey_locking.py` — bounded shared file lock (Windows/POSIX)
+- `pushkey_health.py` — schema, validation, publication, invalidation
+- `vscode-pushkey/health-contract.js` — VS Code parser and watcher
+- `browser-pushkey/health-contract.js` — browser parser and normalizer
+
+## CP1 Test Evidence
+
+| Suite | Result |
+|---|---|
+| Focused Python (locking, health, vault, CLI, MCP, API) | 334+ passed |
+| VS Code contract | 6 passed |
+| Browser contract | 6 passed |
+| Packaging import/build-declaration | 4 passed |
+| Full Python suite | 334 passed, 1 platform skip |
+| Both frontend builds | Pass |
+| Executable build | Verified |
+
+**CP1 completion moves the production checklist from 23/340 to 27/340 (7.9%).**
+
+---
+
 # Phase 1, Architecture and Contract Lock
 
 **Objective:** Eliminate duplicate ownership and define the contracts all clients will use.
