@@ -4,7 +4,7 @@ Displays API key health status from your local Pushkey vault in Chrome or Firefo
 
 ## How it works
 
-The Pushkey desktop app runs a local HTTP server on `127.0.0.1:7654`. The extension polls `/health` every 5 minutes and shows critical/warning counts in the badge.
+The Pushkey desktop app runs a local HTTP server on `127.0.0.1:7654`. The extension polls `/health` every 5 minutes and shows critical/warning counts in the badge. It accepts the strict health sidecar v1 envelope and temporary legacy responses, validates size, schema, and freshness before storage, and clears stored health when the response is unavailable or invalid. Health metadata is local-sensitive: values, project paths, notes, and other vault content are never included.
 
 ## Install (Chrome)
 
