@@ -563,15 +563,18 @@ npm pack --dry-run
 
 ---
 
-# Phase 12, Independent Security Review and Release Candidate
+# Phase 12, Alpha Release Candidate and Post-Alpha Review
 
-**Objective:** Prove the assembled system is safe and releasable.
+**Objective:** Prove the assembled system is safe for constrained alpha use,
+while tracking independent review and formal GA certification separately.
 
 ## Tasks
 
 - [x] Freeze release-candidate scope.
+<!-- agentic-postlaunch:start -->
 - [ ] Commission independent crypto/application security review.
 - [ ] Penetration-test cloud API, admin, portal, local API, and sync.
+<!-- agentic-postlaunch:end -->
 - [x] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
 - [ ] Resolve all critical and high findings.
 - [ ] Triage medium/low findings with owners and deadlines.
@@ -642,7 +645,9 @@ critical-path items.
 - [x] Scoped/revocable sessions
 - [x] MCP plaintext warnings enforced
 - [x] Local API origin and token boundary verified
+<!-- agentic-postlaunch:start -->
 - [ ] Independent review complete
+<!-- agentic-postlaunch:end -->
 
 ## Quality
 

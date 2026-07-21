@@ -92,9 +92,10 @@ External blocker:
 
 - [ ] Sign Windows and macOS artifacts requires signing credentials.
 
-## Track D, External Or Infrastructure Gates
+## Track D, Post-Alpha / GA Gates
 
 These should stay unchecked until real infrastructure or external records exist.
+They are not blockers for a constrained alpha with accurate claims.
 
 - [ ] Migrate encrypted vault blobs to object storage.
 - [ ] Remove production flat-file write paths after migration.
