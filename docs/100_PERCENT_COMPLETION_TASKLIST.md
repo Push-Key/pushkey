@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 275/337 production items complete, 81.6%.
+Current result: 276/337 production items complete, 81.9%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
