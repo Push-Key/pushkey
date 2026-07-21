@@ -171,13 +171,13 @@ Goal: make the alpha sync claim precise.
 
 Choose one:
 
-- [ ] Cloud sync enabled for alpha as encrypted-blob sync with documented limits.
+- [x] Cloud sync enabled for alpha as encrypted-blob sync with documented limits.
 - [ ] Cloud sync disabled/beta-scoped for alpha, with marketing/onboarding claims removed.
 
 If enabled:
 
-- [ ] Document encrypted-blob-only behavior.
-- [ ] Document conflict behavior and user-facing limitations.
+- [x] Document encrypted-blob-only behavior.
+- [x] Document conflict behavior and user-facing limitations.
 - [ ] Add zero-knowledge regression checks for API, logs, database migration
   metadata, and object-storage abstraction.
 

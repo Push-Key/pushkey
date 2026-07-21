@@ -10,6 +10,8 @@ The release candidate is limited to:
 - desktop GUI and CLI;
 - local web app served by the authenticated local API;
 - MCP integration with scoped agent-token unlock;
+- optional cloud sync as encrypted-blob storage only, with ETag conflict
+  detection and no server-side plaintext access or merge logic;
 - cloud license/device activation API;
 - cloud admin API with individual admin accounts, roles, sessions, CSRF, MFA,
   audit attribution, and release-gated operations;
@@ -20,7 +22,8 @@ Deferred features must not appear in launch claims:
 
 - PostgreSQL/object-storage sync migration;
 - distributed rate limiting;
-- conflict-safe multi-device sync;
+- PostgreSQL/object-storage-backed multi-device sync with server-side merge or
+  conflict resolution;
 - signed marketplace artifacts;
 - external security review results.
 
@@ -52,6 +55,31 @@ Required controls before launch:
 - reproducible package artifacts with checksums, SBOM, and provenance;
 - incident, backup, restore, rollback, and key-rotation runbooks.
 
+## Alpha Sync Scope
+
+Cloud sync is enabled for alpha only as an opt-in encrypted-blob service.
+Clients upload and download AES-GCM ciphertext. The cloud API stores the blob,
+size, ETag, timestamps, and account metadata; it must not parse, decrypt, log,
+export, or return vault plaintext through metadata endpoints.
+
+Conflict behavior is intentionally conservative:
+
+- `PUT /api/v1/vault` accepts `If-Match` for stale-write protection.
+- A stale `If-Match` returns `409` with the current ETag and keeps the newer
+  blob intact.
+- `X-Idempotency-Key` replays retry responses for the same write request.
+- `GET /api/v1/vault/history` exposes previous revision metadata only, not
+  revision contents.
+- Browser clients may send `If-Match`, `If-None-Match`, and
+  `X-Idempotency-Key` through CORS.
+
+Not in alpha sync scope:
+
+- server-side conflict merging;
+- PostgreSQL/object-storage storage migration;
+- cross-device real-time sync guarantees;
+- recovery of data without the user's local master password or recovery code.
+
 ## Private Beta Metrics
 
 Track at minimum:
@@ -63,7 +91,8 @@ Track at minimum:
 - admin login and MFA failure counts;
 - license activation and heartbeat success/failure counts;
 - support ticket volume by severity;
-- sync reliability once conflict-safe sync is in scope.
+- encrypted-blob sync upload/download success, stale-write conflicts, and
+  retry/idempotency outcomes.
 
 ## Release Sign-Off Record
 

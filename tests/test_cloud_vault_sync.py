@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
@@ -95,6 +96,58 @@ def test_account_export_and_delete_include_metadata_without_plaintext_vault(user
     assert deleted.status_code == 200
     assert deleted.json() == {"ok": True}
     assert client.get("/api/v1/vault", headers=auth).status_code == 401
+
+
+def test_vault_zero_knowledge_metadata_logs_and_exports_do_not_echo_blob(user_client, app_module):
+    client, auth = user_client
+    sentinel = b"plaintext-looking-secret=sk-test-do-not-log"
+    uploaded = client.put(
+        "/api/v1/vault",
+        headers={**auth, "X-Request-ID": "zk-test-1"},
+        content=sentinel,
+    )
+    assert uploaded.status_code == 200
+
+    meta = client.get("/api/v1/vault/meta", headers=auth)
+    history = client.get("/api/v1/vault/history", headers=auth)
+    exported = client.get("/api/v1/account/export", headers=auth)
+    metrics = client.get("/api/v1/ops/metrics")
+
+    assert meta.status_code == 200
+    assert history.status_code == 200
+    assert exported.status_code == 200
+    assert metrics.status_code == 200
+
+    forbidden = sentinel.decode("ascii")
+    assert forbidden not in uploaded.text
+    assert forbidden not in meta.text
+    assert forbidden not in history.text
+    assert forbidden not in exported.text
+    assert forbidden not in metrics.text
+    assert forbidden not in json.dumps(list(app_module.app.state.request_logs))
+    assert forbidden not in json.dumps(list(app_module.app.state.alerts))
+
+
+def test_sync_cors_allows_conflict_and_idempotency_headers(app_module):
+    client = TestClient(app_module.app)
+
+    response = client.options(
+        "/api/v1/vault",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": (
+                "authorization,content-type,if-match,if-none-match,"
+                "x-idempotency-key,x-request-id"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    allowed = response.headers["access-control-allow-headers"].lower()
+    assert "if-match" in allowed
+    assert "if-none-match" in allowed
+    assert "x-idempotency-key" in allowed
 
 
 def test_user_tokens_include_standard_claims_and_unique_ids(app_module):

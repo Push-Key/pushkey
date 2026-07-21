@@ -92,8 +92,8 @@ Do not claim for alpha:
 
 ### Sync And Storage Scope
 
-- [ ] Decide whether cloud sync is enabled for alpha or explicitly beta-disabled.
-- [ ] If enabled, document encrypted-blob-only limits and conflict behavior.
+- [x] Decide whether cloud sync is enabled for alpha or explicitly beta-disabled.
+- [x] If enabled, document encrypted-blob-only limits and conflict behavior.
 - [ ] If disabled, remove sync claims from alpha marketing/onboarding.
 - [ ] Keep PostgreSQL/object-storage migration as a post-alpha GA blocker.
 
