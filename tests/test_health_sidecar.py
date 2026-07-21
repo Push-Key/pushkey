@@ -100,6 +100,7 @@ def test_loopback_health_server_serves_canonical_v1_or_sanitized_503(tmp_path, m
         assert response.getheader("Content-Type") == "application/json; charset=utf-8"
         assert response.getheader("Cache-Control") == "no-store"
         assert response.getheader("X-Content-Type-Options") == "nosniff"
+        assert response.getheader("Content-Length") == str(len(b'{"error":"health_unavailable"}\n'))
         assert response.getheader("Access-Control-Allow-Origin") is None
         conn.close()
         fresh = {
@@ -112,7 +113,32 @@ def test_loopback_health_server_serves_canonical_v1_or_sanitized_503(tmp_path, m
         conn.request("GET", "/health")
         response = conn.getresponse()
         assert response.status == 200
-        assert response.read() == encode_health_document(fresh)
+        body = response.read()
+        assert body == encode_health_document(fresh)
+        assert response.getheader("Content-Length") == str(len(body))
+        conn.close()
+
+        invalid_documents = [
+            b"not-json",
+            encode_health_document({**fresh, "generated_at": (datetime.now(timezone.utc) - timedelta(hours=27)).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")}),
+            encode_health_document({**fresh, "generated_at": (datetime.now(timezone.utc) + timedelta(minutes=6)).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")}),
+            b"x" * (1024 * 1024 + 1),
+        ]
+        for invalid in invalid_documents:
+            path.write_bytes(invalid)
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            conn.request("GET", "/health")
+            response = conn.getresponse()
+            assert response.status == 503
+            assert response.read() == b'{"error":"health_unavailable"}\n'
+            conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        conn.request("POST", "/health")
+        response = conn.getresponse()
+        assert response.status == 405
+        assert response.getheader("Allow") == "GET"
+        assert response.read() == b""
         conn.close()
     finally:
         server.shutdown()

@@ -554,10 +554,17 @@ def _start_health_server(port: int = HEALTH_PORT) -> None:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        def do_POST(self): self.send_error(405)
-        def do_PUT(self): self.send_error(405)
-        def do_DELETE(self): self.send_error(405)
-        def do_OPTIONS(self): self.send_error(405)
+        def _method_not_allowed(self):
+            self.send_response(405)
+            self.send_header("Allow", "GET")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        def do_HEAD(self): self._method_not_allowed()
+        def do_POST(self): self._method_not_allowed()
+        def do_PUT(self): self._method_not_allowed()
+        def do_PATCH(self): self._method_not_allowed()
+        def do_DELETE(self): self._method_not_allowed()
+        def do_OPTIONS(self): self._method_not_allowed()
         def log_message(self, *_): pass
 
     try:
@@ -8268,6 +8275,11 @@ class PushkeyApp:
         try: self.root.clipboard_clear()
         except: pass
 
+    def _cancel_active_health_refresh(self):
+        cancel = getattr(self.frame, "_cancel_health_refresh", None)
+        if callable(cancel):
+            cancel()
+
     def _on_close(self):
         # Check config for tray_on_close; default ON if vault/config available
         cfg = {}
@@ -8283,6 +8295,7 @@ class PushkeyApp:
             if self._tray_icon is None:
                 self._start_tray()
         else:
+            self._cancel_active_health_refresh()
             self._on_exit()
             if self._tray_icon is not None:
                 try:

@@ -899,6 +899,33 @@ def test_init_creates_vault_when_none(client, auth):
     assert u.status_code == 200
 
 
+def test_init_returns_sanitized_health_publication_warning(client, auth, fresh_app, monkeypatch):
+    from pushkey_health import HealthUnavailableError
+    monkeypatch.setattr(
+        fresh_app, "publish_saved_vault",
+        lambda _vault: (_ for _ in ()).throw(HealthUnavailableError("private detail")),
+    )
+    response = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})
+    assert response.status_code == 200
+    assert response.headers["X-Pushkey-Warning"] == "health_publication_failed"
+    assert "private detail" not in response.text
+
+
+def test_mutation_returns_sanitized_health_publication_warning(unlocked, auth, fresh_app, monkeypatch):
+    from pushkey_health import HealthUnavailableError
+    monkeypatch.setattr(
+        fresh_app, "publish_saved_vault",
+        lambda _vault: (_ for _ in ()).throw(HealthUnavailableError("private detail")),
+    )
+    response = unlocked.post(
+        "/api/keys", headers=auth,
+        json={"name": "WARNING_KEY", "value": "secret-value"},
+    )
+    assert response.status_code == 201
+    assert response.headers["X-Pushkey-Warning"] == "health_publication_failed"
+    assert "private detail" not in response.text
+
+
 def test_init_rejects_when_vault_exists(client, auth):
     _seed_vault("pw-1234567", "PUSH-AAAA-BBBB-CCCC-DDDD", {})
     r = client.post("/api/init", headers=auth, json={"password": "newpass-1234"})

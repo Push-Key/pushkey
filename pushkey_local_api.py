@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional, Literal
 from urllib.parse import urlsplit
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -641,15 +641,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "write requires master-password unlock")
         return sess
 
-    def _save(sess: _Session) -> None:
+    def _save(sess: _Session, response: Optional[Response] = None) -> None:
         from pushkey_vault import save_vault as _save_vault
         _save_vault(sess.vault, sess.password, vault_key=sess.vault_key)
         try:
             publish_saved_vault(sess.vault)
             sess.health_warning = None
-        except HealthSidecarError:
+        except (HealthSidecarError, VaultBusyError):
             # Mutation remains successful; do not disclose health path or errors.
             sess.health_warning = "health_publication_failed"
+        if sess.health_warning and response is not None:
+            response.headers["X-Pushkey-Warning"] = sess.health_warning
 
     def _restore_bytes(path: Path, original: Optional[bytes]) -> None:
         if original is None:
@@ -666,7 +668,7 @@ def create_app() -> FastAPI:
         finally:
             tmp.unlink(missing_ok=True)
 
-    def _persist_project_state(sess: _Session, mutate, *, save_when=lambda _result: True):
+    def _persist_project_state(sess: _Session, mutate, *, response=None, save_when=lambda _result: True):
         """Apply a config/vault mutation and roll both encrypted files back on failure."""
         from pushkey_vault import load_config, save_config
         with app.state.project_lock:
@@ -679,7 +681,7 @@ def create_app() -> FastAPI:
                 result = mutate(cfg, sess.vault)
                 if save_when(result):
                     save_config(cfg)
-                    _save(sess)
+                    _save(sess, response)
                 return cfg, result
             except Exception:
                 sess.vault.clear()
@@ -695,7 +697,7 @@ def create_app() -> FastAPI:
         return datetime.now().strftime("%Y-%m-%d")
 
     @app.post("/api/keys", status_code=201)
-    def create_key(body: KeyCreate, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def create_key(body: KeyCreate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         if body.name.startswith("_"):
             raise HTTPException(400, "key names cannot start with '_'")
@@ -712,11 +714,11 @@ def create_app() -> FastAPI:
             "projects": [],
             "notes": body.notes,
         }
-        _save(sess)
+        _save(sess, response)
         return {"name": body.name, "provider": provider, "env": body.env}
 
     @app.patch("/api/keys/{name}")
-    def update_key(name: str, body: KeyUpdate, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def update_key(name: str, body: KeyUpdate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -726,18 +728,18 @@ def create_app() -> FastAPI:
             entry["env"] = body.env
         if body.notes is not None:
             entry["notes"] = body.notes
-        _save(sess)
+        _save(sess, response)
         return {"name": name, "provider": entry.get("provider"), "env": entry.get("env"), "notes": entry.get("notes", "")}
 
     @app.delete("/api/keys/{name}", status_code=204)
-    def delete_key(name: str, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def delete_key(name: str, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         del sess.vault[name]
-        _save(sess)
+        _save(sess, response)
 
     @app.post("/api/keys/{name}/rotate")
-    def rotate_key(name: str, body: RotateBody, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def rotate_key(name: str, body: RotateBody, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -746,24 +748,24 @@ def create_app() -> FastAPI:
         entry["history"] = entry["history"][:10]
         entry["value"] = body.new_value
         entry["rotated"] = _now_date()
-        _save(sess)
+        _save(sess, response)
         return {"name": name, "rotated": entry["rotated"], "history_count": len(entry["history"])}
 
     @app.post("/api/keys/{name}/backup")
-    def set_backup(name: str, body: BackupBody, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def set_backup(name: str, body: BackupBody, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
         entry["next_value"] = body.backup_value
         entry["next_added"] = _now_date()
         entry["dual_rotation"] = True
-        _save(sess)
+        _save(sess, response)
         import pushkey_providers as _prov
         prov_supports = _prov.provider_supports_multi_key(entry.get("provider", ""))
         return {"name": name, "next_added": entry["next_added"], "dual_rotation": True, "provider_supports_multi_key": prov_supports}
 
     @app.post("/api/keys/{name}/promote")
-    def promote_backup(name: str, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def promote_backup(name: str, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -776,13 +778,13 @@ def create_app() -> FastAPI:
         entry["rotated"] = _now_date()
         entry["next_value"] = None
         entry["next_added"] = None
-        _save(sess)
+        _save(sess, response)
         return {"name": name, "rotated": entry["rotated"]}
 
     # ── projects ──────────────────────────────────────────────────────────
 
     @app.get("/api/projects")
-    def list_projects(sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def list_projects(response: Response, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         vault_view = sess.vault
         if sess.can_write:
@@ -790,6 +792,7 @@ def create_app() -> FastAPI:
                 sess,
                 lambda current_cfg, current_vault:
                     _canonicalize_registered_projects(current_cfg, current_vault),
+                response=response,
                 save_when=bool,
             )
         else:
@@ -811,7 +814,7 @@ def create_app() -> FastAPI:
         return {"projects": result, "count": len(result)}
 
     @app.post("/api/projects", status_code=201)
-    def create_project(body: ProjectCreate, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def create_project(body: ProjectCreate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         canonical = _canonical_project_path(body.path)
         def mutate_create(current_cfg, current_vault):
@@ -823,11 +826,11 @@ def create_app() -> FastAPI:
                 "name": body.name or Path(canonical).name,
                 "created": _now_date(),
             }
-        cfg, _ = _persist_project_state(sess, mutate_create)
+        cfg, _ = _persist_project_state(sess, mutate_create, response=response)
         return {"path": canonical, "name": cfg["projects"][canonical]["name"]}
 
     @app.delete("/api/projects", status_code=204)
-    def delete_project(path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def delete_project(response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         path = _canonical_project_path(path)
         def mutate_delete(current_cfg, current_vault):
@@ -841,10 +844,10 @@ def create_app() -> FastAPI:
                     if path in projs:
                         projs.remove(path)
                         entry["projects"] = projs
-        _persist_project_state(sess, mutate_delete)
+        _persist_project_state(sess, mutate_delete, response=response)
 
     @app.post("/api/projects/assign")
-    def assign_keys(body: ProjectAssign, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def assign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config
         path = _canonical_project_path(path)
         def mutate_assign(current_cfg, current_vault):
@@ -858,11 +861,11 @@ def create_app() -> FastAPI:
                 projects = current_vault[key].setdefault("projects", [])
                 if path not in projects:
                     projects.append(path)
-        _persist_project_state(sess, mutate_assign)
+        _persist_project_state(sess, mutate_assign, response=response)
         return {"path": path, "assigned": body.keys}
 
     @app.post("/api/projects/unassign")
-    def unassign_keys(body: ProjectAssign, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def unassign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         path = _canonical_project_path(path)
         from pushkey_vault import load_config
         def mutate_unassign(current_cfg, current_vault):
@@ -876,17 +879,18 @@ def create_app() -> FastAPI:
                     if path in projects:
                         projects.remove(path)
                         entry["projects"] = projects
-        _persist_project_state(sess, mutate_unassign)
+        _persist_project_state(sess, mutate_unassign, response=response)
         return {"path": path, "unassigned": body.keys}
 
     @app.post("/api/projects/inject")
-    def inject_project(body: InjectBody, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def inject_project(body: InjectBody, response: Response, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
         from pushkey_vault import load_config
         path = _canonical_project_path(path)
         cfg, _ = _persist_project_state(
             sess,
             lambda current_cfg, current_vault:
                 _canonicalize_registered_projects(current_cfg, current_vault),
+            response=response,
             save_when=bool,
         )
         if path not in cfg.get("projects", {}):
@@ -1104,13 +1108,18 @@ def create_app() -> FastAPI:
     # ── init / recovery / rekey ──────────────────────────────────────────
 
     @app.post("/api/init")
-    def init_vault(body: InitBody, _: None = Depends(require_token)):
+    def init_vault(body: InitBody, response: Response, _: None = Depends(require_token)):
         if _s.VAULT_FILE.exists():
             raise HTTPException(409, "vault already exists")
         if len(body.password) < 8:
             raise HTTPException(400, "password must be at least 8 chars")
         recovery = body.recovery_code or generate_recovery_code()
         save_vault({}, body.password, recovery_code=recovery)
+        vault, _ = load_vault(body.password)
+        try:
+            publish_saved_vault(vault)
+        except (HealthSidecarError, VaultBusyError):
+            response.headers["X-Pushkey-Warning"] = "health_publication_failed"
         return {"created": True, "recovery_code": recovery}
 
     @app.post("/api/recovery/add")

@@ -32,7 +32,7 @@ def test_gui_health_publication_failure_records_sanitized_audit(monkeypatch):
     from pushkey_health import HealthBusyError
 
     events = []
-    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(HealthBusyError()))
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(HealthBusyError()))
     monkeypatch.setattr(pushkey, "log_event", events.append)
 
     class Vault(dict):
@@ -46,7 +46,7 @@ def test_gui_health_unsafe_path_records_sanitized_audit(monkeypatch):
     from pushkey_health import HealthPathError
 
     events = []
-    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(HealthPathError()))
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(HealthPathError()))
     monkeypatch.setattr(pushkey, "log_event", events.append)
 
     class Vault(dict):
@@ -60,7 +60,7 @@ def test_gui_health_vault_lock_timeout_records_sanitized_audit(monkeypatch):
     from pushkey_vault import VaultBusyError
 
     events = []
-    monkeypatch.setattr(pushkey, "_publish_health_sidecar", lambda *args, **kwargs: (_ for _ in ()).throw(VaultBusyError()))
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(VaultBusyError()))
     monkeypatch.setattr(pushkey, "log_event", events.append)
 
     class Vault(dict):
@@ -79,6 +79,13 @@ def test_recovery_reset_vault_lock_timeout_is_sanitized(monkeypatch):
 
     assert pushkey._replace_recovered_vault(b"replacement") is True
     assert events == ["master password reset via recovery key; health_publication_failed"]
+
+
+def test_shutdown_cancels_active_health_refresh():
+    cancelled = []
+    app = type("App", (), {"frame": type("Frame", (), {"_cancel_health_refresh": lambda self: cancelled.append(True)})()})()
+    pushkey.PushkeyApp._cancel_active_health_refresh(app)
+    assert cancelled == [True]
 
 
 def test_toggle_expand_opens_key():
