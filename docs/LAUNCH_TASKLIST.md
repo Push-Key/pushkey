@@ -40,6 +40,8 @@ Current result: 252/340 production items complete, 74.1%.
 
 Phase 2 execution details live in [PHASE2_EXECUTION_TASKLIST.md](PHASE2_EXECUTION_TASKLIST.md).
 The 5-task dependency chain lives in [CONSECUTIVE_LAUNCH_TASKS.md](CONSECUTIVE_LAUNCH_TASKS.md).
+The alpha-to-GA completion path lives in
+[100_PERCENT_COMPLETION_TASKLIST.md](100_PERCENT_COMPLETION_TASKLIST.md).
 
 ### 1. Close Phase 1 contracts
 

@@ -8,6 +8,9 @@ security review, formal penetration testing, signing certificates, and
 enterprise-scale infrastructure certification are tracked separately and are not
 alpha blockers.
 
+The full alpha-to-GA execution path lives in
+[100_PERCENT_COMPLETION_TASKLIST.md](100_PERCENT_COMPLETION_TASKLIST.md).
+
 ## Current Assessment
 
 Pushkey is not yet at the alpha/sellable bar.
