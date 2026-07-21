@@ -61,7 +61,7 @@ Do not claim for alpha:
 
 - [ ] Add Playwright coverage for local vault journeys:
   unlock, list, add, rotate, reveal timeout, inject, lock, and offline handling.
-- [ ] Add portal tests for license lookup, renewal request, support ticket creation,
+- [x] Add portal tests for license lookup, renewal request, support ticket creation,
   and privacy-safe failures.
 - [ ] Add admin journey tests for license, contact, audit, settings, support, and
   MFA/session boundaries.

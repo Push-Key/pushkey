@@ -808,6 +808,49 @@ def test_portal_lookup_rate_limit(low_rate_limit_app):
 
 
 # ── Export ───────────────────────────────────────────────────────
+def test_portal_lookup_returns_sanitized_license_summary(client):
+    key = _make_key(client, tier="starter", email="customer@example.com")
+
+    r = client.post("/api/v1/portal/lookup", json={"license_key": key.lower()})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["key"] == key
+    assert body["tier"] == "starter"
+    assert body["email"] == "customer@example.com"
+    assert "devices" not in body
+    assert "admin_notes" not in body
+
+
+def test_portal_unknown_license_failure_is_privacy_safe(client):
+    _make_key(client, email="real-customer@example.com")
+
+    r = client.post("/api/v1/portal/lookup", json={"license_key": "PRO-DOES-NOT-EXIST"})
+
+    assert r.status_code == 404
+    body = json.dumps(r.json())
+    assert "real-customer@example.com" not in body
+    assert "PRO-" not in body
+
+
+def test_portal_renewal_request_creates_internal_ticket(client):
+    key = _make_key(client, tier="pro", email="renew@example.com")
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        json={"license_key": key, "message": "Please renew my alpha license."},
+    )
+
+    assert r.status_code == 200
+    ticket_id = r.json()["ticket_id"]
+    tickets = client.get("/api/admin/tickets", headers=ADMIN).json()
+    ticket = next(t for t in tickets if t["id"] == ticket_id)
+    assert ticket["type"] == "renewal_request"
+    assert ticket["email"] == "renew@example.com"
+    assert ticket["license_key"] == key
+    assert "Please renew my alpha license." in ticket["message"]
+
+
 def test_csv_export(client):
     _make_key(client, email="ex@x.com")
     r = client.get("/api/admin/export", headers=ADMIN)

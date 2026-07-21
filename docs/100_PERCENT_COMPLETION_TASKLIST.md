@@ -74,7 +74,7 @@ unit tests.
 
 - [ ] Add Playwright coverage for local vault journeys:
   unlock, list, add, rotate, reveal timeout, inject, lock, offline.
-- [ ] Add portal tests for license lookup, renewal request, support ticket
+- [x] Add portal tests for license lookup, renewal request, support ticket
   creation, and privacy-safe failures.
 - [ ] Add admin journey tests for license, contact, audit, settings, support,
   MFA, disabled admins, expired sessions, revoked sessions, and role boundaries.
