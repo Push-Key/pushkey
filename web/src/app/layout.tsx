@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://push-key.com"),
   title: "PushKey — Encrypted API Key Vault",
   description: "Store, rotate, and inject your API secrets into every project automatically. AES-256-GCM encrypted. Zero network access. Built for dev teams.",
+  alternates: {
+    canonical: "/",
+  },
   icons: {
     icon: "/favicon.ico",
     apple: "/icon-512.png",
@@ -26,6 +29,12 @@ export const metadata: Metadata = {
     description: "Your secrets. Encrypted. Where you need them.",
     type: "website",
     images: [{ url: "/icon-512.png", width: 512, height: 512 }],
+  },
+  twitter: {
+    card: "summary",
+    title: "PushKey â€” Encrypted API Key Vault",
+    description: "Local-first API key vault with encrypted backup, rotation health, and safe .env injection.",
+    images: ["/icon-512.png"],
   },
 }
 
