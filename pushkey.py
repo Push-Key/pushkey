@@ -8342,6 +8342,7 @@ class PushkeyApp:
                     except Exception:
                         pass
                     self._tray_icon = None
+                self._cancel_active_health_refresh()
                 self._on_exit()
                 self.root.destroy()
             self.root.after(0, _do)
