@@ -366,7 +366,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Complete or remove the “coming soon” GitHub integration UI.
 - [x] Validate every marketing claim against a tested capability.
 - [x] Configure `metadataBase`, canonical URLs, sitemap, robots, Open Graph, and error pages.
-- [ ] Add CSP-compatible analytics and consent behavior if analytics is used.
+- [x] Add CSP-compatible analytics and consent behavior if analytics is used.
 - [ ] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
 - [ ] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
 - [x] Replace boilerplate `web/README.md` with an operator/developer runbook.

@@ -22,7 +22,6 @@ export default function PrivacyPage() {
               <li><strong>Stripe customer ID + payment metadata</strong> — handled by Stripe; we never see your card number</li>
               <li><strong>Encrypted vault blob</strong> (Pro+ only, opt-in) — AES-256-GCM ciphertext only; we cannot decrypt it</li>
               <li><strong>License heartbeat</strong> — anonymized device count and tier check, every 24h</li>
-              <li><strong>Anonymous usage analytics</strong> — page views on push-key.com only; no personal data</li>
             </ul>
           </section>
 

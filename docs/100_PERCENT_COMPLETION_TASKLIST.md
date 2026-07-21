@@ -49,7 +49,7 @@ claims.
 - [x] Remove or disable unimplemented “coming soon” controls.
 - [x] Validate all product/admin/website claims against tested capability.
 - [x] Configure metadata, canonical URLs, sitemap, robots, Open Graph, and error pages.
-- [ ] Add CSP-compatible analytics and consent behavior if analytics remains enabled.
+- [x] Add CSP-compatible analytics and consent behavior if analytics remains enabled.
 - [x] Replace boilerplate `web/README.md` with an operator/developer runbook.
 
 Evidence:
