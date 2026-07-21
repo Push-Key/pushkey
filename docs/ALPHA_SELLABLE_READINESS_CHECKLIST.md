@@ -47,7 +47,7 @@ Do not claim for alpha:
 
 ### Product And UI
 
-- [ ] Reconcile every local web app operation with `docs/local-api-v1.md`.
+- [x] Reconcile every local web app operation with `docs/local-api-v1.md`.
 - [ ] Add loading, empty, error, locked, offline, and conflict states for core flows.
 - [x] Add safe reveal/copy timeouts for secret values.
 - [x] Verify secret values do not enter analytics, browser logs, persistent state,

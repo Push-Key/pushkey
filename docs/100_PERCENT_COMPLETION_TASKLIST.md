@@ -39,7 +39,7 @@ git status --short
 Goal: make the product safe to sell/evaluate with alpha users without misleading
 claims.
 
-- [ ] Reconcile every local web app operation with `docs/local-api-v1.md`.
+- [x] Reconcile every local web app operation with `docs/local-api-v1.md`.
 - [ ] Complete loading, empty, error, locked, offline, and conflict states.
 - [x] Add safe secret reveal/copy timeouts.
 - [x] Prove secret values do not enter analytics, browser logs, local storage,

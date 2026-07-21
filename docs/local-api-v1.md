@@ -27,6 +27,8 @@ used by that file must have a matching route in `pushkey_local_api.py`.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/status` | Return lock state, vault presence, schema, key count, idle state, auth method, and write capability. |
+| POST | `/api/bootstrap` | Exchange the one-time launch token from the URL fragment for an in-browser session token, then consume the launch token. |
+| POST | `/api/logout` | Revoke the current browser session token and clear unlocked vault state. |
 | POST | `/api/unlock` | Unlock with master password or recovery code. |
 | POST | `/api/lock` | Clear the in-memory unlocked session. |
 | GET | `/api/keys` | List masked key summaries. |
