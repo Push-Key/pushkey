@@ -1,6 +1,6 @@
 {
   "name": "pushkey",
-  "displayName": "Pushkey — Key Health",
+  "displayName": "Pushkey Key Health",
   "description": "Shows API key rotation health in .env files from your local Pushkey vault",
   "version": "0.1.0",
   "publisher": "pushkey",
@@ -12,6 +12,9 @@
     "workspaceContains:**/.env"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test test/health-contract.test.js"
+  },
   "contributes": {
     "commands": [
       {
