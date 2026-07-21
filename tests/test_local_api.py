@@ -121,6 +121,27 @@ def test_lock_clears_session(client, auth):
     assert client.get("/api/status", headers=auth).status_code == 401
 
 
+def test_lifespan_shutdown_clears_session_state(fresh_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(fresh_app.app) as local_client:
+        token = local_client.post(
+            "/api/bootstrap",
+            headers={"Authorization": "Bearer test-launch-token"},
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        assert local_client.post("/api/init", headers=auth, json={"password": "master-pw"}).status_code == 200
+        assert local_client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
+        assert fresh_app.app.state.session.vault is not None
+        assert fresh_app.app.state.sessions
+
+    assert fresh_app.app.state.session.vault is None
+    assert fresh_app.app.state.session.password is None
+    assert fresh_app.app.state.session.vault_key is None
+    assert fresh_app.app.state.sessions == {}
+    assert fresh_app.app.state.bootstrap_token is None
+
+
 # ── keys read-only ────────────────────────────────────────────────
 def test_keys_blocked_when_locked(client, auth):
     r = client.get("/api/keys", headers=auth)
@@ -732,7 +753,9 @@ def test_inject_preview_does_not_write(unlocked, auth, tmp_path):
     r = unlocked.post("/api/projects/inject", headers=auth,
                       params={"path": p, "write": False}, json={})
     body = r.json()
-    assert "OPENAI_API_KEY=sk-original" in body["injected"]
+    assert body["injected"] == ["OPENAI_API_KEY"]
+    assert "sk-original" not in str(body)
+    assert "OPENAI_API_KEY=sk-original" not in str(body)
     assert body["wrote"] is False
     assert not (tmp_path / "proj" / ".env").exists()
 

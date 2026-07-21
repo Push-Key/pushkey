@@ -8,8 +8,8 @@ version = "2.1.0"
 description = "Encrypted Key Manager with Direct .env Injection"
 readme = "README.md"
 license = {text = "MIT"}
-authors = [{name = "Author", email = "author@example.com"}]
-requires-python = ">=3.9"
+authors = [{name = "pushkeydev", email = "pushkeydev@gmail.com"}]
+requires-python = ">=3.12"
 dependencies = [
     "cryptography>=41.0.0",
     "fastapi>=0.110.0",

@@ -1,7 +1,7 @@
 # Pushkey Deployment Guide
 
 Two services to deploy:
-1. **Cloud API** (FastAPI / Python). License backend and admin endpoints.
+1. **Cloud API** (`pushkey_cloud_api.py`, FastAPI / Python). License backend and admin endpoints.
 2. **Admin frontend** (Next.js). Admin console UI.
 
 ---

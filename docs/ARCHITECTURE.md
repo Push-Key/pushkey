@@ -2,6 +2,23 @@
 
 Status: canonical architecture for the production-readiness program.
 
+## Launch scope decisions
+
+- Primary client: CLI plus local web app.
+- Legacy Tk desktop: supported maintenance client for the initial release, but
+  new product workflows should land in the CLI/local web app first.
+- Initial release scope: individual, local-first vault management with optional
+  zero-knowledge cloud sync after durable storage lands.
+- Deferred scope: team collaboration, SSO, GitHub webhooks, automated provider
+  rotation, remote MCP, and provider brokers.
+- Supported Python: 3.12 for the verified release baseline.
+- Supported Node/npm: Node 24 and npm 11 for verified frontend builds.
+- Claimed launch platforms: Windows first, with macOS and Linux only after CI,
+  packaging, and install tests cover them.
+- Repository boundary: public/open-core export must be generated from an
+  allowlist; commercial cloud/admin code remains private until an explicit
+  release-boundary decision changes that.
+
 ## Component ownership
 
 | Component | Owner and responsibility | Trust boundary |
@@ -12,15 +29,15 @@ Status: canonical architecture for the production-readiness program.
 | `pushkey_tiers.py` | Device identity, encrypted local entitlement cache, activation client | Server responses override client claims |
 | `pushkey_cloud_api.py` | Canonical cloud sync, account, license, device, CRM, portal, and admin API | Receives encrypted vault blobs and account/license metadata, never vault plaintext |
 | `web/` | Public site, portal, and cloud administration UI | Uses only documented canonical cloud APIs |
-| `server/` | Legacy activation implementation retained for migration reference | Must not receive new features or production traffic |
+| `server/` | Archived legacy activation implementation | Must not contain deployable service code |
 | Extensions | Read the versioned, non-secret health sidecar | Must not read the encrypted vault or secret values |
 
 `pushkey_cloud_api.py` is the only deployable cloud service. The legacy
-`server/main.py` remains in the repository during Phase 1 only as a reference
-for device activation semantics. Its activation, heartbeat, deactivation,
-device-limit, and signed-token behavior now has parity in the canonical service.
-Removal or archival is a separate clean-up change after deployment references
-and clients have been audited.
+`server/main.py` service has been archived after parity for activation,
+heartbeat, deactivation, device-limit, and signed-token behavior landed in the
+canonical service. Historical context is recorded in
+`docs/legacy-server-archive.md`; no new route or behavior may be added under
+`server/`.
 
 ## License authority and device lifecycle
 
@@ -93,3 +110,21 @@ prevents every customer behind one ingress peer from sharing a single IP quota.
 Per-IP lifecycle limiting is deferred until the trusted-proxy integration phase;
 it must not be advertised or enabled while deployments use
 `--no-proxy-headers`.
+
+## Client compatibility and forced upgrades
+
+- Vault files: V3 is current; V1 and V2 are read/migrate compatibility formats
+  and are never written by new production paths.
+- Cloud device API: `/v1/activate`, `/v1/heartbeat`, and `/v1/deactivate` are
+  stable for the initial production line. `/api/v1/*` remains a compatibility
+  alias with identical behavior.
+- Local API: v1 is the contract documented in `docs/local-api-v1.md`; breaking
+  route removals or response-shape removals require a new local API version.
+- Health sidecar: v1 is the contract documented in
+  `docs/health-sidecar-v1.md`; consumers must tolerate unknown fields.
+- Forced upgrade rule: clients may be forced to upgrade only for security
+  defects, unsupported vault/API versions, revoked licensing behavior, or cloud
+  protocol incompatibility. Non-security UI changes must preserve compatibility
+  for the current production line.
+- Server response rule: cloud endpoints should return explicit unsupported
+  version errors rather than silently downgrading entitlement or sync behavior.

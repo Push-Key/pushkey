@@ -72,8 +72,54 @@ def test_list_keys_locked():
     assert result.get("error") == "vault_locked"
 
 
+def test_mcp_session_expires_after_timeout(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+
+    from pushkey_vault import save_vault
+    save_vault({"MY_KEY": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                           "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    mcp_mod._SESSION["last_activity"] = datetime.now() - timedelta(
+        seconds=mcp_mod.SESSION_TIMEOUT_SECONDS + 1
+    )
+
+    result = mcp_mod.list_keys()
+
+    assert result["error"] == "session_expired"
+    assert mcp_mod._SESSION == {}
+
+
+def test_mcp_session_activity_refreshes(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+
+    from pushkey_vault import save_vault
+    save_vault({"MY_KEY": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                           "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+    stale_but_valid = datetime.now() - timedelta(seconds=10)
+    mcp_mod._SESSION["last_activity"] = stale_but_valid
+
+    result = mcp_mod.list_keys()
+
+    assert result["count"] == 1
+    assert mcp_mod._SESSION["last_activity"] > stale_but_valid
+
+
 def test_write_scoped_raw_key_session_preserves_both_v3_slots(monkeypatch):
     import json
+    from datetime import datetime
     import pushkey_shared as _s
     from pushkey_crypto import generate_recovery_code, decrypt_data_v3
     from pushkey_vault import save_vault, load_vault
@@ -82,7 +128,8 @@ def test_write_scoped_raw_key_session_preserves_both_v3_slots(monkeypatch):
     vault, vault_key = load_vault("password")
     mcp_mod = _fresh_mcp()
     mcp_mod._SESSION.update(
-        vault=vault, vault_key=vault_key, password=None, scopes=["read", "write"]
+        vault=vault, vault_key=vault_key, password=None,
+        scopes=["read", "write"], last_activity=datetime.now()
     )
     assert mcp_mod.add_key("AGENT_KEY", "one")["success"]
     assert mcp_mod.rotate_key("AGENT_KEY", "two")["success"]
@@ -153,6 +200,9 @@ def test_get_key_returns_value(tmp_path, monkeypatch):
     mcp_mod._unlock("pw")
     result = mcp_mod.get_key("MY_KEY")
     assert result["value"] == "super-secret"
+    assert "warning" in result
+    assert "MCP client context" in result["warning"]
+    assert "transcript" in result["warning"]
 
 
 def test_get_key_not_found(tmp_path, monkeypatch):
@@ -211,6 +261,26 @@ def test_add_key_duplicate_rejected(tmp_path, monkeypatch):
     assert "already exists" in result["error"]
 
 
+def test_mcp_rejects_hostile_key_name(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    monkeypatch.setattr(_s, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_s, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", tmp_path / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", tmp_path / "config.json")
+
+    from pushkey_vault import save_vault, load_vault
+    save_vault({}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+
+    result = mcp_mod.add_key("BAD\nNAME", "secret")
+
+    assert result["success"] is False
+    assert "invalid key name" in result["error"]
+    vault, _ = load_vault("pw")
+    assert vault == {}
+
+
 def test_inject_env_writes_file(tmp_path, monkeypatch):
     import pushkey_shared as _s
     vault_dir = tmp_path / "vault_dir"
@@ -221,15 +291,14 @@ def test_inject_env_writes_file(tmp_path, monkeypatch):
     monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
     monkeypatch.setattr(_s, "LOG_FILE", vault_dir / "pushkey.log")
 
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
     from pushkey_vault import save_vault
     vault = {
         "OPENAI_KEY": {"value": "sk-abc", "created": "2024-01-01", "rotated": "2024-01-01",
-                       "provider": "OpenAI", "env": "dev", "projects": [], "notes": ""},
+                       "provider": "OpenAI", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""},
     }
     save_vault(vault, "pw")
-
-    project_dir = tmp_path / "myproject"
-    project_dir.mkdir()
 
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
@@ -245,6 +314,55 @@ def test_inject_env_writes_file(tmp_path, monkeypatch):
     assert "OPENAI_KEY=sk-abc" in content
 
 
+def test_mcp_inject_sanitizes_hostile_value(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    vault_dir = tmp_path / "vault_dir"
+    vault_dir.mkdir()
+    monkeypatch.setattr(_s, "VAULT_DIR", vault_dir)
+    monkeypatch.setattr(_s, "VAULT_FILE", vault_dir / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", vault_dir / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    from pushkey_vault import save_vault
+    save_vault({"SAFE_KEY": {"value": "one\nEVIL=two", "created": "2024-01-01", "rotated": "2024-01-01",
+                             "provider": "Unknown", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+
+    result = mcp_mod.inject_env(str(project_dir), keys=["SAFE_KEY"])
+
+    assert result["success"] is True
+    content = (project_dir / ".env").read_text(encoding="utf-8")
+    assert "SAFE_KEY=oneEVIL=two" in content
+    assert "\nEVIL=two" not in content
+
+
+def test_mcp_inject_rejects_unassigned_project_path(tmp_path, monkeypatch):
+    import pushkey_shared as _s
+    vault_dir = tmp_path / "vault_dir"
+    vault_dir.mkdir()
+    monkeypatch.setattr(_s, "VAULT_DIR", vault_dir)
+    monkeypatch.setattr(_s, "VAULT_FILE", vault_dir / "vault.enc")
+    monkeypatch.setattr(_s, "SALT_FILE", vault_dir / ".salt")
+    monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    from pushkey_vault import save_vault
+    save_vault({"SAFE_KEY": {"value": "secret", "created": "2024-01-01", "rotated": "2024-01-01",
+                             "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
+    mcp_mod = _fresh_mcp()
+    mcp_mod._unlock("pw")
+
+    result = mcp_mod.inject_env(str(project_dir), keys=["SAFE_KEY"])
+
+    assert result["success"] is False
+    assert "allowlisted" in result["error"]
+    assert not (project_dir / ".env").exists()
+
+
 def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
     import pushkey_shared as _s
     vault_dir = tmp_path / "vault_dir"
@@ -255,12 +373,11 @@ def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
     monkeypatch.setattr(_s, "CONFIG_FILE", vault_dir / "config.json")
     monkeypatch.setattr(_s, "LOG_FILE", vault_dir / "pushkey.log")
 
-    from pushkey_vault import save_vault
-    save_vault({"K": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
-                      "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
-
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
+    from pushkey_vault import save_vault
+    save_vault({"K": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
+                      "provider": "Unknown", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""}}, "pw")
 
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
@@ -441,6 +558,9 @@ def test_rotate_to_backup_promotes_and_clears_slot(tmp_path, monkeypatch):
     result = mcp_mod.rotate_to_backup("OPENAI_KEY")
     assert result["success"] is True
     assert result["backup_slot"] == "empty"
+    assert "old_value_hint" not in result
+    assert "active-v1" not in str(result)
+    assert "backup-v2" not in str(result)
 
     vault, _ = load_vault("pw")
     assert vault["OPENAI_KEY"]["value"] == "backup-v2"

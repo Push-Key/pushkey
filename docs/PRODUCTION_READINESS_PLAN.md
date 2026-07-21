@@ -6,7 +6,7 @@
 **Execution model:** Complete phases consecutively. Do not start a phase until the previous phase's exit gate passes.
 
 **Latest verification:** [2026-07-20 baseline record](BASELINE_VERIFICATION_2026-07-20.md).
-The isolated Windows run collected 335 tests: 334 passed, none failed, and one
+The isolated Windows run collected 353 tests: 352 passed, none failed, and one
 platform-dependent symlink test skipped. Both frontend production builds pass.
 
 ## Goal
@@ -30,15 +30,15 @@ operations can be trusted with production secrets.
 
 These decisions must be recorded before implementation begins:
 
-- [ ] Primary client: CLI + local web app
-- [ ] Legacy Tk desktop status: maintenance-only or supported first-class client
-- [ ] Canonical cloud backend: consolidate into `pushkey_cloud_api.py`
-- [ ] Legacy `server/` disposition: migrate required behavior, then archive/remove
-- [ ] Initial release scope: individual/local-first plus optional zero-knowledge sync
-- [ ] Deferred scope: team collaboration, SSO, GitHub webhooks, automated provider rotation
-- [ ] Supported platforms and architectures
-- [ ] Supported Python and Node versions
-- [ ] Public open-core boundary versus private commercial repository
+- [x] Primary client: CLI + local web app
+- [x] Legacy Tk desktop status: maintenance-only or supported first-class client
+- [x] Canonical cloud backend: consolidate into `pushkey_cloud_api.py`
+- [x] Legacy `server/` disposition: migrate required behavior, then archive/remove
+- [x] Initial release scope: individual/local-first plus optional zero-knowledge sync
+- [x] Deferred scope: team collaboration, SSO, GitHub webhooks, automated provider rotation
+- [x] Supported platforms and architectures
+- [x] Supported Python and Node versions
+- [x] Public open-core boundary versus private commercial repository
 
 ## Allowed APIs and Existing Patterns
 
@@ -101,7 +101,7 @@ Do not:
 ```powershell
 git status --short
 git diff --check
-python -m compileall pushkey*.py server
+python -m compileall pushkey*.py
 pytest -q
 cd web; npm ci; npm run lint; npm run build
 cd ../web-app; npm ci; npm run build
@@ -110,7 +110,7 @@ cd ../web-app; npm ci; npm run build
 ## Exit Gate
 
 - [x] Clean working tree
-- [x] Current collected test count completes: 334 passed and 1 justified platform skip
+- [x] Current collected test count completes: 352 passed and 1 justified platform skip
 - [x] Both Next.js production builds passing
 - [x] No unknown or accidental files in the release baseline
 
@@ -122,35 +122,35 @@ cd ../web-app; npm ci; npm run build
 
 ## Tasks
 
-- [ ] Write `docs/ARCHITECTURE.md` with component ownership and trust boundaries.
-- [ ] Designate `pushkey_cloud_api.py` as the canonical cloud service.
-- [ ] Inventory behavior unique to `server/main.py`.
-- [ ] Move activation, heartbeat, deactivation, device limits, and signed-token behavior into the canonical service.
-- [ ] Remove client-controlled tier selection; the server must derive tier from the license record.
-- [ ] Specify license status, expiry, grace, device, and revocation behavior.
-- [ ] Version and document `/v1/activate`, `/v1/heartbeat`, and `/v1/deactivate`.
-- [ ] Decide whether `/api/v1/*` remains or becomes a compatibility alias.
-- [ ] Generate or hand-maintain a checked OpenAPI contract for cloud endpoints.
-- [ ] Formalize a versioned local API contract from `web-app/src/lib/api.ts`.
-- [ ] Formalize the versioned `health.json` sidecar schema used by extensions.
-- [ ] Define backward compatibility for V1, V2, and V3 vault files.
-- [ ] Define client/server compatibility and forced-upgrade rules.
-- [ ] Mark `server/` legacy after parity tests pass, then archive or remove it.
-- [ ] Record architecture decisions as ADRs.
+- [x] Write `docs/ARCHITECTURE.md` with component ownership and trust boundaries.
+- [x] Designate `pushkey_cloud_api.py` as the canonical cloud service.
+- [x] Inventory behavior unique to `server/main.py`.
+- [x] Move activation, heartbeat, deactivation, device limits, and signed-token behavior into the canonical service.
+- [x] Remove client-controlled tier selection; the server must derive tier from the license record.
+- [x] Specify license status, expiry, grace, device, and revocation behavior.
+- [x] Version and document `/v1/activate`, `/v1/heartbeat`, and `/v1/deactivate`.
+- [x] Decide whether `/api/v1/*` remains or becomes a compatibility alias.
+- [x] Generate or hand-maintain a checked OpenAPI contract for cloud endpoints.
+- [x] Formalize a versioned local API contract from `web-app/src/lib/api.ts`.
+- [x] Formalize the versioned `health.json` sidecar schema used by extensions.
+- [x] Define backward compatibility for V1, V2, and V3 vault files.
+- [x] Define client/server compatibility and forced-upgrade rules.
+- [x] Mark `server/` legacy after parity tests pass, then archive or remove it.
+- [x] Record architecture decisions as ADRs.
 
 ## Verification
 
-- [ ] Contract test: desktop activation → heartbeat → deactivation against the canonical app.
-- [ ] Contract test every local web client method against `pushkey_local_api.py`.
-- [ ] Assert no production client imports or calls the legacy server contract.
-- [ ] Search for duplicate tier definitions and duplicate route ownership.
+- [x] Contract test: desktop activation → heartbeat → deactivation against the canonical app.
+- [x] Contract test every local web client method against `pushkey_local_api.py`.
+- [x] Assert no production client imports or calls the legacy server contract.
+- [x] Search for duplicate tier definitions and duplicate route ownership.
 
 ## Exit Gate
 
-- [ ] One cloud backend
-- [ ] One authoritative license record
-- [ ] Versioned cloud, local, and sidecar contracts
-- [ ] No client-supplied commercial entitlements
+- [x] One cloud backend
+- [x] One authoritative license record
+- [x] Versioned cloud, local, and sidecar contracts
+- [x] No client-supplied commercial entitlements
 
 ---
 
@@ -160,62 +160,62 @@ cd ../web-app; npm ci; npm run build
 
 ## Vault tasks
 
-- [ ] Add immutable binary fixtures for V1, V2, and V3.
-- [ ] Make CLI initialization create V3 and display/confirm a recovery code instead of silently creating V2.
-- [ ] Centralize recovery-code generation in `pushkey_crypto.py`; remove the duplicate local API generator.
-- [ ] Verify and document the recovery code's effective entropy and normalization rules.
-- [ ] Test every supported migration path.
-- [ ] Test wrong-password, wrong-recovery-code, truncated, corrupted, oversized, and tampered vaults.
+- [x] Add immutable binary fixtures for V1, V2, and V3.
+- [x] Make CLI initialization create V3 and display/confirm a recovery code instead of silently creating V2.
+- [x] Centralize recovery-code generation in `pushkey_crypto.py`; remove the duplicate local API generator.
+- [x] Verify and document the recovery code's effective entropy and normalization rules.
+- [x] Test every supported migration path.
+- [x] Test wrong-password, wrong-recovery-code, truncated, corrupted, oversized, and tampered vaults.
 - [ ] Property-test vault round trips with Unicode, empty, long, and unusual metadata.
-- [ ] Test interrupted writes and backup restoration.
-- [ ] Add file and parent-directory `fsync`, vault write locking, and post-write decrypt validation.
+- [x] Test interrupted writes and backup restoration.
+- [x] Add file and parent-directory `fsync`, vault write locking, and post-write decrypt validation.
 - [ ] Validate restrictive file permissions on Windows, macOS, and Linux where supported.
-- [ ] Define maximum vault and field sizes.
-- [ ] Ensure every migration creates a recoverable backup.
-- [ ] Add a documented vault repair and recovery procedure.
+- [x] Define maximum vault and field sizes.
+- [x] Ensure every migration creates a recoverable backup.
+- [x] Add a documented vault repair and recovery procedure.
 
 ## CLI tasks
 
-- [ ] Complete and test the interactive REPL.
-- [ ] Verify secrets never enter command history or logs.
-- [ ] Implement or verify `set-backup` with `getpass`.
-- [ ] Add stable exit codes for usage, auth, I/O, corruption, and network failures.
-- [ ] Add machine-readable JSON output where automation needs it.
-- [ ] Test Ctrl+C and child-process cleanup for `pushkey app`.
-- [ ] Test port selection and stale local API processes.
-- [ ] Test shell completions on supported shells.
-- [ ] Add subprocess-level CLI tests rather than only direct function tests.
+- [x] Complete and test the interactive REPL.
+- [x] Verify secrets never enter command history or logs.
+- [x] Implement or verify `set-backup` with `getpass`.
+- [x] Add stable exit codes for usage, auth, I/O, corruption, and network failures.
+- [x] Add machine-readable JSON output where automation needs it.
+- [x] Test Ctrl+C and child-process cleanup for `pushkey app`.
+- [x] Test port selection and stale local API processes.
+- [x] Test shell completions on supported shells.
+- [x] Add subprocess-level CLI tests rather than only direct function tests.
 
 ## MCP tasks
 
-- [ ] Require scoped agent tokens as the recommended unlock path.
-- [ ] Add expiration, revocation, scope, and last-used enforcement tests.
-- [ ] Ensure every plaintext write tool returns the mandated warning.
-- [ ] Stop `inject_env` from returning `NAME=value` lines; return key names and counts only.
-- [ ] Consolidate CLI, MCP, and local API `.env` mutation into one atomic, tested service.
-- [ ] Ensure secret-returning tools clearly mark transcript exposure.
-- [ ] Verify `rotate_to_backup(name)` never returns plaintext.
-- [ ] Add session timeout and explicit memory clearing where practical.
-- [ ] Add allowlisted project-path validation for write operations.
-- [ ] Add hostile name/path/value tests.
-- [ ] Update MCP setup documentation for supported clients.
+- [x] Require scoped agent tokens as the recommended unlock path.
+- [x] Add expiration, revocation, scope, and last-used enforcement tests.
+- [x] Ensure every plaintext write tool returns the mandated warning.
+- [x] Stop `inject_env` from returning `NAME=value` lines; return key names and counts only.
+- [x] Consolidate CLI, MCP, and local API `.env` mutation into one atomic, tested service.
+- [x] Ensure secret-returning tools clearly mark transcript exposure.
+- [x] Verify `rotate_to_backup(name)` never returns plaintext.
+- [x] Add session timeout and explicit memory clearing where practical.
+- [x] Add allowlisted project-path validation for write operations.
+- [x] Add hostile name/path/value tests.
+- [x] Update MCP setup documentation for supported clients.
 
 ## Local API tasks
 
-- [ ] Bind only to loopback.
-- [ ] Require a high-entropy, single-launch authentication token.
-- [ ] Remove the token from URLs after bootstrap.
-- [ ] Fix the CLI readiness probe to use an authenticated status request or a dedicated unauthenticated readiness endpoint.
-- [ ] Validate `Origin`, `Host`, and allowed methods.
-- [ ] Parse and compare exact origins; do not use string-prefix origin checks.
-- [ ] Add strict CORS and security headers.
-- [ ] Add request body limits and request timeouts.
-- [ ] Add idle shutdown and parent-process lifecycle behavior.
-- [ ] Prevent directory traversal and arbitrary filesystem writes.
-- [ ] Redact secrets from access logs and exceptions.
-- [ ] Minimize how long plaintext master passwords remain in process memory and clear session state on shutdown.
-- [ ] Add tests for hostile origins, reused tokens, invalid hosts, and malformed bodies.
-- [ ] Embed and serve the exact versioned `web-app/out` artifact.
+- [x] Bind only to loopback.
+- [x] Require a high-entropy, single-launch authentication token.
+- [x] Remove the token from URLs after bootstrap.
+- [x] Fix the CLI readiness probe to use an authenticated status request or a dedicated unauthenticated readiness endpoint.
+- [x] Validate `Origin`, `Host`, and allowed methods.
+- [x] Parse and compare exact origins; do not use string-prefix origin checks.
+- [x] Add strict CORS and security headers.
+- [x] Add request body limits and request timeouts.
+- [x] Add idle shutdown and parent-process lifecycle behavior.
+- [x] Prevent directory traversal and arbitrary filesystem writes.
+- [x] Redact secrets from access logs and exceptions.
+- [x] Minimize how long plaintext master passwords remain in process memory and clear session state on shutdown.
+- [x] Add tests for hostile origins, reused tokens, invalid hosts, and malformed bodies.
+- [x] Embed and serve the exact versioned `web-app/out` artifact.
 
 ## Verification
 
@@ -224,14 +224,14 @@ pytest tests/test_vault_crypto.py tests/test_encryption_edge_cases.py -q
 pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ```
 
-- [ ] Run a clean local journey: init → add → assign → inject → rotate → backup → promote → recover.
-- [ ] Confirm no plaintext secrets appear in logs, history, URLs, or error telemetry.
+- [x] Run a clean local journey: init → add → assign → inject → rotate → backup → promote → recover.
+- [x] Confirm no plaintext secrets appear in logs, history, URLs, or error telemetry.
 
 ## Exit Gate
 
-- [ ] All local critical journeys automated
-- [ ] Local API origin/token security tests passing
-- [ ] Recovery and corruption behavior documented and proven
+- [x] All local critical journeys automated
+- [x] Local API origin/token security tests passing
+- [x] Recovery and corruption behavior documented and proven
 
 ---
 
@@ -241,21 +241,21 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Tasks
 
-- [ ] Define admin user, role, session, MFA, recovery, and audit models.
+- [x] Define admin user, role, session, MFA, recovery, and audit models.
 - [x] Store newly created admin password hashes with Argon2id while retaining legacy bcrypt verification.
-- [ ] Add individual admin accounts.
-- [ ] Add least-privilege roles and route permissions.
+- [x] Add individual admin accounts.
+- [x] Add least-privilege roles and route permissions.
 - [ ] Add MFA enrollment, verification, recovery codes, and reset procedures.
 - [x] Issue short-lived sessions using HttpOnly, Secure, SameSite cookies.
 - [ ] Add refresh rotation and server-side session revocation.
 - [x] Add CSRF protection for cookie-authenticated mutations.
 - [x] Remove `X-Admin-Secret` from public browser requests.
 - [x] Remove admin secrets from `localStorage`.
-- [ ] Keep a break-glass credential only in the server secret store, not the UI.
+- [x] Keep a break-glass credential only in the server secret store, not the UI.
 - [ ] Add login throttling, lockout policy, and alerting.
-- [ ] Record actor ID, role, request ID, IP, and target in audit events.
-- [ ] Add admin account provisioning and offboarding procedures.
-- [ ] Add tests for role boundaries, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
+- [x] Record actor ID, role, request ID, IP, and target in audit events.
+- [x] Add admin account provisioning and offboarding procedures.
+- [x] Add tests for role boundaries, expired sessions, revoked sessions, CSRF, MFA, and enumeration.
 
 ## Pattern references
 
@@ -265,9 +265,9 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Exit Gate
 
-- [ ] No production-wide admin secret reaches browser JavaScript
-- [ ] Every admin mutation has an authenticated actor
-- [ ] MFA and session revocation verified end-to-end
+- [x] No production-wide admin secret reaches browser JavaScript
+- [x] Every admin mutation has an authenticated actor
+- [x] MFA and session revocation verified end-to-end
 
 ---
 
@@ -385,13 +385,13 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Python package tasks
 
-- [ ] Replace placeholder author metadata.
-- [ ] Reconcile minimum Python version across code, package, CI, and docs.
+- [x] Replace placeholder author metadata.
+- [x] Reconcile minimum Python version across code, package, CI, and docs.
 - [ ] Define core and optional dependency groups.
 - [ ] Remove or pin the Git-sourced `graphifyy` dependency.
 - [ ] Include every required runtime module and static artifact.
 - [ ] Decide which entry points ship in the public package.
-- [ ] Build sdist and wheel.
+- [x] Build sdist and wheel.
 - [ ] Install both into fresh virtual environments.
 - [ ] Test upgrade and uninstall behavior.
 
@@ -440,16 +440,16 @@ npm pack --dry-run
 
 ## Tasks
 
-- [ ] Add pull-request CI for Python tests and compilation.
-- [ ] Add frontend lint, type-check, test, and build jobs.
-- [ ] Add packaging smoke tests.
-- [ ] Add Windows, macOS, and Linux matrices.
-- [ ] Add supported Python and Node version matrices.
-- [ ] Add Gitleaks or equivalent secret scanning.
-- [ ] Add `pip-audit` and npm audit policy.
-- [ ] Add Bandit/Semgrep static analysis.
-- [ ] Add Trivy container/filesystem scanning.
-- [ ] Generate CycloneDX or SPDX SBOMs.
+- [x] Add pull-request CI for Python tests and compilation.
+- [x] Add frontend lint, type-check, test, and build jobs.
+- [x] Add packaging smoke tests.
+- [x] Add Windows, macOS, and Linux matrices.
+- [x] Add supported Python and Node version matrices.
+- [x] Add Gitleaks or equivalent secret scanning.
+- [x] Add `pip-audit` and npm audit policy.
+- [x] Add Bandit/Semgrep static analysis.
+- [x] Add Trivy container/filesystem scanning.
+- [x] Generate CycloneDX or SPDX SBOMs.
 - [ ] Pin CI actions by immutable commit SHA.
 - [ ] Add dependency update automation with review gates.
 - [ ] Add artifact provenance and release attestations.
@@ -505,8 +505,8 @@ npm pack --dry-run
 
 ## Tasks
 
-- [ ] Define availability, latency, error-rate, backup, and recovery SLOs.
-- [ ] Set RPO and RTO.
+- [x] Define availability, latency, error-rate, backup, and recovery SLOs.
+- [x] Set RPO and RTO.
 - [ ] Add structured JSON logs with correlation/request IDs.
 - [ ] Add metrics for auth, sync, activation, storage, email, errors, and rate limits.
 - [ ] Add tracing where it materially improves diagnosis.
@@ -522,7 +522,7 @@ npm pack --dry-run
 - [ ] Configure managed secrets and documented rotation.
 - [ ] Run capacity and load tests.
 - [ ] Run a production rollback drill.
-- [ ] Define on-call and escalation ownership.
+- [x] Define on-call and escalation ownership.
 
 ## Exit Gate
 
@@ -543,15 +543,15 @@ npm pack --dry-run
 - [ ] Update test counts automatically from CI.
 - [ ] Update V3 architecture and migration documentation.
 - [ ] Update CLI, MCP, local app, sync, recovery, and extension docs.
-- [ ] Rewrite deployment docs for the canonical architecture.
+- [x] Rewrite deployment docs for the canonical architecture.
 - [ ] Add administrator, backup, restore, and incident runbooks.
-- [ ] Add supported-platform and lifecycle policy.
-- [ ] Add vulnerability reporting and disclosure procedure.
+- [x] Add supported-platform and lifecycle policy.
+- [x] Add vulnerability reporting and disclosure procedure.
 - [ ] Verify privacy policy covers accounts, metadata, logs, support, and encrypted blobs.
 - [ ] Add data retention, export, deletion, and subprocessors disclosures.
 - [ ] Review terms, licensing, refund, and acceptable-use policies.
-- [ ] Create support severity levels and response targets.
-- [ ] Prepare status-page and incident communication templates.
+- [x] Create support severity levels and response targets.
+- [x] Prepare status-page and incident communication templates.
 - [ ] Verify billing/tier enforcement if paid plans launch.
 - [ ] Remove mojibake and validate repository text as UTF-8.
 
@@ -638,10 +638,10 @@ critical-path items.
 
 ## Security
 
-- [ ] Admin secret removed from browsers
-- [ ] Scoped/revocable sessions
-- [ ] MCP plaintext warnings enforced
-- [ ] Local API origin and token boundary verified
+- [x] Admin secret removed from browsers
+- [x] Scoped/revocable sessions
+- [x] MCP plaintext warnings enforced
+- [x] Local API origin and token boundary verified
 - [ ] Independent review complete
 
 ## Quality

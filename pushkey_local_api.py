@@ -44,6 +44,7 @@ from pushkey_crypto import (
     VaultFormatError,
     VaultIntegrityError,
 )
+from pushkey_env import mutate_env_file, sanitize_env_value
 from pushkey_vault import (
     MAX_VAULT_BYTES,
     load_vault,
@@ -900,35 +901,34 @@ def create_app() -> FastAPI:
         env_path = proj / ".env"
         if env_path.is_symlink():
             raise HTTPException(400, "refusing to write through .env symlink")
-        existing_lines: list[str] = []
-        existing_keys: set[str] = set()
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                existing_lines.append(line)
-                if "=" in line and not line.startswith("#"):
-                    existing_keys.add(line.split("=", 1)[0].strip())
+        safe_entries = {
+            k: {**sess.vault[k], "value": sanitize_env_value(sess.vault[k]["value"])}
+            for k in keys
+        }
 
-        new_lines = [f"{k}={sess.vault[k]['value']}" for k in keys if k not in existing_keys]
-        skipped = [k for k in keys if k in existing_keys]
-
+        identity = _project_identity(proj)
         if write:
-            identity = _project_identity(proj)
             gitignore = proj / ".gitignore"
             _assert_project_target(proj, path, env_path, identity)
             _assert_project_target(proj, path, gitignore, identity)
-            content = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-            if ".env" not in content.splitlines():
-                _atomic_project_write(
-                    path,
-                    ".gitignore",
-                    (content.rstrip("\n") + "\n.env\n").encode("utf-8"),
-                    identity,
-                )
-            all_lines = existing_lines + new_lines
-            _atomic_project_write(
-                path, ".env", ("\n".join(all_lines) + "\n").encode("utf-8"), identity
-            )
-        return {"injected": new_lines, "skipped_existing": skipped, "env_file": str(env_path), "wrote": write}
+
+        def atomic_write(filename: str, data: bytes) -> None:
+            _atomic_project_write(path, filename, data, identity)
+
+        result = mutate_env_file(
+            proj,
+            safe_entries,
+            key_names=keys,
+            update_existing=False,
+            write=write,
+            atomic_write=atomic_write if write else None,
+        )
+        return {
+            "injected": result.injected_names,
+            "skipped_existing": result.skipped_existing,
+            "env_file": result.env_file,
+            "wrote": write,
+        }
 
     # ── providers ─────────────────────────────────────────────────────────
 

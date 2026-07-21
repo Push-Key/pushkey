@@ -1060,62 +1060,24 @@ def _ensure_gitignore_env(project_dir: Path) -> None:
 
 def inject_env_file(project_path, vault, key_names=None, target_env="all"):
     """Update .env surgically — only touch keys being written, preserve everything else."""
-    project_dir = Path(project_path)
-    env_path = project_dir / ".env"
+    from pushkey_env import mutate_env_file
 
     def _env_match(key_env):
         return target_env == "all" or key_env == "all" or key_env == target_env
 
     if key_names:
-        keys_to_write = {k: vault[k]["value"] for k in key_names
-                         if k in vault and _env_match(vault[k].get("env", "all"))}
+        names = [k for k in key_names if k in vault and _env_match(vault[k].get("env", "all"))]
     else:
-        keys_to_write = {k: v["value"] for k, v in vault.items()
-                         if _env_match(v.get("env", "all"))}
-
-    if not keys_to_write:
+        names = [k for k, v in vault.items() if _env_match(v.get("env", "all"))]
+    if not names:
         return True
-
-    # Backup existing .env before any changes
-    import shutil
-    if env_path.exists():
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup = env_path.with_name(f".env.pushkey_backup_{ts}")
-        shutil.copy2(str(env_path), str(backup))
-        # Keep only the 5 most recent backups
-        backups = sorted(env_path.parent.glob(".env.pushkey_backup_*"),
-                         key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in backups[5:]:
-            old.unlink(missing_ok=True)
-
-    # Read existing file preserving ALL lines (comments, blanks, structure)
-    existing_lines = []
-    if env_path.exists():
-        existing_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-    # Pass 1: update keys that already exist in the file in-place
-    updated = set()
-    new_lines = []
-    for line in existing_lines:
-        result = _parse_env_line(line)
-        if result and result[0] in keys_to_write:
-            key = result[0]
-            new_lines.append(f"{key}={_format_env_value(keys_to_write[key])}")
-            updated.add(key)
-        else:
-            new_lines.append(line)
-
-    # Pass 2: append new keys that didn't exist yet
-    new_keys = {k: v for k, v in keys_to_write.items() if k not in updated}
-    if new_keys:
-        if new_lines and new_lines[-1].strip() != "":
-            new_lines.append("")
-        new_lines.append("# Managed by Pushkey")
-        for k in sorted(new_keys.keys()):
-            new_lines.append(f"{k}={_format_env_value(new_keys[k])}")
-
-    _atomic_write_text(env_path, "\n".join(new_lines) + "\n")
-    _ensure_gitignore_env(project_dir)
+    mutate_env_file(
+        project_path,
+        vault,
+        key_names=names,
+        update_existing=True,
+        backup_existing=True,
+    )
     return True
 
 

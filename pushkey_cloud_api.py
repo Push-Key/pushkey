@@ -102,6 +102,13 @@ ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
 ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
 ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"))
 ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
+ADMIN_ROLE_PERMISSIONS = {
+    "viewer": {"read"},
+    "support": {"read", "support"},
+    "billing": {"read", "billing"},
+    "admin": {"read", "support", "billing", "settings"},
+    "owner": {"read", "support", "billing", "settings", "backup", "admins"},
+}
 if ADMIN_SESSION_TTL_MIN <= 0:
     raise RuntimeError("PUSHKEY_ADMIN_SESSION_TTL_MIN must be greater than zero")
 if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
@@ -862,6 +869,15 @@ def _require_admin(
     _save_admin_sessions(sessions)
     return {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")}
 
+
+def _require_admin_permission(permission: str):
+    def dependency(actor: dict = Depends(_require_admin)) -> dict:
+        role = actor.get("role", "viewer")
+        if permission not in ADMIN_ROLE_PERMISSIONS.get(role, set()):
+            raise HTTPException(403, "Admin role lacks required permission")
+        return actor
+    return dependency
+
 def _gen_key(tier: str) -> str:
     import secrets as _sec, string as _s
     chars = _s.ascii_uppercase + _s.digits
@@ -1296,7 +1312,7 @@ def _auto_expire(lic: dict) -> bool:
 
 # ── Admin endpoints ──────────────────────────────────────────────
 @app.get("/api/admin/stats")
-async def admin_stats(_: None = Depends(_require_admin)):
+async def admin_stats(_: dict = Depends(_require_admin_permission("read"))):
     lic = _load_licenses()
     now = _utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -1319,13 +1335,13 @@ async def admin_stats(_: None = Depends(_require_admin)):
 
 
 @app.get("/api/admin/licenses")
-async def admin_list_licenses(_: None = Depends(_require_admin)):
+async def admin_list_licenses(_: dict = Depends(_require_admin_permission("read"))):
     lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
     return list(lic.values())
 
 
 @app.post("/api/admin/licenses/generate")
-async def admin_generate(request: Request, _: None = Depends(_require_admin)):
+async def admin_generate(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     body = await request.json()
     tier = body.get("tier", "free").lower()
     if tier not in TIER_PREFIXES:
@@ -1345,7 +1361,7 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(generate)
     key = entry["key"]
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
-    _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]})
+    _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]}, actor=actor, request=request)
     return entry
 
 
@@ -1354,7 +1370,7 @@ VALID_TRIAL_DAYS = {7, 14, 30}
 
 
 @app.post("/api/admin/licenses/issue")
-async def admin_issue(request: Request, _: None = Depends(_require_admin)):
+async def admin_issue(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     body       = await request.json()
     tier       = body.get("tier", "free").lower()
     email      = body.get("email", "").strip().lower()
@@ -1419,12 +1435,12 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
     _log_audit("issue_license", key, {
         "tier": tier, "email": email, "trial_days": trial_days,
         "send_email": send_email, "email_sent": email_result.get("sent", False),
-    })
+    }, actor=actor, request=request)
     return {**entry, "email_result": email_result}
 
 
 @app.get("/api/admin/contacts")
-async def admin_contacts(_: None = Depends(_require_admin)):
+async def admin_contacts(_: dict = Depends(_require_admin_permission("read"))):
     lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
 
     by_email: dict[str, dict] = {}
@@ -1477,7 +1493,7 @@ async def admin_contacts(_: None = Depends(_require_admin)):
 
 @app.patch("/api/admin/contacts/{email}")
 async def admin_update_contact(
-    email: str, request: Request, _: None = Depends(_require_admin)
+    email: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))
 ):
     email = email.lower()
     body  = await request.json()
@@ -1493,12 +1509,12 @@ async def admin_update_contact(
                     entry[field] = body[field]
         return len(matched)
     matched_count = _mutate_licenses(update_contact)
-    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count})
+    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count}, actor=actor, request=request)
     return {"ok": True, "updated": matched_count}
 
 
 @app.post("/api/admin/licenses/{key}/send-invite")
-async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
+async def admin_send_invite(key: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     lic = _load_licenses()
     if key not in lic:
         raise HTTPException(404, "License not found")
@@ -1513,12 +1529,12 @@ async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
                 raise HTTPException(404, "License not found")
             licenses[key]["sent_invite"] = True
         _mutate_licenses(mark_invited)
-    _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)})
+    _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)}, actor=actor, request=request)
     return result
 
 
 @app.post("/api/admin/licenses/{key}/expire")
-async def admin_expire(key: str, _: None = Depends(_require_admin)):
+async def admin_expire(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def expire(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1527,12 +1543,12 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(expire)
     lic = {key: entry}
     _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("expire_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("expire_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.post("/api/admin/licenses/{key}/revoke")
-async def admin_revoke(key: str, _: None = Depends(_require_admin)):
+async def admin_revoke(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def revoke(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1542,12 +1558,12 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(revoke)
     lic = {key: entry}
     _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("revoke_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("revoke_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.post("/api/admin/licenses/{key}/renew")
-async def admin_renew(key: str, _: None = Depends(_require_admin)):
+async def admin_renew(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def renew(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1556,12 +1572,12 @@ async def admin_renew(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(renew)
     lic = {key: entry}
     _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("renew_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("renew_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.get("/api/admin/analytics")
-async def admin_analytics(_: None = Depends(_require_admin)):
+async def admin_analytics(_: dict = Depends(_require_admin_permission("read"))):
     """
     Returns 30-day time-series data for the analytics dashboard:
     - daily_activations: [{date, count}] for last 30 days
@@ -1609,7 +1625,7 @@ async def admin_export(
     tier:   str = "",
     status: str = "",
     search: str = "",
-    _: None = Depends(_require_admin),
+    _: dict = Depends(_require_admin_permission("read")),
 ):
     """Export licenses CSV with optional filters: ?tier=&status=&search="""
     import csv, io
@@ -1647,7 +1663,7 @@ async def admin_export(
 
 
 @app.get("/api/admin/backup")
-async def admin_backup(_: None = Depends(_require_admin)):
+async def admin_backup(request: Request, actor: dict = Depends(_require_admin_permission("backup"))):
     """Returns tar.gz of all data files (licenses, tickets, audit log, events, users — NOT vault blobs)."""
     import tarfile, io
     buf = io.BytesIO()
@@ -1657,7 +1673,7 @@ async def admin_backup(_: None = Depends(_require_admin)):
             if fpath.exists():
                 tar.add(fpath, arcname=fname)
     buf.seek(0)
-    _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())})
+    _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())}, actor=actor, request=request)
     timestamp = _utcnow().strftime("%Y-%m-%d-%H%M%S")
     return Response(
         content=buf.getvalue(),
@@ -1679,7 +1695,7 @@ def _save_tickets(tickets: list[dict]) -> None:
 
 
 @app.post("/api/admin/tickets")
-async def admin_create_ticket(request: Request, _: None = Depends(_require_admin)):
+async def admin_create_ticket(request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     body  = await request.json()
     email = body.get("email", "").strip().lower()
     subj  = body.get("subject", "").strip()
@@ -1704,7 +1720,7 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
     }
     tickets.append(ticket)
     _save_tickets(tickets)
-    _log_audit("create_ticket", ticket["id"], {"email": email, "subject": subj, "priority": pri})
+    _log_audit("create_ticket", ticket["id"], {"email": email, "subject": subj, "priority": pri}, actor=actor, request=request)
 
     # Notify admin via email if SMTP configured
     if SMTP_HOST and FROM_EMAIL:
@@ -1772,12 +1788,12 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
 
 
 @app.get("/api/admin/tickets")
-async def admin_list_tickets(_: None = Depends(_require_admin)):
+async def admin_list_tickets(_: dict = Depends(_require_admin_permission("support"))):
     return list(reversed(_load_tickets()))
 
 
 @app.patch("/api/admin/tickets/{ticket_id}")
-async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depends(_require_admin)):
+async def admin_update_ticket(ticket_id: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     body    = await request.json()
     tickets = _load_tickets()
     target  = next((t for t in tickets if t["id"] == ticket_id), None)
@@ -1793,7 +1809,7 @@ async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depend
         })
     target["updated_at"] = _utcnow().isoformat()
     _save_tickets(tickets)
-    _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body})
+    _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body}, actor=actor, request=request)
     return target
 
 
@@ -1868,7 +1884,7 @@ async def portal_request_renewal(request: Request):
 
 # ── Audit log endpoint ───────────────────────────────────────────
 @app.get("/api/admin/audit")
-async def admin_audit_log(_: None = Depends(_require_admin)):
+async def admin_audit_log(_: dict = Depends(_require_admin_permission("read"))):
     """Returns last 500 audit entries (newest first)."""
     entries = _load_audit()
     return list(reversed(entries[-500:]))
@@ -1876,7 +1892,7 @@ async def admin_audit_log(_: None = Depends(_require_admin)):
 
 # ── Bulk operations ──────────────────────────────────────────────
 @app.post("/api/admin/licenses/bulk")
-async def admin_bulk_action(request: Request, _: None = Depends(_require_admin)):
+async def admin_bulk_action(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     """
     Bulk action across multiple keys.
     Body: {"action": "expire"|"revoke"|"renew", "keys": ["KEY1","KEY2",...]}
@@ -1909,16 +1925,19 @@ async def admin_bulk_action(request: Request, _: None = Depends(_require_admin))
     affected = [key for key, _tier in affected_with_tiers]
     for key, tier in affected_with_tiers:
         _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": tier})
-    _log_audit(f"bulk_{action}", f"{len(affected)} licenses", {
-        "affected": [k[:8] + "…" for k in affected],
-        "not_found": len(not_found),
-    })
+    _log_audit(
+        f"bulk_{action}",
+        f"{len(affected)} licenses",
+        {"affected": [k[:8] for k in affected], "not_found": len(not_found)},
+        actor=actor,
+        request=request,
+    )
     return {"ok": True, "affected": len(affected), "not_found": len(not_found)}
 
 
 # ── Settings ─────────────────────────────────────────────────────
 @app.get("/api/admin/settings")
-async def admin_settings(_: None = Depends(_require_admin)):
+async def admin_settings(_: dict = Depends(_require_admin_permission("settings"))):
     """Returns config (no secret values, just presence)."""
     return {
         "smtp": {
@@ -1939,7 +1958,7 @@ async def admin_settings(_: None = Depends(_require_admin)):
 
 
 @app.post("/api/admin/settings/test-email")
-async def admin_test_email(request: Request, _: None = Depends(_require_admin)):
+async def admin_test_email(request: Request, _: dict = Depends(_require_admin_permission("settings"))):
     """Send a test email to verify SMTP config."""
     body = await request.json()
     to_email = body.get("to", "").strip().lower()

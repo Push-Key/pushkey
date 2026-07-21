@@ -87,6 +87,72 @@ def test_admin_logout_revokes_session(client):
     assert r.status_code == 401
 
 
+def _add_admin(app_module, email: str, password: str, role: str, *, disabled: bool = False) -> str:
+    admin_id = f"{role}-{email.split('@')[0]}"
+    admins = app_module._load_admins()
+    admins[admin_id] = {
+        "id": admin_id,
+        "email": email,
+        "hash": app_module.pwd_ctx.hash(password),
+        "role": role,
+        "mfa_secret": "",
+        "created": app_module._utcnow().isoformat(),
+        "disabled": disabled,
+    }
+    app_module._save_admins(admins)
+    return admin_id
+
+
+def _login_as(client, email: str, password: str) -> dict:
+    r = client.post("/api/admin/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200
+    return {"X-CSRF-Token": r.json()["csrf_token"]}
+
+
+def test_disabled_admin_cannot_login(client, app_module):
+    _add_admin(app_module, "disabled@example.com", "disabled-pass-123", "billing", disabled=True)
+    r = client.post("/api/admin/auth/login", json={
+        "email": "disabled@example.com",
+        "password": "disabled-pass-123",
+    })
+    assert r.status_code == 401
+    assert "disabled@example.com" not in r.text
+
+
+def test_expired_admin_session_is_rejected(client, app_module):
+    sessions = app_module._load_admin_sessions()
+    for session in sessions.values():
+        session["expires_at"] = "2000-01-01T00:00:00"
+    app_module._save_admin_sessions(sessions)
+    r = client.get("/api/admin/stats", headers=ADMIN)
+    assert r.status_code == 401
+
+
+def test_admin_role_boundaries(client, app_module):
+    _add_admin(app_module, "viewer@example.com", "viewer-pass-123", "viewer")
+    viewer = _login_as(client, "viewer@example.com", "viewer-pass-123")
+    assert client.get("/api/admin/stats", headers=viewer).status_code == 200
+    assert client.post("/api/admin/licenses/generate", headers=viewer, json={"tier": "pro"}).status_code == 403
+
+    _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing = _login_as(client, "billing@example.com", "billing-pass-123")
+    assert client.post("/api/admin/licenses/generate", headers=billing, json={"tier": "pro"}).status_code == 200
+    assert client.get("/api/admin/backup", headers=billing).status_code == 403
+
+
+def test_admin_mutation_audit_includes_actor_and_request(client, app_module):
+    _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing = _login_as(client, "billing@example.com", "billing-pass-123")
+    billing["X-Request-ID"] = "req-test-123"
+    r = client.post("/api/admin/licenses/generate", headers=billing, json={"tier": "pro"})
+    assert r.status_code == 200
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    event = next(e for e in audit if e["action"] == "generate_license" and e["request_id"] == "req-test-123")
+    assert event["actor_id"] == "billing-billing"
+    assert event["actor_email"] == "billing@example.com"
+    assert event["actor_role"] == "billing"
+
+
 # ── License generation ───────────────────────────────────────────
 def test_generate_license(client):
     r = client.post("/api/admin/licenses/generate",
