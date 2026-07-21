@@ -450,7 +450,7 @@ npm pack --dry-run
 - [x] Add Bandit/Semgrep static analysis.
 - [x] Add Trivy container/filesystem scanning.
 - [x] Generate CycloneDX or SPDX SBOMs.
-- [ ] Pin CI actions by immutable commit SHA.
+- [x] Pin CI actions by immutable commit SHA.
 - [x] Add dependency update automation with review gates.
 - [x] Add artifact provenance and release attestations.
 - [x] Add a release workflow requiring an approved version tag.

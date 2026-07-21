@@ -1,4 +1,5 @@
 import pathlib
+import re
 import tomllib
 
 
@@ -95,3 +96,16 @@ def test_pyinstaller_build_uses_clean_cache_free_invocations():
     assert "--clean" in source
     assert "Pushkey.spec" not in source
     assert "pushkey-cli.spec" not in source
+
+
+def test_github_actions_are_pinned_to_immutable_commits():
+    workflows = ROOT / ".github" / "workflows"
+    uses_pattern = re.compile(r"uses:\s*[^@\s]+@([^\s#]+)")
+    sha_pattern = re.compile(r"[0-9a-f]{40}")
+
+    refs = []
+    for workflow in workflows.glob("*.yml"):
+        refs.extend((workflow.name, ref) for ref in uses_pattern.findall(workflow.read_text(encoding="utf-8")))
+
+    assert refs
+    assert [(name, ref) for name, ref in refs if not sha_pattern.fullmatch(ref)] == []

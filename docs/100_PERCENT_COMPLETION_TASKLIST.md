@@ -224,7 +224,7 @@ Goal: complete artifact trust and formal release process.
 - [ ] Sign macOS artifacts.
 - [ ] Verify signatures and checksums before install.
 - [ ] Confirm signed artifacts install successfully.
-- [ ] Pin CI actions by immutable commit SHA.
+- [x] Pin CI actions by immutable commit SHA.
 - [ ] Prove no release can bypass tests, scans, signing, or approval.
 - [ ] Re-run the full test, build, scan, packaging, and install matrix.
 - [ ] Conduct clean-room installation on each supported platform.
