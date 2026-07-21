@@ -474,7 +474,7 @@ npm pack --dry-run
 
 - [x] Version the sidecar schema.
 - [x] Test missing, malformed, partial, and concurrently replaced health files.
-- [ ] Test file-watcher reattachment.
+- [x] Test file-watcher reattachment.
 - [x] Support or explicitly exclude Remote SSH, WSL, and containers.
 - [x] Add Extension Host tests.
 - [x] Add publisher, privacy, support, icons, screenshots, and marketplace metadata.
