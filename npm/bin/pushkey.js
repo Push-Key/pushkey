@@ -5,9 +5,11 @@
  */
 const { spawnSync } = require('child_process');
 const { join, dirname } = require('path');
-const { existsSync } = require('fs');
+const { existsSync, realpathSync } = require('fs');
 
 const binDir = dirname(__filename);
+const currentScript = realpathSync(__filename);
+const nodeBinary = realpathSync(process.execPath);
 const candidates = [
   join(binDir, 'pushkey.exe'),      // Windows binary
   join(binDir, 'pushkey'),          // Unix binary (replaced by postinstall)
@@ -15,7 +17,9 @@ const candidates = [
 
 // Try the downloaded binary first
 for (const bin of candidates) {
-  if (existsSync(bin) && bin !== __filename) {
+  if (existsSync(bin)) {
+    const resolved = realpathSync(bin);
+    if (resolved === currentScript || resolved === nodeBinary) continue;
     const result = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
     process.exit(result.status ?? 1);
   }

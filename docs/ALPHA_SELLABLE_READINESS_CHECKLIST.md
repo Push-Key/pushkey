@@ -75,9 +75,9 @@ Do not claim for alpha:
 - [ ] Verify executable icons and version resources.
 - [ ] Produce the supported alpha OS/architecture artifacts.
 - [ ] Test upgrade without vault loss.
-- [ ] Ensure installer/download failures exit nonzero.
-- [ ] Handle unsupported OS/architecture explicitly.
-- [ ] Document arm64 as supported or unsupported for alpha.
+- [x] Ensure installer/download failures exit nonzero.
+- [x] Handle unsupported OS/architecture explicitly.
+- [x] Document arm64 as supported or unsupported for alpha.
 - [ ] Run fresh-machine smoke commands: `pushkey --help`, `pushkey init`,
   `pushkey app`.
 

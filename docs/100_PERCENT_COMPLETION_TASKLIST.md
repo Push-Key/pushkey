@@ -110,10 +110,10 @@ Goal: make installation and upgrade predictable for alpha users.
 - [ ] Test upgrade without vault loss.
 - [ ] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums before installation.
-- [ ] Fail with a nonzero exit code on unsuccessful installation.
-- [ ] Handle unsupported OS/architecture explicitly.
-- [ ] Document arm64 as supported or unsupported.
-- [ ] Prevent Windows shim self-resolution loops.
+- [x] Fail with a nonzero exit code on unsuccessful installation.
+- [x] Handle unsupported OS/architecture explicitly.
+- [x] Document arm64 as supported or unsupported.
+- [x] Prevent Windows shim self-resolution loops.
 - [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 - [ ] Fresh-machine smoke tests run `pushkey --help`, `pushkey init`, and
   `pushkey app`.

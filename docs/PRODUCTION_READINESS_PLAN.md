@@ -409,10 +409,10 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 - [ ] Align installer asset names with CI release artifacts.
 - [ ] Verify checksums/signatures before installation.
-- [ ] Fail with a nonzero exit code on unsuccessful installation.
-- [ ] Handle unsupported OS/architecture explicitly.
-- [ ] Add arm64 support or document it as unsupported.
-- [ ] Prevent Windows shim self-resolution loops.
+- [x] Fail with a nonzero exit code on unsuccessful installation.
+- [x] Handle unsupported OS/architecture explicitly.
+- [x] Add arm64 support or document it as unsupported.
+- [x] Prevent Windows shim self-resolution loops.
 - [ ] Test `npm install -g`, `npx`, upgrade, and uninstall in clean environments.
 
 ## Verification
