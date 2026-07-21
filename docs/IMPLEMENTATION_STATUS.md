@@ -3,7 +3,7 @@
 **Updated:** 2026-07-20
 **Active branch:** `feat/agentic-auth-foundation`
 **Baseline branch:** `feat/pushkey-app` at `5ef2f81`
-**Last verified implementation commit:** `pending Task 4 commit`
+**Last verified implementation commit:** `6de2810`
 
 ## Current Position
 
@@ -60,7 +60,7 @@ Execute CP1, the versioned `health.json` v1 sidecar contract:
 
 1. Start from this branch and confirm `git status --short --branch` is clean.
 2. Continue CP1 Task 5 after the committed Task 4 integration.
-3. Tasks 1-4 implementation commits include `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, `c65dac9`, `8b6f8d2`, `4ea91ac`, `d4f8367`, `0a1d63b`, `8ece4e5`, `a699ec9`, `dda86bd`, and the Task 4 commit recorded below.
+3. Tasks 1-4 implementation commits include `6b0137a`, `c3f5252`, `705dd4d`, `3c0c335`, `0af0836`, `c65dac9`, `8b6f8d2`, `4ea91ac`, `d4f8367`, `0a1d63b`, `8ece4e5`, `a699ec9`, `dda86bd`, and `6de2810`.
 4. Use a fresh implementation subagent and two independent reviews per completed task.
 5. Do not begin CP2 until CP1 is committed, reviewed, and recorded in the production roadmap.
 6. Do not begin authorization implementation until CP1 is complete.
