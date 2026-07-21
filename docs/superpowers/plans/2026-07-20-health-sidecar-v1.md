@@ -284,11 +284,11 @@ git commit -m "Integrate versioned health sidecar"
 - Modify: `vscode-pushkey/package.json`
 - Modify: `vscode-pushkey/README.md`
 
-- [ ] **Step 1: Add failing Node contract tests**
+- [x] **Step 1: Add failing Node contract tests**
 
 Use `node --test` to cover v1 parsing, legacy fallback, legacy file-mtime freshness, 26-hour expiry, five-minute future skew, malformed JSON, mixed legacy/envelope shape, unknown versions, unknown status, 1 MiB bound, missing-file state, valid empty document, atomic watcher replacement, and watcher reattachment after the Pushkey directory appears.
 
-- [ ] **Step 2: Run VS Code contract tests and verify RED**
+- [x] **Step 2: Run VS Code contract tests and verify RED**
 
 ```powershell
 Set-Location vscode-pushkey
@@ -297,15 +297,15 @@ node --test test/health-contract.test.js
 
 Expected: FAIL because the parser module does not exist.
 
-- [ ] **Step 3: Implement bounded parser and watcher behavior**
+- [x] **Step 3: Implement bounded parser and watcher behavior**
 
 Read at most 1 MiB plus one byte. Accept strict v1 or normalized legacy only. Clear cached health when unavailable. Debounce directory notifications, retry transient replacement reads, and reattach the watcher when the Pushkey directory appears.
 
-- [ ] **Step 4: Keep hover content untrusted**
+- [x] **Step 4: Keep hover content untrusted**
 
 Do not set `MarkdownString.isTrusted = true` for sidecar-derived content. Ensure malformed fields cannot call string methods unsafely.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 Set-Location vscode-pushkey
