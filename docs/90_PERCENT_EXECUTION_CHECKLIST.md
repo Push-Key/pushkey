@@ -8,9 +8,9 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 252/340 production items complete, 74.1%.
-90% target: 306/340 production items complete.
-Remaining needed for 90%: 54 additional verified items.
+Current result: 287/337 production items complete, 85.2%.
+90% target: 304/337 production items complete.
+Remaining needed for 90%: 17 additional verified items.
 
 ## Ground Rule
 
@@ -37,12 +37,14 @@ without pretending production infrastructure exists.
 - [ ] Add transactional audit/outbox behavior.
 - [x] Store vault revision metadata transactionally in the migration schema.
 - [ ] Add dashboard and alert configuration documents.
-- [ ] Add capacity-test and rollback-drill scripts or runbooks.
+- [x] Add capacity-test and rollback-drill scripts or runbooks.
 
 Verification:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_admin_api.py tests\test_cloud_vault_sync.py tests\test_cloud_migrations.py -q
+.\.venv\Scripts\python.exe scripts\alpha_capacity_smoke.py --users 8 --iterations 4 --max-p95-ms 750
+.\.venv\Scripts\python.exe scripts\alpha_rollback_drill.py
 ```
 
 ## Track B, Web Client And E2E Work
