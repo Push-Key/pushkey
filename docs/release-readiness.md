@@ -27,6 +27,33 @@ Deferred features must not appear in launch claims:
 - signed marketplace artifacts;
 - external security review results.
 
+## Alpha Release
+
+The invite-only Alpha may ship unsigned desktop and CLI builds. Signing is
+deferred for Alpha, not completed, and becomes mandatory before Public Beta.
+
+Alpha requirements:
+
+- unsigned builds are permitted;
+- distribution is invite-only;
+- every tester must be explicitly told the build is unsigned before download or
+  install;
+- testers should use test credentials and noncritical secrets only;
+- no real production secrets, customer data, or production credentials may be
+  used for Alpha testing;
+- every distributed artifact must include a SHA-256 checksum;
+- every artifact must identify the version, release tag, and commit SHA;
+- downloads must only be distributed through the official Pushkey domain, the
+  official GitHub release, or another approved channel;
+- automatic updates must remain disabled unless update integrity is
+  independently protected;
+- the release must be labeled `Pushkey Alpha` or `Developer Preview`;
+- the Alpha must not be described as production-ready, enterprise-ready, or
+  suitable for critical production credentials;
+- Windows code signing, macOS signing and notarization, signed-artifact
+  verification, and clean-machine installation testing are mandatory before
+  Public Beta.
+
 ## Threat Model Summary
 
 Primary assets:
@@ -54,6 +81,43 @@ Required controls before launch:
 - admin sessions with CSRF, MFA, revocation, and role checks;
 - reproducible package artifacts with checksums, SBOM, and provenance;
 - incident, backup, restore, rollback, and key-rotation runbooks.
+
+The concrete infrastructure checklist for production backup/rollback evidence
+lives in
+[production-rollback-backup-infrastructure-checklist.md](production-rollback-backup-infrastructure-checklist.md).
+That checklist does not establish branch protection or release-gate
+enforcement.
+
+The operator handoff for the remaining external production gates lives in
+[production-external-gate-handoff-checklist.md](production-external-gate-handoff-checklist.md).
+Use it as the companion record for backups, restore/rollback drills,
+monitoring evidence, alert delivery, alpha packaging and checksum publication,
+and the deferred Public Beta signing and signed-install verification gates.
+
+## Release Governance Evidence
+
+Current in-repo evidence:
+
+- `docs/PRODUCTION_READINESS_PLAN.md` still leaves "Protect the main branch and
+  require all release gates" unchecked.
+- `docs/100_PERCENT_COMPLETION_TASKLIST.md` and
+  `docs/REMAINING_TO_100_PERCENT_TASKLIST.md` still require GitHub
+  branch-protection settings evidence.
+- No GitHub branch-protection screenshot/export, repository settings export, or
+  GitHub Settings API output is committed in this repo.
+
+External evidence still required before any GA claim:
+
+- the default branch is protected;
+- the release process requires the documented gates before merge or
+  publication;
+- there is proof that a release cannot bypass tests, scans, signing, or
+  approval;
+- the configured settings are captured in a screenshot, settings export, or
+  API response.
+
+Do not describe branch protection or release-gate enforcement as completed
+until one of those artifacts is attached to the release record.
 
 ## Alpha Sync Scope
 

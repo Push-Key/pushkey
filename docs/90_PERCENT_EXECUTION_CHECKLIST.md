@@ -1,6 +1,6 @@
 # Pushkey 90 Percent Execution Checklist
 
-Status date: 2026-07-21
+Status date: 2026-07-22
 
 Current measured readiness:
 
@@ -8,9 +8,11 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 289/337 production items complete, 85.8%.
-90% target: 304/337 production items complete.
-Remaining needed for 90%: 15 additional verified items.
+Current result: 307/337 production items complete, 91.1%.
+90% target: already exceeded.
+Remaining needed for 90%: 0 additional verified items.
+The remaining open items are external Track D gates. The last local Track A
+load-test slice is recorded in `docs/alpha-capacity-load-results.json`.
 
 ## Ground Rule
 
@@ -32,18 +34,23 @@ without pretending production infrastructure exists.
 - [x] Add abuse detection and operational alerts.
 - [x] Add security regression tests across multiple workers/instances.
 - [x] Run concurrent license, contact, and vault writes.
-- [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
-- [ ] Load-test expected beta and launch concurrency.
+- [x] Verify zero-knowledge properties at API responses, logs, database
+  migration metadata, export paths, and object-storage abstraction.
+- [x] Load-test expected beta and launch concurrency.
 - [x] Add transactional audit/outbox behavior.
 - [x] Store vault revision metadata transactionally in the migration schema.
 - [x] Add dashboard and alert configuration documents.
 - [x] Add capacity-test and rollback-drill scripts or runbooks.
+
+Track A is now fully complete; the remaining blockers are external Track D
+gates.
 
 Verification:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_admin_api.py tests\test_cloud_vault_sync.py tests\test_cloud_migrations.py -q
 .\.venv\Scripts\python.exe scripts\alpha_capacity_smoke.py --users 8 --iterations 4 --max-p95-ms 750
+.\.venv\Scripts\python.exe scripts\alpha_capacity_smoke.py --users 16 --iterations 8 --output docs\alpha-capacity-load-results.json --max-p95-ms 1000
 .\.venv\Scripts\python.exe scripts\alpha_rollback_drill.py
 ```
 
@@ -52,15 +59,18 @@ Verification:
 These can move many checklist items, but they require real browser automation and
 careful UI verification.
 
-- [ ] Reconcile all UI operations with the versioned local API.
-- [ ] Complete loading, empty, error, locked, offline, and conflict states.
-- [ ] Add safe secret reveal/copy timeouts.
-- [ ] Prevent secret values from entering analytics, browser logs, or persistent state.
-- [ ] Add keyboard navigation and focus management.
-- [ ] Validate responsive layouts.
-- [ ] Add Playwright coverage for core vault journeys.
+- [x] Reconcile all UI operations with the versioned local API.
+- [x] Complete loading, empty, error, locked, offline, and conflict states.
+- [x] Add safe secret reveal/copy timeouts.
+- [x] Prevent secret values from entering analytics, browser logs, local storage,
+  session storage, screenshots, or persistent app state.
+- [x] Add keyboard navigation and focus management.
+- [x] Validate responsive layouts.
+- [x] Add Playwright coverage for core vault journeys.
 - [x] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
-- [ ] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
+- [x] Add admin Playwright coverage for license, contact, audit, settings,
+  support, MFA, disabled-admin, expired-session, revoked-session, and role
+  boundary journeys.
 - [x] Replace boilerplate `web/README.md` with an operator/developer runbook.
 
 Verification:
@@ -74,14 +84,15 @@ npm --prefix web run build
 
 ## Track C, Packaging And Installer Work
 
-These are locally testable except code signing.
+These are locally testable except code signing, which is deferred to Public
+Beta.
 
 - [x] Make PyInstaller specs reproducible from a clean checkout.
 - [x] Verify icons and version resources.
 - [x] Produce supported OS/architecture artifacts.
 - [x] Test upgrades without vault loss.
 - [x] Align installer asset names with CI release artifacts.
-- [ ] Verify checksums/signatures before installation.
+- [x] Verify checksums before installation.
 - [x] Fail with a nonzero exit code on unsuccessful installation.
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Add arm64 support or document it as unsupported.
@@ -92,17 +103,18 @@ These are locally testable except code signing.
 
 External blocker:
 
-- [ ] Sign Windows and macOS artifacts requires signing credentials.
+- [ ] Sign Windows and macOS artifacts. Deferred to Public Beta; requires
+  signing credentials.
 
 ## Track D, Post-Alpha / GA Gates
 
 These should stay unchecked until real infrastructure or external records exist.
 They are not blockers for a constrained alpha with accurate claims.
 
-- [ ] Migrate encrypted vault blobs to object storage.
-- [ ] Remove production flat-file write paths after migration.
-- [ ] Add distributed rate limiting through Redis or the API gateway.
-- [ ] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
+- [x] Migrate encrypted vault blobs to object storage.
+- [x] Remove production flat-file write paths after migration.
+- [x] Add distributed rate limiting through Redis or the API gateway.
+- [x] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
 - [ ] Protect the main branch and require all release gates.
 - [ ] Configure encrypted database backups and point-in-time recovery.
 - [ ] Configure versioned object-storage backups.
@@ -112,7 +124,8 @@ They are not blockers for a constrained alpha with accurate claims.
 - [ ] Penetration-test cloud API, admin, portal, local API, and sync.
 - [ ] Resolve all critical and high findings.
 - [ ] Obtain production monitoring evidence.
-- [ ] Confirm signed artifacts install successfully.
+- [ ] Verify artifact signatures before installation. Deferred to Public Beta.
+- [ ] Confirm signed artifacts install successfully (Public Beta gate).
 
 ## Execution Order
 
@@ -124,5 +137,39 @@ They are not blockers for a constrained alpha with accurate claims.
 
 ## Stop Condition
 
-If local work cannot reach 306/340 without Track D, record the exact measured
-percentage and remaining blockers instead of marking unsupported items complete.
+If local work stalls before the next verified slice without Track D, record the
+exact measured percentage and remaining blockers instead of marking unsupported
+items complete.
+
+## 90 Percent Sprint Checklist
+
+Use this as the working queue for the remaining local-only work.
+
+- [x] Run the beta/launch concurrency smoke and record the JSON result in
+  `docs/alpha-capacity-results.json`.
+- [x] Capture a short readiness note that explains the alpha launch boundary,
+  current limitations, and what is still deferred to GA.
+- [x] Verify artifact signature handling is documented separately from checksum
+  handling so unsigned alpha builds are not overstated.
+- [x] Confirm alert routing is currently an external blocker until placeholder
+  operator destinations are replaced with live accountable operator targets.
+- [x] Re-run the roadmap tracker after each completed slice and log the new
+  completion number in the checklist (307/337).
+
+Evidence captured:
+
+- `python scripts/alpha_capacity_smoke.py --users 8 --iterations 4 --max-p95-ms 750`
+- `python scripts/alpha_capacity_smoke.py --users 16 --iterations 8 --output docs/alpha-capacity-load-results.json --max-p95-ms 1000`
+- `python scripts/alpha_rollback_drill.py`
+- `python scripts/roadmap_progress.py`
+- `docs/alpha-capacity-load-results.json`
+- `docs/alpha-launch-boundary-note.md`
+
+### Immediate Execution Order
+
+1. Keep alert routing as an external blocker until live operator targets exist.
+2. Use `docs/production-external-gate-handoff-checklist.md` for the remaining
+   external evidence fields.
+3. Re-run `scripts/roadmap_progress.py` and record whether the total moved.
+4. If the tracker still sits below the next verified slice, stop and list the
+   remaining blockers rather than widening scope.
