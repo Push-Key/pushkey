@@ -1,6 +1,6 @@
 # Pushkey Alpha Sellable Readiness Checklist
 
-Status date: 2026-07-21
+Status date: 2026-07-22
 
 This checklist defines the bar for selling/evaluating Pushkey with alpha users.
 It is intentionally narrower than the full production/GA checklist. Independent
@@ -18,10 +18,10 @@ proof is still missing.
 
 The core local product, CLI, MCP flow, admin auth, license/admin backend, web
 app, admin/portal coverage, packaging smoke checks, and roadmap measurement are
-materially advanced. The remaining alpha blocker is confirming alerts reach the
+materially advanced. The remaining Alpha blocker is confirming alerts reach the
 accountable operator. PostgreSQL/object-storage sync migration, artifact
 signing, independent review, penetration testing, and distributed production
-controls remain post-alpha/GA work.
+controls remain post-Alpha / Public Beta work.
 
 The dated launch boundary note lives in
 [alpha-launch-boundary-note.md](alpha-launch-boundary-note.md).
@@ -92,9 +92,12 @@ Do not claim for alpha:
 - [x] Configure actionable dashboards/alert targets for alpha operations.
 - [x] Run an alpha-scale capacity test and record results.
 - [x] Run a rollback drill in the alpha environment.
-- [ ] Confirm alerts reach the accountable operator.
 - [x] Confirm logs/metrics/alerts contain no plaintext secrets.
 - [x] Record backup/restore procedure for the chosen alpha storage mode.
+
+### Alpha Blocker
+
+- [ ] Confirm alerts reach the accountable operator.
 
 ### Sync And Storage Scope
 
@@ -102,7 +105,7 @@ Do not claim for alpha:
 - [x] Document encrypted-blob-only limits and conflict behavior.
 - [x] Keep PostgreSQL/object-storage migration out of alpha launch claims.
 
-## Separate Post-Alpha / GA Review Checklist
+## Post-Alpha / Public Beta Blockers
 
 These are important, but they are not required to begin paid/evaluation alpha
 with the constrained claims above.
@@ -120,6 +123,6 @@ with the constrained claims above.
 
 ## Alpha Go / No-Go
 
-Alpha can start only when every Alpha Blocker above is checked or explicitly
-removed from the alpha product scope. The post-alpha/GA review checklist must be
-presented as future work, not as completed production readiness.
+Alpha can start only when the Alpha Blocker above is checked or explicitly
+removed from the alpha product scope. The post-Alpha / Public Beta blockers
+must be presented as future work, not as completed production readiness.

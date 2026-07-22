@@ -38,6 +38,25 @@ git diff --check
 git status --short
 ```
 
+## Remaining Split
+
+### 1. Alpha Blocker
+
+- [ ] Confirm alert routing reaches the accountable operator and record the
+  delivery proof.
+
+### 2. Post-Alpha / Public Beta Blockers
+
+- [ ] Production backup, restore, rollback, monitoring, and alert-delivery
+  evidence.
+- [ ] Signing credentials, artifact signing, signed-install verification, and
+  clean-room installs.
+- [ ] GitHub branch protection and release-gate enforcement.
+- [ ] Independent security review, penetration testing, and final sign-off.
+
+The detailed phase-by-phase queue below expands the same split into the full
+execution plan.
+
 ## Phase 1, Reconcile Progress Records And Reach 90 Percent
 
 Goal: remove stale checklist contradictions and close the fastest verified
@@ -72,7 +91,7 @@ with exact reasons they cannot be completed locally.
 
 Goal: make paid/evaluation alpha launchable without overstating GA readiness.
 
-- [ ] Ensure every alpha blocker in
+- [ ] Ensure the Alpha Blocker in
   `docs/ALPHA_SELLABLE_READINESS_CHECKLIST.md` is checked or explicitly removed
   from alpha scope.
 - [x] Re-run the full Python test suite.
@@ -217,7 +236,7 @@ external review, pentest, and final sign-off evidence attached or referenced.
 6. Complete Phase 6 before public release.
 7. Complete Phase 7 before claiming full production/GA readiness.
 
-## Current Known External Blockers
+## Detailed Post-Alpha / Public Beta Blockers
 
 - Public Beta signing credentials, artifact signing, signature verification,
   and signed-install confirmation.

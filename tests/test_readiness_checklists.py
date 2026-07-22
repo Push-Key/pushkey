@@ -65,6 +65,41 @@ def test_release_readiness_alpha_section_documents_unsigned_policy():
         assert required in text
 
 
+def test_remaining_tasklist_splits_alpha_blocker_from_post_alpha_work():
+    text = (ROOT / "docs" / "REMAINING_TO_100_PERCENT_TASKLIST.md").read_text(encoding="utf-8")
+
+    for required in (
+        "## Remaining Split",
+        "### 1. Alpha Blocker",
+        "Confirm alert routing reaches the accountable operator and record the",
+        "### 2. Post-Alpha / Public Beta Blockers",
+        "Production backup, restore, rollback, monitoring, and alert-delivery",
+        "Signing credentials, artifact signing, signed-install verification, and",
+        "GitHub branch protection and release-gate enforcement.",
+        "Independent security review, penetration testing, and final sign-off.",
+        "## Detailed Post-Alpha / Public Beta Blockers",
+    ):
+        assert required in text
+
+
+def test_alpha_sellable_checklist_separates_alpha_and_post_alpha_work():
+    text = (ROOT / "docs" / "ALPHA_SELLABLE_READINESS_CHECKLIST.md").read_text(encoding="utf-8")
+
+    for required in (
+        "Status date: 2026-07-22",
+        "The remaining Alpha blocker is confirming alerts reach the",
+        "### Alpha Blocker",
+        "- [ ] Confirm alerts reach the accountable operator.",
+        "## Post-Alpha / Public Beta Blockers",
+        "post-Alpha / Public Beta work",
+        "Sign Windows and macOS artifacts.",
+        "Configure branch protection and required release gates in GitHub settings.",
+        "Complete production monitoring, backup, restore, and rollback drills.",
+        "Alpha can start only when the Alpha Blocker above is checked or explicitly",
+    ):
+        assert required in text
+
+
 def test_external_gate_handoff_checklist_records_repo_local_completion_and_external_gates():
     text = (ROOT / "docs" / "production-external-gate-handoff-checklist.md").read_text(encoding="utf-8")
 
