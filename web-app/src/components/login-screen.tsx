@@ -88,10 +88,20 @@ export function LoginScreen({ hasVault, onUnlocked }: Props) {
         ) : (
           <form onSubmit={submit} className="space-y-4">
             <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] p-1">
-              <button type="button" onClick={() => { setMode("password"); setErr(null); }} className={pillCls(mode === "password")}>
+              <button
+                type="button"
+                aria-pressed={mode === "password"}
+                onClick={() => { setMode("password"); setErr(null); }}
+                className={pillCls(mode === "password")}
+              >
                 Master Password
               </button>
-              <button type="button" onClick={() => { setMode("recovery"); setErr(null); }} className={pillCls(mode === "recovery")}>
+              <button
+                type="button"
+                aria-pressed={mode === "recovery"}
+                onClick={() => { setMode("recovery"); setErr(null); }}
+                className={pillCls(mode === "recovery")}
+              >
                 Recovery Code
               </button>
             </div>
@@ -128,7 +138,7 @@ export function LoginScreen({ hasVault, onUnlocked }: Props) {
             )}
 
             {err && (
-              <div className="rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-400">
+              <div className="rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-400" role="alert" aria-live="assertive">
                 {err}
               </div>
             )}
@@ -137,6 +147,7 @@ export function LoginScreen({ hasVault, onUnlocked }: Props) {
               type="submit"
               className="w-full bg-cyan-400/10 border border-cyan-400/30 text-cyan-400 hover:bg-cyan-400/20"
               disabled={busy || (mode === "password" ? !password : recovery.length < 8)}
+              aria-busy={busy}
             >
               {busy ? (
                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Unlocking…</>

@@ -25,6 +25,7 @@ function Sidebar() {
     return (
       <Link
         href={href}
+        aria-current={active ? "page" : undefined}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
           active
             ? "bg-white/8 text-white"
@@ -62,7 +63,7 @@ function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto" aria-label="Admin navigation">
         <p className="text-[9px] tracking-widest uppercase text-[#94A3B8]/50 px-3 pb-2">Operations</p>
         {navItem("/admin/licenses", <LayoutGrid size={15} />, "Licenses", stats?.total_active)}
         {navItem("/admin/contacts", <Users size={15} />, "Contacts")}

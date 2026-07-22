@@ -13,12 +13,18 @@ The full alpha-to-GA execution path lives in
 
 ## Current Assessment
 
-Pushkey is not yet at the alpha/sellable bar.
+Pushkey is close to the constrained alpha/sellable bar, but alert-delivery
+proof is still missing.
 
-The core local product, CLI, MCP flow, admin auth, license/admin backend, and
-roadmap measurement are materially advanced. The remaining alpha blockers are
-mostly in UI end-to-end coverage, install/upgrade confidence, operator
-observability, and explicitly scoping sync/storage claims.
+The core local product, CLI, MCP flow, admin auth, license/admin backend, web
+app, admin/portal coverage, packaging smoke checks, and roadmap measurement are
+materially advanced. The remaining alpha blocker is confirming alerts reach the
+accountable operator. PostgreSQL/object-storage sync migration, artifact
+signing, independent review, penetration testing, and distributed production
+controls remain post-alpha/GA work.
+
+The dated launch boundary note lives in
+[alpha-launch-boundary-note.md](alpha-launch-boundary-note.md).
 
 ## Alpha Launch Scope
 
@@ -92,10 +98,9 @@ Do not claim for alpha:
 
 ### Sync And Storage Scope
 
-- [x] Decide whether cloud sync is enabled for alpha or explicitly beta-disabled.
-- [x] If enabled, document encrypted-blob-only limits and conflict behavior.
-- [ ] If disabled, remove sync claims from alpha marketing/onboarding.
-- [ ] Keep PostgreSQL/object-storage migration as a post-alpha GA blocker.
+- [x] Cloud sync enabled for alpha only as opt-in encrypted-blob sync.
+- [x] Document encrypted-blob-only limits and conflict behavior.
+- [x] Keep PostgreSQL/object-storage migration out of alpha launch claims.
 
 ## Separate Post-Alpha / GA Review Checklist
 
@@ -106,7 +111,7 @@ with the constrained claims above.
 - [ ] Penetration-test cloud API, admin, portal, local API, and sync.
 - [ ] Resolve critical/high external-review findings.
 - [ ] Triage medium/low external-review findings with owners and deadlines.
-- [ ] Add distributed Redis/API-gateway rate limiting.
+- [x] Add distributed Redis/API-gateway rate limiting.
 - [ ] Complete PostgreSQL/object-storage migration and remove flat-file
   production write paths.
 - [ ] Sign Windows and macOS artifacts.

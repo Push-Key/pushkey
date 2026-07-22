@@ -18,17 +18,21 @@ import { bootstrapSession } from "@/lib/auth";
 function StatePanel({
   title,
   detail,
+  tone = "info",
 }: {
   title: string;
   detail: React.ReactNode;
+  tone?: "info" | "error";
 }) {
+  const role = tone === "error" ? "alert" : "status";
+  const ariaLive = tone === "error" ? "assertive" : "polite";
   return (
-    <div className="flex h-screen items-center justify-center p-4">
+    <section className="flex h-screen items-center justify-center p-4" role={role} aria-live={ariaLive}>
       <div className="max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-6 text-sm">
         <div className="font-semibold text-[var(--color-foreground)]">{title}</div>
         <div className="mt-2 text-[var(--color-muted-foreground)]">{detail}</div>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -69,20 +73,24 @@ export default function Page() {
 
   if (!tokenReady) {
     return (
-      <StatePanel
-        title="Preparing secure local session"
-        detail="Exchanging the one-time launch token for a browser session."
-      />
+      <main aria-label="Vault workspace">
+        <StatePanel
+          title="Preparing secure local session"
+          detail="Exchanging the one-time launch token for a browser session."
+        />
+      </main>
     );
   }
 
   if (error && !status) {
     if (error.startsWith("401:")) {
       return (
-        <StatePanel
-          title="Vault session ended"
-          detail="The local browser session is locked or expired. Reopen the app from the Pushkey CLI to start a new secure session."
-        />
+        <main aria-label="Vault workspace">
+          <StatePanel
+            title="Vault session ended"
+            detail="The local browser session is locked or expired. Reopen the app from the Pushkey CLI to start a new secure session."
+          />
+        </main>
       );
     }
 

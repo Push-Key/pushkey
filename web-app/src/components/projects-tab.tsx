@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   FolderOpen, Plus, Trash2, ChevronDown, ChevronRight,
   Zap, Check, X, Loader2,
@@ -16,7 +16,11 @@ import { toast } from "@/lib/toast";
 
 function ErrorBanner({ msg }: { msg: string }) {
   return (
-    <div className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-sm text-red-400">
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-sm text-red-400"
+    >
       {msg}
     </div>
   );
@@ -28,7 +32,12 @@ function InjectResult({
   result: { injected: string[]; skipped_existing: string[]; env_file: string; wrote: boolean };
 }) {
   return (
-    <div className="rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1"
+    >
       <p className="font-semibold text-emerald-400">
         {result.wrote ? "Wrote" : "Preview"}: {result.env_file}
       </p>
@@ -114,10 +123,12 @@ function ProjectPanel({
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <Button
+            type="button"
             size="sm"
             variant="outline"
             onClick={inject}
             disabled={injectLoading}
+            aria-label={`Inject environment file for ${project.name || project.path}`}
             className="border-cyan-400/30 text-cyan-400 hover:bg-cyan-400/10"
           >
             {injectLoading ? (
@@ -149,10 +160,11 @@ function ProjectPanel({
               >
                 <span className="font-mono text-xs text-cyan-400">{k.name}</span>
                 <button
+                  type="button"
                   onClick={() => unassign(k.name)}
                   disabled={assignLoading}
+                  aria-label={`Unassign ${k.name} from ${project.name || project.path}`}
                   className="text-[var(--color-muted-foreground)] hover:text-red-400 transition-colors ml-1"
-                  title="Unassign"
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -171,9 +183,11 @@ function ProjectPanel({
           <div className="flex flex-wrap gap-2">
             {unassigned.map((k) => (
               <button
+                type="button"
                 key={k.name}
                 onClick={() => assign(k.name)}
                 disabled={assignLoading}
+                aria-label={`Assign ${k.name} to ${project.name || project.path}`}
                 className="flex items-center gap-1 rounded-md border border-[var(--color-card)] bg-[var(--color-card)] px-2 py-1 hover:border-cyan-400/30 hover:text-cyan-400 transition-colors"
               >
                 <Plus className="h-3 w-3" />
@@ -204,6 +218,7 @@ function ProjectCard({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
+  const panelId = useId();
 
   const handleDelete = async () => {
     if (!confirmDelete) { setConfirmDelete(true); return; }
@@ -224,7 +239,10 @@ function ProjectCard({
       {/* Header row */}
       <div className="flex items-center gap-3 p-4">
         <button
+          type="button"
           onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-controls={panelId}
           className="flex items-center gap-3 flex-1 text-left min-w-0"
         >
           {expanded
@@ -251,18 +269,22 @@ function ProjectCard({
           {confirmDelete ? (
             <div className="flex items-center gap-1">
               <Button
+                type="button"
                 size="sm"
                 variant="destructive"
                 onClick={handleDelete}
                 disabled={deleting}
+                aria-label={`Confirm delete for ${project.name || project.path}`}
                 className="h-7 text-xs"
               >
                 {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
               </Button>
               <Button
+                type="button"
                 size="sm"
                 variant="ghost"
                 onClick={() => setConfirmDelete(false)}
+                aria-label={`Cancel delete for ${project.name || project.path}`}
                 className="h-7 text-xs"
               >
                 Cancel
@@ -270,11 +292,12 @@ function ProjectCard({
             </div>
           ) : (
             <Button
+              type="button"
               size="icon"
               variant="ghost"
               onClick={handleDelete}
               className="h-7 w-7 hover:text-red-400"
-              title="Delete project"
+              aria-label={`Delete project ${project.name || project.path}`}
             >
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
@@ -289,11 +312,13 @@ function ProjectCard({
       )}
 
       {expanded && (
-        <ProjectPanel
-          project={project}
-          allKeys={allKeys}
-          onUpdate={onUpdate}
-        />
+        <div id={panelId} role="region" aria-label={`${project.name || project.path} project details`}>
+          <ProjectPanel
+            project={project}
+            allKeys={allKeys}
+            onUpdate={onUpdate}
+          />
+        </div>
       )}
     </div>
   );

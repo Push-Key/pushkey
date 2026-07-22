@@ -48,8 +48,8 @@ The alpha-to-GA completion path lives in
 - [x] Write the versioned local API contract from `web-app/src/lib/api.ts`.
 - [x] Add contract tests for every local web client method against `pushkey_local_api.py`.
 - [x] Define `health.json` sidecar schema v1 for VS Code/browser extensions.
-- [ ] Add schema tests for healthy, stale, missing, malformed, and partial sidecar data.
-- [ ] Define client/server compatibility and forced-upgrade rules.
+- [x] Add schema tests for healthy, stale, missing, malformed, and partial sidecar data.
+- [x] Define client/server compatibility and forced-upgrade rules.
 - [x] Add a guard test proving production clients do not import or call `server/main.py`.
 - [x] Archive, remove, or mechanically exclude `server/` after parity checks.
 
@@ -67,7 +67,7 @@ The alpha-to-GA completion path lives in
 ### 3. Continue Phase 3 admin auth
 
 - [x] Define admin user, role, session, MFA, recovery, and audit models.
-- [ ] Add individual admin-account lifecycle endpoints.
+- [x] Add individual admin-account lifecycle endpoints.
 - [x] Add least-privilege roles and route permissions.
 - [x] Add MFA enrollment, recovery codes, and reset flow.
 - [x] Add session refresh rotation and broad server-side revocation.
@@ -77,9 +77,9 @@ The alpha-to-GA completion path lives in
 
 ### 4. Parallel low-risk lanes
 
-- [ ] Add `web-app` lint modernization so CI can run lint there.
+- [x] Add `web-app` lint modernization so CI can run lint there.
 - [x] Add package metadata cleanup and supported Python/Node version decision.
-- [ ] Add npm installer failure/unsupported-platform tests.
+- [x] Add npm installer failure/unsupported-platform tests.
 - [ ] Update `DEPLOY.md` to emphasize one worker/one machine until Phase 4 storage migration.
 - [ ] Inventory extension launch claims and decide defer/remove/ship.
 

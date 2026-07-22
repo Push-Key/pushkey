@@ -4,7 +4,9 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
+import tempfile
 
 
 @dataclass(frozen=True)
@@ -152,7 +154,8 @@ def run_migrations(db_path: Path, *, dry_run: bool = False) -> dict:
         return {"applied": [migration.name for migration in MIGRATIONS], "dry_run": True}
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         _ensure_migrations_table(conn)
         applied = {
             row[0] for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
@@ -168,18 +171,23 @@ def run_migrations(db_path: Path, *, dry_run: bool = False) -> dict:
             )
             newly_applied.append(migration.name)
         conn.commit()
+    finally:
+        conn.close()
     return {"applied": newly_applied, "dry_run": False}
 
 
 def migration_status(db_path: Path) -> dict:
     if not db_path.exists():
         return {"current": None, "applied": []}
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         _ensure_migrations_table(conn)
         applied = [
             row[0]
             for row in conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
         ]
+    finally:
+        conn.close()
     return {"current": applied[-1] if applied else None, "applied": applied}
 
 
@@ -191,11 +199,28 @@ def _json_count(path: Path) -> int:
 
 
 def import_legacy_dataset(source_dir: Path, destination_dir: Path, *, dry_run: bool = False) -> dict:
+    report = _dataset_report(source_dir, include_files=False, dry_run=dry_run)
+    if not dry_run:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        (destination_dir / "import-report.json").write_text(
+            json.dumps(report, indent=2),
+            encoding="utf-8",
+        )
+    return report
+
+
+def _dataset_report(source_dir: Path, *, include_files: bool, dry_run: bool) -> dict:
     vault_hashes = []
+    restored_files = []
+    for name in ("users.json", "licenses.json"):
+        if (source_dir / name).exists():
+            restored_files.append(name)
     vault_dir = source_dir / "vaults"
     if vault_dir.exists():
         for item in sorted(vault_dir.glob("*.enc")):
-            vault_hashes.append(hashlib.sha256(item.read_bytes()).hexdigest())
+            if item.is_file():
+                vault_hashes.append(hashlib.sha256(item.read_bytes()).hexdigest())
+                restored_files.append(f"vaults/{item.name}")
 
     report = {
         "dry_run": dry_run,
@@ -206,10 +231,115 @@ def import_legacy_dataset(source_dir: Path, destination_dir: Path, *, dry_run: b
         },
         "hashes": {"vault_blobs": vault_hashes},
     }
+    if include_files:
+        report["restored_files"] = restored_files
+    return report
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(delete=False, dir=dst.parent, prefix=f".{dst.name}.", suffix=".tmp") as handle:
+        temp_path = Path(handle.name)
+    try:
+        shutil.copy2(src, temp_path)
+        temp_path.replace(dst)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def restore_legacy_dataset(source_dir: Path, destination_dir: Path, *, dry_run: bool = False) -> dict:
+    report = _dataset_report(source_dir, include_files=True, dry_run=dry_run)
     if not dry_run:
         destination_dir.mkdir(parents=True, exist_ok=True)
-        (destination_dir / "import-report.json").write_text(
+        (destination_dir / "import-report.json").unlink(missing_ok=True)
+        (destination_dir / "restore-report.json").unlink(missing_ok=True)
+        (destination_dir / "users.json").unlink(missing_ok=True)
+        (destination_dir / "licenses.json").unlink(missing_ok=True)
+        shutil.rmtree(destination_dir / "vaults", ignore_errors=True)
+
+        for name in ("users.json", "licenses.json"):
+            src = source_dir / name
+            if src.exists():
+                _atomic_copy(src, destination_dir / name)
+
+        vault_dir = source_dir / "vaults"
+        if vault_dir.exists():
+            for item in sorted(vault_dir.glob("*.enc")):
+                if item.is_file():
+                    _atomic_copy(item, destination_dir / "vaults" / item.name)
+
+        (destination_dir / "restore-report.json").write_text(
             json.dumps(report, indent=2),
             encoding="utf-8",
         )
     return report
+
+
+def rollback_plan(target: str | None = None) -> list[str]:
+    plan = [
+        "Freeze writes to the migrated storage path.",
+        "Restore the last verified database snapshot and matching transactional metadata.",
+        "Restore encrypted vault blobs from the latest versioned object-storage snapshot.",
+        "Reconcile record counts, etags, and SHA-256 hashes against the smoke report.",
+        "Re-enable reads and writes only after the restored state matches the report.",
+    ]
+    if target:
+        plan.insert(0, f"Rollback target: {target}")
+    return plan
+
+
+def _write_sample_legacy_dataset(source_dir: Path) -> Path:
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "users.json").write_text(
+        json.dumps({"u@example.com": {"hash": "h"}}, indent=2),
+        encoding="utf-8",
+    )
+    (source_dir / "licenses.json").write_text(
+        json.dumps({"PRO-1": {"tier": "pro"}}, indent=2),
+        encoding="utf-8",
+    )
+    vault_dir = source_dir / "vaults"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / "sample.enc").write_bytes(b"encrypted-vault-blob")
+    return source_dir
+
+
+def build_cloud_migration_smoke_report() -> dict:
+    with tempfile.TemporaryDirectory(prefix="pushkey-cloud-migration-") as temp_root:
+        root = Path(temp_root)
+        legacy = _write_sample_legacy_dataset(root / "legacy")
+        export_dir = root / "export"
+        restore_dir = root / "restore"
+        db_path = root / "cloud.sqlite"
+
+        dry_run = run_migrations(db_path, dry_run=True)
+        applied = run_migrations(db_path)
+        status = migration_status(db_path)
+        import_dry_run = import_legacy_dataset(legacy, export_dir, dry_run=True)
+        import_live = import_legacy_dataset(legacy, export_dir, dry_run=False)
+        restore_dry_run = restore_legacy_dataset(legacy, restore_dir, dry_run=True)
+        restore_live = restore_legacy_dataset(legacy, restore_dir, dry_run=False)
+
+        return {
+            "boundary": "local-only",
+            "legacy_dataset": {
+                "counts": import_live["counts"],
+                "hashes": import_live["hashes"],
+            },
+            "migrations": {
+                "dry_run": dry_run,
+                "applied": applied,
+                "status": status,
+            },
+            "import": {
+                "dry_run": import_dry_run,
+                "applied": import_live,
+                "report_exists": (export_dir / "import-report.json").exists(),
+            },
+            "restore": {
+                "dry_run": restore_dry_run,
+                "applied": restore_live,
+                "report_exists": (restore_dir / "restore-report.json").exists(),
+            },
+            "rollback_plan": rollback_plan("local smoke"),
+        }

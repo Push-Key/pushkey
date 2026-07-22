@@ -23,8 +23,21 @@ import smtplib
 import threading
 import time
 import base64
+import tempfile
 from collections import Counter, deque
 from pathlib import Path
+import sqlite3
+
+from sqlalchemy import Column, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import NullPool
+
+try:
+    import redis as redis_lib
+except ImportError:  # pragma: no cover - optional in local/dev installs
+    redis_lib = None
 
 # Load .env if present
 _env_file = Path(__file__).parent / ".env"
@@ -34,7 +47,6 @@ if _env_file.exists():
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from pushkey_shared import TIERS as PRODUCT_TIERS
 
@@ -61,6 +73,12 @@ ALGORITHM = "HS256"
 TOKEN_TTL_HOURS = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "1"))
 TOKEN_ISSUER = os.environ.get("PUSHKEY_TOKEN_ISSUER", "pushkey-cloud")
 TOKEN_AUDIENCE = os.environ.get("PUSHKEY_TOKEN_AUDIENCE", "pushkey-user-api")
+_cloud_metadata_url = os.environ.get("PUSHKEY_CLOUD_DATABASE_URL", "").strip()
+if not _cloud_metadata_url:
+    _candidate_metadata_url = os.environ.get("DATABASE_URL", "").strip()
+    if _candidate_metadata_url.lower().startswith("postgres"):
+        _cloud_metadata_url = _candidate_metadata_url
+CLOUD_METADATA_URL = _cloud_metadata_url
 
 _DEV_MODE  = os.environ.get("PUSHKEY_ENV", "production").lower() in ("development", "dev", "local")
 SECRET_KEY = os.environ.get("PUSHKEY_JWT_SECRET", "")
@@ -77,8 +95,10 @@ if not SECRET_KEY:
 
 DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
-VAULTS_DIR = DATA_DIR / "vaults"
-VAULTS_DIR.mkdir(exist_ok=True)
+VAULT_STORE_DB = DATA_DIR / "vaults.sqlite"
+VAULT_OBJECTS_DIR = DATA_DIR / "vault_objects"
+LEGACY_VAULTS_DIR = DATA_DIR / "vaults"
+RATE_LIMIT_DB = DATA_DIR / "rate_limits.sqlite"
 MAX_REQUEST_BYTES = int(os.environ.get("PUSHKEY_MAX_REQUEST_BYTES", str(1024 * 1024)))
 TRUSTED_HOSTS = [
     host.strip()
@@ -98,6 +118,7 @@ ALLOWED_CORS_ORIGINS = [
 ]
 if MAX_REQUEST_BYTES <= 0:
     raise RuntimeError("PUSHKEY_MAX_REQUEST_BYTES must be greater than zero")
+VAULT_OBJECTS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
 bearer  = HTTPBearer()
@@ -159,6 +180,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
 async def _cloud_security_boundary(request: Request, call_next):
     started = time.perf_counter()
     request_id = request.headers.get("X-Request-ID") or secrets.token_hex(8)
+    request.state.request_id = request_id
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -315,7 +337,9 @@ def _current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
 @app.post("/api/v1/auth/register")
 async def register(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", ip, request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
@@ -333,7 +357,9 @@ async def register(request: Request):
 @app.post("/api/v1/auth/login")
 async def login(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", ip, request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
@@ -452,16 +478,512 @@ async def auth_confirm_reset(request: Request):
 
 
 # ── Vault blob endpoints (zero-knowledge) ────────────────────────
-def _vault_path(email: str) -> Path:
-    safe = hashlib.sha256(email.encode()).hexdigest()
-    return VAULTS_DIR / f"{safe}.enc"
-
-def _vault_history_dir(email: str) -> Path:
-    safe = hashlib.sha256(email.encode()).hexdigest()
-    return VAULTS_DIR / f"{safe}.history"
-
 def _etag(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _vault_user_key(email: str) -> str:
+    return hashlib.sha256(email.encode()).hexdigest()
+
+
+def _normalize_database_url(database_url: str) -> str:
+    normalized = database_url.strip()
+    if normalized.startswith("postgres://"):
+        return "postgresql+psycopg://" + normalized[len("postgres://"):]
+    if normalized.startswith("postgresql://"):
+        return "postgresql+psycopg://" + normalized[len("postgresql://"):]
+    return normalized
+
+
+def _vault_database_url(db_path: Path, metadata_url: str | None) -> str:
+    if metadata_url:
+        return _normalize_database_url(metadata_url)
+    return f"sqlite+pysqlite:///{db_path.resolve().as_posix()}"
+
+
+def _vault_advisory_lock_key(user_key: str) -> int:
+    return int(user_key[:16], 16) & 0x7FFFFFFFFFFFFFFF
+
+
+_VAULT_METADATA = MetaData()
+
+_VAULT_CURRENT = Table(
+    "vault_current",
+    _VAULT_METADATA,
+    Column("user_key", String, primary_key=True),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+_VAULT_HISTORY = Table(
+    "vault_history",
+    _VAULT_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_key", String, nullable=False),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("stored_at", String, nullable=False),
+    Column("source_key", String, nullable=False, unique=True),
+)
+
+_VAULT_REVISION_TRANSACTIONS = Table(
+    "vault_revision_transactions",
+    _VAULT_METADATA,
+    Column("id", String, primary_key=True),
+    Column("user_id", String, nullable=False),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("previous_etag", String),
+    Column("object_sha256", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("idempotency_key", String),
+    Column("request_id", String),
+    Column("audit_id", String),
+    Column("committed_at", String, nullable=False),
+    UniqueConstraint("user_id", "revision_number", name="uq_vault_revision_transactions_user_revision"),
+    UniqueConstraint("user_id", "idempotency_key", name="uq_vault_revision_transactions_user_idempotency"),
+)
+
+Index("idx_vault_history_user_revision", _VAULT_HISTORY.c.user_key, _VAULT_HISTORY.c.revision_number, unique=True)
+Index("idx_vault_history_user_stored", _VAULT_HISTORY.c.user_key, _VAULT_HISTORY.c.stored_at, _VAULT_HISTORY.c.revision_number)
+Index("idx_vault_revision_transactions_user_commit", _VAULT_REVISION_TRANSACTIONS.c.user_id, _VAULT_REVISION_TRANSACTIONS.c.committed_at)
+
+
+class _VaultConflict(Exception):
+    def __init__(self, current_etag: str):
+        super().__init__("vault revision conflict")
+        self.current_etag = current_etag
+
+
+class _VaultStore:
+    def __init__(
+        self,
+        db_path: Path,
+        legacy_dir: Path,
+        *,
+        metadata_url: str | None = None,
+        engine=None,
+        create_schema: bool = True,
+    ):
+        self.db_path = db_path
+        self.legacy_dir = legacy_dir
+        self.object_dir = VAULT_OBJECTS_DIR
+        self._lock = threading.RLock()
+        self._metadata_url = metadata_url
+        self._engine = engine or self._build_engine()
+        self._dialect_name = self._engine.dialect.name
+        if create_schema:
+            _VAULT_METADATA.create_all(self._engine)
+
+    def _build_engine(self):
+        url = _vault_database_url(self.db_path, self._metadata_url)
+        options = {"poolclass": NullPool, "future": True}
+        if url.startswith("sqlite"):
+            options["connect_args"] = {"check_same_thread": False}
+        return create_engine(url, **options)
+
+    def _connect(self):
+        return self._engine.connect()
+
+    def _dialect_insert(self, table):
+        if self._dialect_name == "postgresql":
+            return pg_insert(table)
+        if self._dialect_name == "sqlite":
+            return sqlite_insert(table)
+        raise RuntimeError(f"Unsupported database dialect: {self._dialect_name}")
+
+    def _object_path(self, object_key: str) -> Path:
+        return self.object_dir / f"{object_key}.blob"
+
+    def _write_object(self, object_key: str, blob: bytes) -> None:
+        self.object_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = self._object_path(object_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+            ) as handle:
+                handle.write(blob)
+                handle.flush()
+                tmp_path = Path(handle.name)
+            os.replace(tmp_path, target)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    def _read_object(self, object_key: str) -> bytes:
+        return self._object_path(object_key).read_bytes()
+
+    def _delete_object(self, object_key: str) -> None:
+        try:
+            self._object_path(object_key).unlink()
+        except OSError:
+            pass
+
+    def _legacy_paths(self, user_key: str) -> tuple[Path, Path]:
+        current = self.legacy_dir / f"{user_key}.enc"
+        history = self.legacy_dir / f"{user_key}.history"
+        return current, history
+
+    def _upsert_current(self, conn, values: dict) -> None:
+        stmt = self._dialect_insert(_VAULT_CURRENT).values(values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[_VAULT_CURRENT.c.user_key],
+            set_={
+                "revision_number": stmt.excluded.revision_number,
+                "object_key": stmt.excluded.object_key,
+                "etag": stmt.excluded.etag,
+                "size_bytes": stmt.excluded.size_bytes,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        conn.execute(stmt)
+
+    @staticmethod
+    def _current_row(conn, user_key: str):
+        return conn.execute(
+            select(
+                _VAULT_CURRENT.c.revision_number,
+                _VAULT_CURRENT.c.object_key,
+                _VAULT_CURRENT.c.etag,
+                _VAULT_CURRENT.c.size_bytes,
+                _VAULT_CURRENT.c.updated_at,
+            ).where(_VAULT_CURRENT.c.user_key == user_key)
+        ).mappings().first()
+
+    @staticmethod
+    def _transaction_row(conn, user_key: str, idempotency_key: str):
+        return conn.execute(
+            select(
+                _VAULT_REVISION_TRANSACTIONS.c.id,
+                _VAULT_REVISION_TRANSACTIONS.c.user_id,
+                _VAULT_REVISION_TRANSACTIONS.c.revision_number,
+                _VAULT_REVISION_TRANSACTIONS.c.object_key,
+                _VAULT_REVISION_TRANSACTIONS.c.etag,
+                _VAULT_REVISION_TRANSACTIONS.c.previous_etag,
+                _VAULT_REVISION_TRANSACTIONS.c.object_sha256,
+                _VAULT_REVISION_TRANSACTIONS.c.size_bytes,
+                _VAULT_REVISION_TRANSACTIONS.c.idempotency_key,
+                _VAULT_REVISION_TRANSACTIONS.c.request_id,
+                _VAULT_REVISION_TRANSACTIONS.c.audit_id,
+                _VAULT_REVISION_TRANSACTIONS.c.committed_at,
+            ).where(
+                _VAULT_REVISION_TRANSACTIONS.c.user_id == user_key,
+                _VAULT_REVISION_TRANSACTIONS.c.idempotency_key == idempotency_key,
+            )
+        ).mappings().first()
+
+    @staticmethod
+    def _transaction_response(row) -> dict:
+        return {
+            "etag": row["etag"],
+            "size": row["size_bytes"],
+            "updated": row["committed_at"],
+        }
+
+    @staticmethod
+    def _cleanup_legacy_files(current_path: Path, history_dir: Path) -> None:
+        try:
+            if current_path.exists():
+                current_path.unlink()
+        except OSError:
+            pass
+        if history_dir.exists():
+            for item in history_dir.glob("*"):
+                try:
+                    if item.is_file() or item.is_symlink():
+                        item.unlink()
+                except OSError:
+                    pass
+            try:
+                history_dir.rmdir()
+            except OSError:
+                pass
+
+    def _advisory_lock(self, conn, user_key: str) -> None:
+        if self._dialect_name != "postgresql":
+            return
+        conn.execute(select(func.pg_advisory_xact_lock(_vault_advisory_lock_key(user_key))))
+
+    def _insert_ignore_row(self, conn, table, values: dict, index_elements: list[str]) -> None:
+        stmt = self._dialect_insert(table).values(values)
+        stmt = stmt.on_conflict_do_nothing(index_elements=index_elements)
+        conn.execute(stmt)
+
+    def _ensure_imported(self, conn, user_key: str) -> None:
+        current = self._current_row(conn, user_key)
+        if current is not None:
+            return
+
+        current_path, history_dir = self._legacy_paths(user_key)
+        if not current_path.exists():
+            return
+
+        history_items = []
+        if history_dir.exists():
+            history_items = [item for item in sorted(history_dir.glob("*.enc")) if item.is_file()]
+
+        current_blob = current_path.read_bytes()
+        now = _utcnow().isoformat()
+        previous_etag = None
+        created_object_keys: list[str] = []
+
+        try:
+            for revision_number, item in enumerate(history_items, start=1):
+                blob = item.read_bytes()
+                etag = _etag(blob)
+                blob_sha = _sha256(blob)
+                object_key = f"legacy_{user_key}_history_{revision_number}_{secrets.token_hex(8)}"
+                self._write_object(object_key, blob)
+                created_object_keys.append(object_key)
+                source_key = f"legacy:{item.name}"
+                self._insert_ignore_row(
+                    conn,
+                    _VAULT_HISTORY,
+                    {
+                        "user_key": user_key,
+                        "revision_number": revision_number,
+                        "object_key": object_key,
+                        "etag": etag,
+                        "size_bytes": len(blob),
+                        "stored_at": now,
+                        "source_key": source_key,
+                    },
+                    ["source_key"],
+                )
+                self._insert_ignore_row(
+                    conn,
+                    _VAULT_REVISION_TRANSACTIONS,
+                    {
+                        "id": hashlib.sha256(f"{source_key}:{blob_sha}".encode()).hexdigest(),
+                        "user_id": user_key,
+                        "revision_number": revision_number,
+                        "object_key": object_key,
+                        "etag": etag,
+                        "previous_etag": previous_etag,
+                        "object_sha256": blob_sha,
+                        "size_bytes": len(blob),
+                        "idempotency_key": source_key,
+                        "request_id": "legacy-import",
+                        "audit_id": None,
+                        "committed_at": now,
+                    },
+                    ["id"],
+                )
+                previous_etag = etag
+
+            current_etag = _etag(current_blob)
+            current_sha = _sha256(current_blob)
+            current_revision = len(history_items) + 1
+            current_object_key = f"legacy_{user_key}_current_{secrets.token_hex(8)}"
+            self._write_object(current_object_key, current_blob)
+            created_object_keys.append(current_object_key)
+
+            self._upsert_current(
+                conn,
+                {
+                    "user_key": user_key,
+                    "revision_number": current_revision,
+                    "object_key": current_object_key,
+                    "etag": current_etag,
+                    "size_bytes": len(current_blob),
+                    "updated_at": now,
+                },
+            )
+            self._insert_ignore_row(
+                conn,
+                _VAULT_REVISION_TRANSACTIONS,
+                {
+                    "id": hashlib.sha256(f"legacy:{current_path.name}:{current_sha}".encode()).hexdigest(),
+                    "user_id": user_key,
+                    "revision_number": current_revision,
+                    "object_key": current_object_key,
+                    "etag": current_etag,
+                    "previous_etag": previous_etag,
+                    "object_sha256": current_sha,
+                    "size_bytes": len(current_blob),
+                    "idempotency_key": f"legacy:{current_path.name}",
+                    "request_id": "legacy-import",
+                    "audit_id": None,
+                    "committed_at": now,
+                },
+                ["id"],
+            )
+        except Exception:
+            for object_key in created_object_keys:
+                self._delete_object(object_key)
+            raise
+
+        self._cleanup_legacy_files(current_path, history_dir)
+
+    def put(
+        self,
+        email: str,
+        blob: bytes,
+        if_match: str = "",
+        *,
+        idempotency_key: str = "",
+        request_id: str = "",
+    ) -> dict:
+        user_key = _vault_user_key(email)
+        idempotency_key = idempotency_key.strip() or None
+        object_key = ""
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    with conn.begin():
+                        self._ensure_imported(conn, user_key)
+                        self._advisory_lock(conn, user_key)
+                        if idempotency_key:
+                            existing = self._transaction_row(conn, user_key, idempotency_key)
+                            if existing is not None:
+                                return self._transaction_response(existing)
+                        current = self._current_row(conn, user_key)
+                        current_etag = current["etag"] if current else ""
+                        if current is not None and if_match and if_match != current_etag:
+                            raise _VaultConflict(current_etag)
+
+                        now = _utcnow().isoformat()
+                        new_etag = _etag(blob)
+                        blob_sha = _sha256(blob)
+                        revision_number = 1
+                        object_key = f"vault_{user_key}_{secrets.token_hex(16)}"
+                        self._write_object(object_key, blob)
+                        if current is not None:
+                            self._insert_ignore_row(
+                                conn,
+                                _VAULT_HISTORY,
+                                {
+                                    "user_key": user_key,
+                                    "revision_number": int(current["revision_number"]),
+                                    "object_key": current["object_key"],
+                                    "etag": current["etag"],
+                                    "size_bytes": int(current["size_bytes"]),
+                                    "stored_at": now,
+                                    "source_key": current["object_key"],
+                                },
+                                ["source_key"],
+                            )
+                            revision_number = int(current["revision_number"]) + 1
+
+                        self._upsert_current(
+                            conn,
+                            {
+                                "user_key": user_key,
+                                "revision_number": revision_number,
+                                "object_key": object_key,
+                                "etag": new_etag,
+                                "size_bytes": len(blob),
+                                "updated_at": now,
+                            },
+                        )
+                        conn.execute(
+                            self._dialect_insert(_VAULT_REVISION_TRANSACTIONS).values(
+                                {
+                                    "id": secrets.token_hex(16),
+                                    "user_id": user_key,
+                                    "revision_number": revision_number,
+                                    "object_key": object_key,
+                                    "etag": new_etag,
+                                    "previous_etag": current_etag or None,
+                                    "object_sha256": blob_sha,
+                                    "size_bytes": len(blob),
+                                    "idempotency_key": idempotency_key,
+                                    "request_id": request_id or None,
+                                    "audit_id": None,
+                                    "committed_at": now,
+                                }
+                            )
+                        )
+                    return {"etag": new_etag, "size": len(blob), "updated": now}
+                except IntegrityError:
+                    if object_key:
+                        self._delete_object(object_key)
+                    if idempotency_key:
+                        existing = self._transaction_row(conn, user_key, idempotency_key)
+                        if existing is not None:
+                            return self._transaction_response(existing)
+                    raise
+                except Exception:
+                    if object_key:
+                        self._delete_object(object_key)
+                    raise
+
+    def get(self, email: str):
+        user_key = _vault_user_key(email)
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    return self._current_row(conn, user_key)
+
+    def history(self, email: str) -> list[dict]:
+        user_key = _vault_user_key(email)
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    rows = conn.execute(
+                        select(
+                            _VAULT_HISTORY.c.revision_number,
+                            _VAULT_HISTORY.c.etag,
+                            _VAULT_HISTORY.c.size_bytes,
+                            _VAULT_HISTORY.c.stored_at,
+                        ).where(_VAULT_HISTORY.c.user_key == user_key).order_by(
+                            _VAULT_HISTORY.c.revision_number.asc(),
+                            _VAULT_HISTORY.c.id.asc(),
+                        )
+                    ).mappings().all()
+        return [
+            {
+                "etag": row["etag"],
+                "size": row["size_bytes"],
+                "stored": row["stored_at"],
+            }
+            for row in rows
+        ]
+
+    def delete(self, email: str) -> None:
+        user_key = _vault_user_key(email)
+        current_path, history_dir = self._legacy_paths(user_key)
+        object_keys: list[str] = []
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    object_keys.extend(
+                        conn.execute(
+                            select(_VAULT_HISTORY.c.object_key).where(_VAULT_HISTORY.c.user_key == user_key)
+                        ).scalars().all()
+                    )
+                    current = self._current_row(conn, user_key)
+                    if current is not None:
+                        object_keys.append(current["object_key"])
+                    conn.execute(
+                        delete(_VAULT_REVISION_TRANSACTIONS).where(_VAULT_REVISION_TRANSACTIONS.c.user_id == user_key)
+                    )
+                    conn.execute(delete(_VAULT_HISTORY).where(_VAULT_HISTORY.c.user_key == user_key))
+                    conn.execute(delete(_VAULT_CURRENT).where(_VAULT_CURRENT.c.user_key == user_key))
+        for object_key in dict.fromkeys(object_keys):
+            self._delete_object(object_key)
+        self._cleanup_legacy_files(current_path, history_dir)
+
+
+_vault_store = _VaultStore(VAULT_STORE_DB, LEGACY_VAULTS_DIR, metadata_url=CLOUD_METADATA_URL)
 
 @app.put("/api/v1/vault")
 async def put_vault(
@@ -477,24 +999,22 @@ async def put_vault(
     blob = await request.body()
     if not blob:
         raise HTTPException(400, "empty body")
-    vpath = _vault_path(email)
-    if vpath.exists():
-        current = vpath.read_bytes()
-        current_etag = _etag(current)
-        if if_match and if_match != current_etag:
-            return JSONResponse(
-                {
-                    "detail": "vault revision conflict",
-                    "current_etag": current_etag,
-                },
-                status_code=409,
-            )
-        history_dir = _vault_history_dir(email)
-        history_dir.mkdir(exist_ok=True)
-        (history_dir / f"{int(time.time() * 1000)}-{current_etag}.enc").write_bytes(current)
-    vpath.write_bytes(blob)
-    tag = _etag(blob)
-    result = {"etag": tag, "size": len(blob), "updated": _utcnow().isoformat()}
+    try:
+        result = _vault_store.put(
+            email,
+            blob,
+            if_match,
+            idempotency_key=idempotency_key,
+            request_id=getattr(request.state, "request_id", request.headers.get("X-Request-ID", "")),
+        )
+    except _VaultConflict as exc:
+        return JSONResponse(
+            {
+                "detail": "vault revision conflict",
+                "current_etag": exc.current_etag,
+            },
+            status_code=409,
+        )
     if idempotency_key:
         app.state.idempotency_cache[cache_key] = result
     return result
@@ -504,55 +1024,48 @@ async def get_vault(
     if_none_match: str = Header(default="", alias="if-none-match"),
     email: str = Depends(_current_user),
 ):
-    vpath = _vault_path(email)
-    if not vpath.exists():
+    row = _vault_store.get(email)
+    if row is None:
         raise HTTPException(404, "No vault stored")
-    blob = vpath.read_bytes()
-    tag  = _etag(blob)
+    tag = row["etag"]
     if if_none_match and if_none_match == tag:
         return Response(status_code=304)
-    return Response(content=blob, media_type="application/octet-stream",
-                    headers={"ETag": tag, "Content-Length": str(len(blob))})
+    blob = _vault_store._read_object(row["object_key"])
+    return Response(
+        content=blob,
+        media_type="application/octet-stream",
+        headers={"ETag": tag, "Content-Length": str(len(blob))},
+    )
 
 @app.get("/api/v1/vault/meta")
 async def vault_meta(email: str = Depends(_current_user)):
-    vpath = _vault_path(email)
-    if not vpath.exists():
+    row = _vault_store.get(email)
+    if row is None:
         return {"exists": False}
-    blob = vpath.read_bytes()
-    return {"exists": True, "size": len(blob), "etag": _etag(blob),
-            "modified": datetime.fromtimestamp(vpath.stat().st_mtime).isoformat()}
+    return {
+        "exists": True,
+        "size": row["size_bytes"],
+        "etag": row["etag"],
+        "modified": row["updated_at"],
+    }
 
 @app.get("/api/v1/vault/history")
 async def vault_history(email: str = Depends(_current_user)):
-    history_dir = _vault_history_dir(email)
-    versions = []
-    if history_dir.exists():
-        for item in sorted(history_dir.glob("*.enc")):
-            etag = item.stem.split("-", 1)[1] if "-" in item.stem else item.stem
-            versions.append(
-                {
-                    "etag": etag,
-                    "size": item.stat().st_size,
-                    "stored": datetime.fromtimestamp(item.stat().st_mtime).isoformat(),
-                }
-            )
-    return {"versions": versions}
+    return {"versions": _vault_store.history(email)}
 
 
 @app.get("/api/v1/account/export")
 async def account_export(email: str = Depends(_current_user)):
     users = _load_users()
     user = users.get(email, {})
-    vpath = _vault_path(email)
     vault = {"exists": False}
-    if vpath.exists():
-        blob = vpath.read_bytes()
+    row = _vault_store.get(email)
+    if row is not None:
         vault = {
             "exists": True,
-            "size": len(blob),
-            "etag": _etag(blob),
-            "modified": datetime.fromtimestamp(vpath.stat().st_mtime).isoformat(),
+            "size": row["size_bytes"],
+            "etag": row["etag"],
+            "modified": row["updated_at"],
         }
     return {
         "account": {
@@ -568,15 +1081,7 @@ async def account_delete(email: str = Depends(_current_user)):
     users = _load_users()
     users.pop(email, None)
     _save_users(users)
-    vpath = _vault_path(email)
-    if vpath.exists():
-        vpath.unlink()
-    history_dir = _vault_history_dir(email)
-    if history_dir.exists():
-        for item in history_dir.glob("*"):
-            if item.is_file():
-                item.unlink()
-        history_dir.rmdir()
+    _vault_store.delete(email)
     return {"ok": True}
 
 @app.get("/api/v1/health")
@@ -694,7 +1199,7 @@ def _load_outbox() -> list[dict]:
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
-# Simple in-memory token bucket rate limiter
+# Legacy in-memory token bucket helper remains for unit tests.
 RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
 RATE_LIMIT_MAX_ENTRIES = int(os.environ.get("RATE_LIMIT_MAX_ENTRIES", "10000"))
@@ -725,6 +1230,199 @@ _DEACTIVATION_HITS: dict[str, list[float]] = {}
 _AUTH_HITS:      dict[str, list[float]] = {}
 _PORTAL_HITS:    dict[str, list[float]] = {}
 _RATE_LOCK = threading.Lock()
+RATE_LIMIT_BACKEND = os.environ.get("PUSHKEY_RATE_LIMIT_BACKEND", "").strip().lower()
+RATE_LIMIT_REDIS_URL = os.environ.get(
+    "PUSHKEY_RATE_LIMIT_REDIS_URL",
+    os.environ.get("REDIS_URL", ""),
+).strip()
+RATE_LIMIT_KEY_PREFIX = os.environ.get(
+    "PUSHKEY_RATE_LIMIT_KEY_PREFIX",
+    "pushkey:rate-limits",
+).strip() or "pushkey:rate-limits"
+
+
+def _ensure_rate_limit_store(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+            bucket TEXT PRIMARY KEY,
+            hits_json TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_updated_at "
+        "ON rate_limit_buckets(updated_at)"
+    )
+
+
+def _load_rate_limit_hits(
+    conn: sqlite3.Connection, bucket: str, cutoff: float
+) -> list[float]:
+    row = conn.execute(
+        "SELECT hits_json FROM rate_limit_buckets WHERE bucket = ?",
+        (bucket,),
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    try:
+        hits = [float(hit) for hit in json.loads(row[0])]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [hit for hit in hits if hit > cutoff]
+
+
+def _store_rate_limit_hits(
+    conn: sqlite3.Connection, bucket: str, hits: list[float], now: float
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO rate_limit_buckets(bucket, hits_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bucket) DO UPDATE SET
+            hits_json=excluded.hits_json,
+            updated_at=excluded.updated_at
+        """,
+        (bucket, json.dumps(hits), now),
+    )
+
+
+def _rate_identity_key(identity: str) -> str:
+    normalized = identity.strip().casefold()
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _rate_limit_bucket_key(namespace: str, kind: str, identity: str | None = None) -> str:
+    suffix = _rate_identity_key(identity) if identity is not None else "global"
+    return f"{RATE_LIMIT_KEY_PREFIX}:{namespace}:{kind}:{suffix}"
+
+
+class _SQLiteRateLimitStore:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def allow(self, namespace: str, identity: str, max_hits: int, window_sec: int) -> bool:
+        now = time.time()
+        cutoff = now - window_sec
+        identity_bucket = _rate_limit_bucket_key(namespace, "identity", identity)
+        global_bucket = _rate_limit_bucket_key(namespace, "global")
+        global_limit = max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER)
+
+        with _RATE_LOCK:
+            with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                _ensure_rate_limit_store(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM rate_limit_buckets WHERE updated_at <= ?",
+                    (cutoff,),
+                )
+
+                staged: list[tuple[str, list[float]]] = []
+                for bucket, limit in (
+                    (identity_bucket, max_hits),
+                    (global_bucket, global_limit),
+                ):
+                    hits = _load_rate_limit_hits(conn, bucket, cutoff)
+                    if len(hits) >= limit:
+                        conn.rollback()
+                        return False
+                    hits.append(now)
+                    staged.append((bucket, hits))
+
+                for bucket, hits in staged:
+                    _store_rate_limit_hits(conn, bucket, hits, now)
+
+                conn.commit()
+                return True
+
+
+class _RedisRateLimitStore:
+    _SCRIPT = """
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local identity_limit = tonumber(ARGV[3])
+local global_limit = tonumber(ARGV[4])
+local ttl = tonumber(ARGV[5])
+local buckets = {
+  {key = KEYS[1], limit = identity_limit},
+  {key = KEYS[2], limit = global_limit},
+}
+for i = 1, #buckets do
+  redis.call("ZREMRANGEBYSCORE", buckets[i].key, "-inf", now - window)
+  local count = redis.call("ZCARD", buckets[i].key)
+  if count >= buckets[i].limit then
+    return 0
+  end
+end
+for i = 1, #buckets do
+  local seq_key = buckets[i].key .. ":seq"
+  local seq = redis.call("INCR", seq_key)
+  redis.call("ZADD", buckets[i].key, now, tostring(now) .. ":" .. tostring(seq))
+  redis.call("EXPIRE", buckets[i].key, ttl)
+  redis.call("EXPIRE", seq_key, ttl)
+end
+return 1
+"""
+
+    def __init__(self, url: str):
+        if redis_lib is None:
+            raise SystemExit(
+                "Redis rate limiting was requested but the 'redis' package is not installed."
+            )
+        self.url = url
+        self.client = redis_lib.Redis.from_url(url, decode_responses=True)
+        try:
+            self.client.ping()
+        except Exception as exc:  # pragma: no cover - connection failure is environment-specific
+            raise SystemExit(f"Unable to connect to Redis rate-limit backend: {exc}") from exc
+
+    def allow(self, namespace: str, identity: str, max_hits: int, window_sec: int) -> bool:
+        now = time.time()
+        identity_bucket = _rate_limit_bucket_key(namespace, "identity", identity)
+        global_bucket = _rate_limit_bucket_key(namespace, "global")
+        global_limit = max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER)
+        ttl = max(window_sec * 2, 60)
+        try:
+            allowed = self.client.eval(
+                self._SCRIPT,
+                2,
+                identity_bucket,
+                global_bucket,
+                now,
+                window_sec,
+                max_hits,
+                global_limit,
+                ttl,
+            )
+        except Exception as exc:  # pragma: no cover - backend-specific
+            raise RuntimeError(f"Redis rate-limit check failed: {exc}") from exc
+        return bool(int(allowed))
+
+
+def _build_rate_limit_store():
+    backend = RATE_LIMIT_BACKEND
+    if backend == "sqlite":
+        return _SQLiteRateLimitStore(RATE_LIMIT_DB)
+    if backend == "redis":
+        return _RedisRateLimitStore(RATE_LIMIT_REDIS_URL or "redis://localhost:6379/0")
+    if RATE_LIMIT_REDIS_URL:
+        return _RedisRateLimitStore(RATE_LIMIT_REDIS_URL)
+    if backend == "":
+        return _SQLiteRateLimitStore(RATE_LIMIT_DB)
+    raise RuntimeError(
+        "PUSHKEY_RATE_LIMIT_BACKEND must be 'sqlite' or 'redis' when set"
+    )
+
+
+_RATE_LIMIT_STORE = _build_rate_limit_store()
+
+
+def _rate_check_shared_request(
+    namespace: str, identity: str, request: Request, max_hits: int, window_sec: int
+) -> bool:
+    """Shared limiter backed by the configured durable store."""
+    return _RATE_LIMIT_STORE.allow(namespace, identity, max_hits, window_sec)
 
 
 def _rate_check(bucket: dict, key: str, max_hits: int, window_sec: int) -> bool:
@@ -771,8 +1469,8 @@ def _rate_check_request(
 
 
 def _check_rate_limit(key: str, request: Request) -> bool:
-    return _rate_check_request(
-        _HEARTBEAT_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    return _rate_check_shared_request(
+        "heartbeat", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     )
 
 
@@ -869,8 +1567,8 @@ async def _handle_activate(body: dict, request: Request) -> dict:
         raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
     if not fingerprint:
         raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
-    if not _rate_check_request(
-        _ACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    if not _rate_check_shared_request(
+        "activate", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     ):
         raise HTTPException(429, {"code": "rate_limited", "message": "Too many activation requests"})
 
@@ -914,8 +1612,8 @@ async def _handle_deactivate(body: dict, request: Request) -> dict:
         raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
     if not fingerprint:
         raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
-    if not _rate_check_request(
-        _DEACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    if not _rate_check_shared_request(
+        "deactivate", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     ):
         raise HTTPException(429, {"code": "rate_limited", "message": "Too many deactivation requests"})
 
@@ -1058,6 +1756,7 @@ def _load_admins() -> dict:
             admin_id: {
                 "id": admin_id,
                 "email": ADMIN_BOOTSTRAP_EMAIL,
+                "display_name": ADMIN_BOOTSTRAP_EMAIL.split("@", 1)[0] or "admin",
                 "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
                 "role": "owner",
                 "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
@@ -1072,6 +1771,62 @@ def _load_admins() -> dict:
 
 def _save_admins(data: dict) -> None:
     ADMINS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _admin_display_name(admin: dict) -> str:
+    display_name = str(admin.get("display_name", "")).strip()
+    if display_name:
+        return display_name
+    email = str(admin.get("email", "")).strip()
+    if email:
+        return email.split("@", 1)[0]
+    return str(admin.get("id", "admin"))
+
+
+def _admin_public_record(admin: dict) -> dict:
+    sessions = _load_admin_sessions()
+    session_count = sum(
+        1
+        for session in sessions.values()
+        if session.get("admin_id") == admin.get("id") and not session.get("revoked")
+    )
+    return {
+        "id": admin.get("id", ""),
+        "email": admin.get("email", ""),
+        "display_name": _admin_display_name(admin),
+        "role": admin.get("role", "viewer"),
+        "disabled": bool(admin.get("disabled")),
+        "created": admin.get("created", ""),
+        "mfa_enabled": bool(admin.get("mfa_secret")),
+        "session_count": session_count,
+    }
+
+
+def _admin_email_in_use(admins: dict, email: str, *, exclude_id: str | None = None) -> bool:
+    email = email.strip().lower()
+    for admin_id, admin in admins.items():
+        if exclude_id is not None and admin_id == exclude_id:
+            continue
+        if admin.get("email", "").strip().lower() == email:
+            return True
+    return False
+
+
+def _active_owner_count(admins: dict, *, exclude_id: str | None = None) -> int:
+    return sum(
+        1
+        for admin_id, admin in admins.items()
+        if (exclude_id is None or admin_id != exclude_id)
+        and admin.get("role", "viewer") == "owner"
+        and not admin.get("disabled")
+    )
+
+
+def _new_admin_id(admins: dict) -> str:
+    while True:
+        admin_id = secrets.token_hex(8)
+        if admin_id not in admins:
+            return admin_id
 
 
 def _load_admin_sessions() -> dict:
@@ -1274,7 +2029,9 @@ def _gen_key(tier: str) -> str:
 @app.post("/api/admin/auth/login")
 async def admin_login(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, f"admin:{ip}", AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", f"admin:{ip}", request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, "Too many login attempts")
     body = await request.json()
     email = body.get("email", "").strip().lower()
@@ -1382,6 +2139,176 @@ async def admin_mfa_confirm(
     _save_admins(admins)
     _log_audit("admin_mfa_confirm", actor["id"], actor=actor, request=request)
     return {"enabled": True}
+
+
+@app.get("/api/admin/admins")
+async def admin_list(
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    records = sorted(admins.values(), key=lambda admin: admin.get("email", "").lower())
+    return {"admins": [_admin_public_record(admin) for admin in records], "count": len(records)}
+
+
+@app.post("/api/admin/admins")
+async def admin_create(
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    body = await request.json()
+    email = str(body.get("email", "")).strip().lower()
+    password = str(body.get("password", ""))
+    role = str(body.get("role", "viewer")).strip() or "viewer"
+    display_name = str(body.get("display_name", "")).strip()
+    if not email or "@" not in email:
+        raise HTTPException(400, "Admin email required")
+    if len(password) < 8:
+        raise HTTPException(400, "Admin password too short")
+    if role not in ADMIN_ROLE_PERMISSIONS:
+        raise HTTPException(400, "Invalid admin role")
+
+    admins = _load_admins()
+    if _admin_email_in_use(admins, email):
+        raise HTTPException(409, "Admin already exists")
+
+    admin_id = _new_admin_id(admins)
+    admin = {
+        "id": admin_id,
+        "email": email,
+        "display_name": display_name,
+        "hash": pwd_ctx.hash(password),
+        "role": role,
+        "mfa_secret": "",
+        "mfa_recovery_hashes": [],
+        "created": _utcnow().isoformat(),
+        "disabled": False,
+    }
+    admins[admin_id] = admin
+    _save_admins(admins)
+    _log_audit(
+        "admin_create",
+        admin_id,
+        {"email": email, "role": role, "display_name": _admin_display_name(admin)},
+        actor=actor,
+        request=request,
+    )
+    return _admin_public_record(admin)
+
+
+@app.patch("/api/admin/admins/{admin_id}")
+async def admin_update(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    body = await request.json()
+    if not any(key in body for key in ("email", "password", "role", "display_name")):
+        raise HTTPException(400, "No changes requested")
+
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+
+    changes: dict[str, dict | str] = {}
+
+    if "email" in body:
+        email = str(body.get("email", "")).strip().lower()
+        if not email or "@" not in email:
+            raise HTTPException(400, "Admin email required")
+        if _admin_email_in_use(admins, email, exclude_id=admin_id):
+            raise HTTPException(409, "Admin already exists")
+        if email != admin.get("email", "").strip().lower():
+            changes["email"] = {"from": admin.get("email", ""), "to": email}
+            admin["email"] = email
+
+    if "display_name" in body:
+        display_name = str(body.get("display_name", "")).strip()
+        if display_name != str(admin.get("display_name", "")).strip():
+            changes["display_name"] = {"from": admin.get("display_name", ""), "to": display_name}
+            admin["display_name"] = display_name
+
+    if "password" in body:
+        password = str(body.get("password", ""))
+        if len(password) < 8:
+            raise HTTPException(400, "Admin password too short")
+        admin["hash"] = pwd_ctx.hash(password)
+        changes["password"] = "updated"
+
+    if "role" in body:
+        role = str(body.get("role", "")).strip()
+        if role not in ADMIN_ROLE_PERMISSIONS:
+            raise HTTPException(400, "Invalid admin role")
+        current_role = admin.get("role", "viewer")
+        if current_role == "owner" and role != "owner" and _active_owner_count(admins, exclude_id=admin_id) == 0:
+            raise HTTPException(400, "At least one active owner is required")
+        if role != current_role:
+            changes["role"] = {"from": current_role, "to": role}
+            admin["role"] = role
+
+    _save_admins(admins)
+    _log_audit(
+        "admin_update",
+        admin_id,
+        {
+            "changes": changes,
+            "email": admin.get("email", ""),
+            "role": admin.get("role", ""),
+            "display_name": _admin_display_name(admin),
+        },
+        actor=actor,
+        request=request,
+    )
+    return _admin_public_record(admin)
+
+
+@app.post("/api/admin/admins/{admin_id}/disable")
+async def admin_disable(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    if admin.get("role", "viewer") == "owner" and not admin.get("disabled") and _active_owner_count(admins, exclude_id=admin_id) == 0:
+        raise HTTPException(400, "At least one active owner is required")
+
+    admin["disabled"] = True
+    revoked = _revoke_admin_sessions(admin_id)
+    _save_admins(admins)
+    _log_audit(
+        "admin_disable",
+        admin_id,
+        {"revoked": revoked, "email": admin.get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin": _admin_public_record(admin), "revoked": revoked}
+
+
+@app.post("/api/admin/admins/{admin_id}/enable")
+async def admin_enable(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+
+    admin["disabled"] = False
+    _save_admins(admins)
+    _log_audit(
+        "admin_enable",
+        admin_id,
+        {"email": admin.get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin": _admin_public_record(admin)}
 
 
 @app.post("/api/admin/admins/{admin_id}/sessions/revoke")
@@ -2328,7 +3255,9 @@ async def portal_lookup(request: Request):
     Returns sanitized license info — never exposes other customers' data.
     """
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_PORTAL_HITS, ip, PORTAL_RATE_MAX, PORTAL_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "portal", ip, request, PORTAL_RATE_MAX, PORTAL_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {PORTAL_RATE_WINDOW_SEC}s")
     body = await request.json()
     key = body.get("license_key", "").strip().upper()

@@ -28,6 +28,23 @@ def test_vault_icon_actions_have_accessible_labels():
         assert f'aria-label="{label}' in text or f"aria-label={{`{label}" in text
 
 
+def test_projects_tab_exposes_state_and_live_region_announcements():
+    text = (WEB_APP / "components" / "projects-tab.tsx").read_text(encoding="utf-8")
+
+    for required in (
+        "aria-expanded={expanded}",
+        "aria-controls={panelId}",
+        'role="region"',
+        'role="status"',
+        'role="alert"',
+        "aria-label={`Unassign ",
+        "aria-label={`Assign ",
+        "aria-label={`Delete project ",
+        "aria-label={`Inject environment file for ",
+    ):
+        assert required in text
+
+
 def test_local_web_layout_has_responsive_mobile_structure():
     page = (WEB_APP / "app" / "page.tsx").read_text(encoding="utf-8")
     sidebar = (WEB_APP / "components" / "sidebar.tsx").read_text(encoding="utf-8")

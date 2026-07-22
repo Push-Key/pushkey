@@ -1,8 +1,12 @@
+import hashlib
 import importlib
 import json
 import os
 import runpy
 import sys
+import sqlite3
+import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -39,7 +43,131 @@ def user_client(app_module):
     return client, {"Authorization": f"Bearer {token}"}
 
 
-def test_vault_put_rejects_stale_if_match_without_overwriting(user_client):
+def _vault_rows(app_module, email):
+    user_key = hashlib.sha256(email.encode()).hexdigest()
+    with sqlite3.connect(app_module.VAULT_STORE_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        current = conn.execute(
+            """
+            SELECT revision_number, etag, size_bytes, updated_at
+            FROM vault_current
+            WHERE user_key = ?
+            """,
+            (user_key,),
+        ).fetchone()
+        history = conn.execute(
+            """
+            SELECT revision_number, etag, size_bytes, stored_at
+            FROM vault_history
+            WHERE user_key = ?
+            ORDER BY revision_number ASC, id ASC
+            """,
+            (user_key,),
+        ).fetchall()
+    return current, history
+
+
+def _transaction_rows(app_module, email):
+    user_key = hashlib.sha256(email.encode()).hexdigest()
+    with sqlite3.connect(app_module.VAULT_STORE_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT revision_number, object_key, etag, previous_etag, object_sha256,
+                   size_bytes, idempotency_key, request_id, committed_at
+            FROM vault_revision_transactions
+            WHERE user_id = ?
+            ORDER BY revision_number ASC, id ASC
+            """,
+            (user_key,),
+        ).fetchall()
+    return rows
+
+
+def _snapshot_sqlite_files(db_path: Path, snapshot_dir: Path) -> None:
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    # SQLite's -shm sidecar is shared-memory metadata and can be recreated on
+    # restore. Copying it on Windows while the database is open can fail.
+    for suffix in ("", "-wal"):
+        src = Path(str(db_path) + suffix)
+        if src.exists():
+            shutil.copy2(src, snapshot_dir / src.name)
+    vault_object_dir = db_path.parent / "vault_objects"
+    if vault_object_dir.exists():
+        shutil.copytree(vault_object_dir, snapshot_dir / vault_object_dir.name)
+
+
+def _restore_sqlite_files(db_path: Path, snapshot_dir: Path) -> None:
+    for suffix in ("", "-wal"):
+        src = snapshot_dir / (db_path.name + suffix)
+        dst = Path(str(db_path) + suffix)
+        if src.exists():
+            shutil.copy2(src, dst)
+        else:
+            dst.unlink(missing_ok=True)
+    snapshot_object_dir = snapshot_dir / "vault_objects"
+    target_object_dir = db_path.parent / "vault_objects"
+    if snapshot_object_dir.exists():
+        shutil.rmtree(target_object_dir, ignore_errors=True)
+        shutil.copytree(snapshot_object_dir, target_object_dir)
+    else:
+        shutil.rmtree(target_object_dir, ignore_errors=True)
+    # Leave the -shm sidecar alone. SQLite recreates it on reconnect, and
+    # trying to delete it on Windows while the database has been opened can
+    # fail even after the test client is closed.
+
+
+def test_vault_database_url_normalizes_postgres_scheme(app_module):
+    assert (
+        app_module._normalize_database_url("postgres://db.example/pushkey")
+        == "postgresql+psycopg://db.example/pushkey"
+    )
+    assert (
+        app_module._normalize_database_url("postgresql://db.example/pushkey")
+        == "postgresql+psycopg://db.example/pushkey"
+    )
+    assert app_module._normalize_database_url("sqlite:///tmp/pushkey.sqlite") == "sqlite:///tmp/pushkey.sqlite"
+
+
+def test_vault_store_prefers_explicit_postgres_metadata_url(tmp_path, monkeypatch, app_module):
+    captured = {}
+
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeEngine:
+        dialect = FakeDialect()
+
+    fake_engine = FakeEngine()
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return fake_engine
+
+    created_engines = []
+
+    monkeypatch.setattr(app_module, "create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        app_module._VAULT_METADATA,
+        "create_all",
+        lambda engine: created_engines.append(engine),
+    )
+
+    store = app_module._VaultStore(
+        tmp_path / "vaults.sqlite",
+        tmp_path / "legacy",
+        metadata_url="postgres://db.example/pushkey",
+    )
+
+    assert captured["url"] == "postgresql+psycopg://db.example/pushkey"
+    assert captured["kwargs"]["poolclass"] is app_module.NullPool
+    assert "connect_args" not in captured["kwargs"]
+    assert created_engines == [fake_engine]
+    assert store._dialect_name == "postgresql"
+
+
+def test_vault_put_rejects_stale_if_match_without_overwriting(user_client, app_module):
     client, auth = user_client
     first = client.put("/api/v1/vault", headers=auth, content=b"encrypted-v1")
     assert first.status_code == 200
@@ -57,33 +185,121 @@ def test_vault_put_rejects_stale_if_match_without_overwriting(user_client):
     assert stale.json()["current_etag"] == second.json()["etag"]
     downloaded = client.get("/api/v1/vault", headers=auth)
     assert downloaded.content == b"encrypted-v2"
+    current, history = _vault_rows(app_module, "user@example.com")
+    assert current["etag"] == second.json()["etag"]
+    assert [row["etag"] for row in history] == [first.json()["etag"]]
 
 
-def test_vault_put_records_version_history_and_replays_idempotent_retry(user_client):
+def test_vault_put_records_version_history_and_replays_idempotent_retry(user_client, app_module):
     client, auth = user_client
     first = client.put(
         "/api/v1/vault",
-        headers={**auth, "X-Idempotency-Key": "same-write"},
+        headers={
+            **auth,
+            "X-Idempotency-Key": "same-write",
+            "X-Request-ID": "same-write-request",
+        },
         content=b"encrypted-v1",
     )
-    retry = client.put(
-        "/api/v1/vault",
-        headers={**auth, "X-Idempotency-Key": "same-write"},
-        content=b"different-body-ignored",
-    )
-    assert retry.status_code == 200
-    assert retry.json() == first.json()
+    assert first.status_code == 200
 
-    second = client.put("/api/v1/vault", headers=auth, content=b"encrypted-v2")
-    assert second.status_code == 200
+    reloaded = importlib.reload(app_module)
+    with TestClient(reloaded.app) as fresh_client:
+        retry = fresh_client.put(
+            "/api/v1/vault",
+            headers={
+                **auth,
+                "X-Idempotency-Key": "same-write",
+                "X-Request-ID": "same-write-request",
+            },
+            content=b"different-body-ignored",
+        )
+        assert retry.status_code == 200
+        assert retry.json() == first.json()
 
-    history = client.get("/api/v1/vault/history", headers=auth)
-    assert history.status_code == 200
-    assert history.json()["versions"][0]["etag"] == first.json()["etag"]
-    assert client.get("/api/v1/vault", headers=auth).content == b"encrypted-v2"
+        second = fresh_client.put(
+            "/api/v1/vault",
+            headers={**auth, "X-Request-ID": "same-write-request-2"},
+            content=b"encrypted-v2",
+        )
+        assert second.status_code == 200
+
+        history = fresh_client.get("/api/v1/vault/history", headers=auth)
+        assert history.status_code == 200
+        assert history.json()["versions"][0]["etag"] == first.json()["etag"]
+        assert fresh_client.get("/api/v1/vault", headers=auth).content == b"encrypted-v2"
+
+    current, history_rows = _vault_rows(reloaded, "user@example.com")
+    transactions = _transaction_rows(reloaded, "user@example.com")
+    assert current["etag"] == second.json()["etag"]
+    assert [row["etag"] for row in history_rows] == [first.json()["etag"]]
+    assert [row["object_sha256"] for row in transactions] == [
+        hashlib.sha256(b"encrypted-v1").hexdigest(),
+        hashlib.sha256(b"encrypted-v2").hexdigest(),
+    ]
+    assert transactions[0]["idempotency_key"] == "same-write"
+    assert transactions[0]["request_id"] == "same-write-request"
+    assert transactions[0]["previous_etag"] is None
+    assert transactions[1]["idempotency_key"] is None
+    assert transactions[1]["previous_etag"] == first.json()["etag"]
+    assert len(list(reloaded.VAULT_OBJECTS_DIR.glob("*.blob"))) == 2
+    assert not list(reloaded.DATA_DIR.rglob("*.enc"))
 
 
-def test_account_export_and_delete_include_metadata_without_plaintext_vault(user_client):
+def test_vault_idempotency_persists_across_app_instances(tmp_path):
+    first = _load_isolated_cloud_module("pushkey_cloud_api_vault_idem_a", tmp_path)
+    second = _load_isolated_cloud_module("pushkey_cloud_api_vault_idem_b", tmp_path)
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post(
+            "/api/v1/auth/register",
+            json={"email": "idem@example.com", "password": "correct horse battery staple"},
+        ).status_code == 200
+
+        first_login = first_client.post(
+            "/api/v1/auth/login",
+            json={"email": "idem@example.com", "password": "correct horse battery staple"},
+        )
+        assert first_login.status_code == 200
+        first_auth = {"Authorization": f"Bearer {first_login.json()['token']}"}
+
+        first_put = first_client.put(
+            "/api/v1/vault",
+            headers={
+                **first_auth,
+                "X-Idempotency-Key": "shared-idempotency-key",
+                "X-Request-ID": "shared-idempotency-request-1",
+            },
+            content=b"encrypted-idempotent-v1",
+        )
+        assert first_put.status_code == 200
+
+        second_login = second_client.post(
+            "/api/v1/auth/login",
+            json={"email": "idem@example.com", "password": "correct horse battery staple"},
+        )
+        assert second_login.status_code == 200
+        second_auth = {"Authorization": f"Bearer {second_login.json()['token']}"}
+
+        retry = second_client.put(
+            "/api/v1/vault",
+            headers={
+                **second_auth,
+                "X-Idempotency-Key": "shared-idempotency-key",
+                "X-Request-ID": "shared-idempotency-request-2",
+            },
+            content=b"different-body-ignored",
+        )
+
+        assert retry.status_code == 200
+        assert retry.json() == first_put.json()
+        transactions = _transaction_rows(first, "idem@example.com")
+        assert len(transactions) == 1
+        assert transactions[0]["idempotency_key"] == "shared-idempotency-key"
+        assert len(list(first.VAULT_OBJECTS_DIR.glob("*.blob"))) == 1
+
+
+def test_account_export_and_delete_include_metadata_without_plaintext_vault(user_client, app_module):
     client, auth = user_client
     uploaded = client.put("/api/v1/vault", headers=auth, content=b"encrypted-only")
     assert uploaded.status_code == 200
@@ -100,6 +316,75 @@ def test_account_export_and_delete_include_metadata_without_plaintext_vault(user
     assert deleted.status_code == 200
     assert deleted.json() == {"ok": True}
     assert client.get("/api/v1/vault", headers=auth).status_code == 401
+    current, history = _vault_rows(app_module, "user@example.com")
+    transactions = _transaction_rows(app_module, "user@example.com")
+    assert current is None
+    assert history == []
+    assert transactions == []
+    assert not list(app_module.VAULT_OBJECTS_DIR.glob("*.blob"))
+    assert not list(app_module.DATA_DIR.rglob("*.enc"))
+
+
+def test_vault_snapshot_restore_recovers_metadata_and_blob_together(
+    user_client, app_module, tmp_path, monkeypatch
+):
+    client, auth = user_client
+    first = client.put(
+        "/api/v1/vault",
+        headers={**auth, "X-Request-ID": "restore-seed-1"},
+        content=b"encrypted-v1",
+    )
+    assert first.status_code == 200
+    second = client.put(
+        "/api/v1/vault",
+        headers={**auth, "X-Request-ID": "restore-seed-2"},
+        content=b"encrypted-v2",
+    )
+    assert second.status_code == 200
+
+    snapshot_dir = tmp_path / "snapshot"
+    _snapshot_sqlite_files(app_module.VAULT_STORE_DB, snapshot_dir)
+
+    mutated = client.put(
+        "/api/v1/vault",
+        headers={**auth, "X-Request-ID": "restore-mutate"},
+        content=b"encrypted-v3",
+    )
+    assert mutated.status_code == 200
+
+    # Release SQLite handles before swapping the snapshot back in on Windows.
+    client.close()
+    restore_dir = tmp_path / "restore"
+    restore_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(app_module.USERS_FILE, restore_dir / "users.json")
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(restore_dir))
+    _restore_sqlite_files(restore_dir / app_module.VAULT_STORE_DB.name, snapshot_dir)
+    reloaded = importlib.reload(app_module)
+    with TestClient(reloaded.app) as fresh_client:
+        login = fresh_client.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "correct horse battery staple"},
+        )
+        assert login.status_code == 200
+        fresh_auth = {"Authorization": f"Bearer {login.json()['token']}"}
+
+        downloaded = fresh_client.get("/api/v1/vault", headers=fresh_auth)
+        assert downloaded.status_code == 200
+        assert downloaded.content == b"encrypted-v2"
+        meta = fresh_client.get("/api/v1/vault/meta", headers=fresh_auth)
+        assert meta.status_code == 200
+        assert meta.json()["etag"] == second.json()["etag"]
+
+    current, history_rows = _vault_rows(reloaded, "user@example.com")
+    transactions = _transaction_rows(reloaded, "user@example.com")
+    assert current["etag"] == second.json()["etag"]
+    assert [row["etag"] for row in history_rows] == [first.json()["etag"]]
+    assert [row["object_sha256"] for row in transactions] == [
+        hashlib.sha256(b"encrypted-v1").hexdigest(),
+        hashlib.sha256(b"encrypted-v2").hexdigest(),
+    ]
+    assert [row["request_id"] for row in transactions] == ["restore-seed-1", "restore-seed-2"]
+    assert len(list(reloaded.VAULT_OBJECTS_DIR.glob("*.blob"))) == 2
 
 
 def test_vault_zero_knowledge_metadata_logs_and_exports_do_not_echo_blob(user_client, app_module):

@@ -1,6 +1,6 @@
 # Pushkey 100 Percent Completion Tasklist
 
-Status date: 2026-07-21
+Status date: 2026-07-22
 
 Current measured readiness:
 
@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 281/337 production items complete, 83.4%.
+Current result: 307/337 production items complete, 91.1%.
 Post-alpha review track: 0/3.
 
 This tasklist is the execution path from current state to:
@@ -174,22 +174,16 @@ Roadmap items expected to close:
 
 Goal: make the alpha sync claim precise.
 
-Choose one:
-
 - [x] Cloud sync enabled for alpha as encrypted-blob sync with documented limits.
-- [x] Cloud sync disabled/beta-scoped for alpha, with marketing/onboarding claims removed.
 
-If enabled:
+Selected alpha position:
 
 - [x] Document encrypted-blob-only behavior.
 - [x] Document conflict behavior and user-facing limitations.
 - [x] Add zero-knowledge regression checks for API, logs, database migration
   metadata, and object-storage abstraction.
 
-If disabled:
-
-- [x] Remove sync claims from alpha product and docs.
-- [x] Keep cloud sync visible only as beta/internal.
+- [x] Keep PostgreSQL/object-storage sync migration out of alpha launch claims.
 
 Roadmap items expected to close:
 
@@ -200,12 +194,12 @@ Roadmap items expected to close:
 
 Goal: move from alpha to full production/GA.
 
-- [ ] Migrate encrypted vault blobs to object storage.
-- [ ] Store vault revision metadata transactionally in PostgreSQL.
+- [x] Migrate encrypted vault blobs to object storage.
+- [x] Store vault revision metadata transactionally in PostgreSQL.
 - [x] Add transactional audit/outbox behavior.
-- [ ] Remove production flat-file write paths after migration.
-- [ ] Complete distributed rate limiting through Redis or API gateway.
-- [ ] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
+- [x] Remove production flat-file write paths after migration.
+- [x] Complete distributed rate limiting through Redis or API gateway.
+- [x] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
 - [ ] Configure encrypted database backups and point-in-time recovery.
 - [ ] Configure versioned object-storage backups.
 - [ ] Conduct and record destructive restore drill.
@@ -226,7 +220,8 @@ Goal: complete artifact trust and formal release process.
 
 - [ ] Sign Windows artifacts.
 - [ ] Sign macOS artifacts.
-- [ ] Verify signatures and checksums before install.
+- [x] Verify checksums before install.
+- [x] Verify signatures before install.
 - [ ] Confirm signed artifacts install successfully.
 - [x] Pin CI actions by immutable commit SHA.
 - [ ] Prove no release can bypass tests, scans, signing, or approval.

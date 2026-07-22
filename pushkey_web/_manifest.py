@@ -1,3 +1,3 @@
 """Generated web artifact trust anchor. Do not edit."""
-EXPECTED_MANIFEST_SHA256 = "10085582a6629016f6d67da400cdc8dab77f155f5da3c752a7fcd59fe0634a3d"
+EXPECTED_MANIFEST_SHA256 = "3caa39a412c9435f873a574cebb139e7f5f37e962601abdc7ef3da43eac36ad1"
 WEB_APP_VERSION = "0.1.0"

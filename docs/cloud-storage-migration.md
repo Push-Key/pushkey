@@ -53,3 +53,22 @@ store object keys, ETags, sizes, and timestamps for encrypted blobs only.
 - Import reports include counts and hashes, not plaintext vault content.
 - Production flat-file write paths remain in place until the staged migration
   passes reconciliation and rollback checks.
+
+## Local Smoke Report
+
+The local smoke runner records a bounded evidence artifact without claiming
+hosted production backup or rollback proof:
+
+```powershell
+python scripts/cloud_storage_migration_smoke.py --output docs/cloud-storage-migration-results.json
+```
+
+The generated JSON captures the dry-run/apply migration result, the imported
+legacy dataset counts and hashes, and the rollback plan for the local smoke
+scope. The output is saved at
+`docs/cloud-storage-migration-results.json`. Real PostgreSQL, object-storage,
+backup, PITR, and production rollback evidence stay outside this repository
+until hosted infrastructure is available.
+
+For hosted production rollback evidence, use
+`docs/production-rollback-drill-results.template.json` as the record format.

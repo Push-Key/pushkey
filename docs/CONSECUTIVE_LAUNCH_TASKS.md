@@ -80,11 +80,11 @@ public infrastructure.
 - [ ] Choose PostgreSQL provider.
 - [ ] Choose object-storage provider.
 - [ ] Design schemas and migrations.
-- [ ] Migrate encrypted vault blobs to object storage.
+- [x] Migrate encrypted vault blobs to object storage.
 - [x] Add revision/`If-Match` conflict-safe sync.
 - [ ] Add importer from existing JSON/JSONL/blob storage.
 - [ ] Remove production flat-file write paths.
-- [ ] Add distributed rate limiting.
+- [x] Add distributed rate limiting.
 - [x] Add trusted proxy/host/CORS/security-header policy.
 - [ ] Add idempotency keys, SMTP retry, and abuse alerts.
 - [x] Add request limits.
@@ -93,7 +93,7 @@ Exit gate:
 
 - [ ] Transactional operational data.
 - [ ] Conflict-safe vault sync.
-- [ ] Distributed controls survive restart/horizontal scaling.
+- [x] Distributed controls survive restart/horizontal scaling.
 
 ## 5. Ship Release Candidate
 

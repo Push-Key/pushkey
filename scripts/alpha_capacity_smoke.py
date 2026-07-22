@@ -60,93 +60,95 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 
 def run_smoke(users: int, iterations: int) -> dict:
-    with tempfile.TemporaryDirectory(prefix="pushkey-alpha-capacity-") as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix="pushkey-alpha-capacity-", ignore_cleanup_errors=True
+    ) as tmp:
         app_module = _fresh_app(Path(tmp))
-        admin = TestClient(app_module.app)
-        login = admin.post(
-            "/api/admin/auth/login",
-            json={"email": "admin@example.com", "password": "admin-pass-123"},
-        )
-        if login.status_code != 200:
-            raise SystemExit(f"admin login failed: {login.status_code} {login.text}")
-        admin_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
-
-        issued_keys = []
-        for index in range(users):
-            issued = admin.post(
-                "/api/admin/licenses/issue",
-                headers=admin_headers,
-                json={
-                    "tier": "starter",
-                    "email": f"alpha-{index}@example.com",
-                    "send_email": False,
-                },
+        with TestClient(app_module.app) as admin:
+            login = admin.post(
+                "/api/admin/auth/login",
+                json={"email": "admin@example.com", "password": "admin-pass-123"},
             )
-            if issued.status_code != 200:
-                raise SystemExit(f"license issue failed: {issued.status_code} {issued.text}")
-            issued_keys.append(issued.json()["key"])
+            if login.status_code != 200:
+                raise SystemExit(f"admin login failed: {login.status_code} {login.text}")
+            admin_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
 
-        def exercise(index: int) -> list[tuple[str, float, int]]:
-            client = TestClient(app_module.app)
-            email = f"user-{index}@example.com"
-            password = "correct horse battery staple"
-            auth: dict[str, str] = {}
-            results = []
-            results.append(_timed("register", lambda: client.post("/api/v1/auth/register", json={"email": email, "password": password})))
-            label, latency, status = _timed("login", lambda: client.post("/api/v1/auth/login", json={"email": email, "password": password}))
-            results.append((label, latency, status))
-            if status == 200:
-                token_response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
-                if token_response.status_code == 200:
-                    auth = {"Authorization": f"Bearer {token_response.json()['token']}"}
-            for turn in range(iterations):
-                blob = f"encrypted-alpha-blob-{index}-{turn}".encode("ascii")
-                results.append(_timed("vault_put", lambda blob=blob: client.put("/api/v1/vault", headers=auth, content=blob)))
-                results.append(_timed("vault_get", lambda: client.get("/api/v1/vault", headers=auth)))
-                key = issued_keys[(index + turn) % len(issued_keys)]
-                results.append(_timed("portal_lookup", lambda key=key: client.post("/api/v1/portal/lookup", json={"license_key": key})))
-                results.append(_timed("admin_stats", lambda: admin.get("/api/admin/stats", headers=admin_headers)))
-            return results
+            issued_keys = []
+            for index in range(users):
+                issued = admin.post(
+                    "/api/admin/licenses/issue",
+                    headers=admin_headers,
+                    json={
+                        "tier": "starter",
+                        "email": f"alpha-{index}@example.com",
+                        "send_email": False,
+                    },
+                )
+                if issued.status_code != 200:
+                    raise SystemExit(f"license issue failed: {issued.status_code} {issued.text}")
+                issued_keys.append(issued.json()["key"])
 
-        started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(users, 8)) as pool:
-            nested = list(pool.map(exercise, range(users)))
-        elapsed = time.perf_counter() - started
+            def exercise(index: int) -> list[tuple[str, float, int]]:
+                with TestClient(app_module.app) as client:
+                    email = f"user-{index}@example.com"
+                    password = "correct horse battery staple"
+                    auth: dict[str, str] = {}
+                    results = []
+                    results.append(_timed("register", lambda: client.post("/api/v1/auth/register", json={"email": email, "password": password})))
+                    label, latency, status = _timed("login", lambda: client.post("/api/v1/auth/login", json={"email": email, "password": password}))
+                    results.append((label, latency, status))
+                    if status == 200:
+                        token_response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+                        if token_response.status_code == 200:
+                            auth = {"Authorization": f"Bearer {token_response.json()['token']}"}
+                    for turn in range(iterations):
+                        blob = f"encrypted-alpha-blob-{index}-{turn}".encode("ascii")
+                        results.append(_timed("vault_put", lambda blob=blob: client.put("/api/v1/vault", headers=auth, content=blob)))
+                        results.append(_timed("vault_get", lambda: client.get("/api/v1/vault", headers=auth)))
+                        key = issued_keys[(index + turn) % len(issued_keys)]
+                        results.append(_timed("portal_lookup", lambda key=key: client.post("/api/v1/portal/lookup", json={"license_key": key})))
+                        results.append(_timed("admin_stats", lambda: admin.get("/api/admin/stats", headers=admin_headers)))
+                    return results
 
-        flat = [item for group in nested for item in group]
-        failures = [
-            {"operation": label, "status_code": status, "latency_ms": round(latency, 2)}
-            for label, latency, status in flat
-            if status >= 400
-        ]
-        latencies = [latency for _, latency, status in flat if status < 400]
-        by_operation: dict[str, list[float]] = {}
-        for label, latency, status in flat:
-            if status < 400:
-                by_operation.setdefault(label, []).append(latency)
+            started = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=min(users, 8)) as pool:
+                nested = list(pool.map(exercise, range(users)))
+            elapsed = time.perf_counter() - started
 
-        return {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "users": users,
-            "iterations_per_user": iterations,
-            "requests_total": len(flat),
-            "duration_seconds": round(elapsed, 3),
-            "throughput_requests_per_second": round(len(flat) / elapsed, 2),
-            "failures": failures,
-            "latency_ms": {
-                "median": round(statistics.median(latencies), 2),
-                "p95": round(_percentile(latencies, 95), 2),
-                "max": round(max(latencies), 2),
-            },
-            "operations": {
-                name: {
-                    "count": len(values),
-                    "p95_ms": round(_percentile(values, 95), 2),
-                    "max_ms": round(max(values), 2),
-                }
-                for name, values in sorted(by_operation.items())
-            },
-        }
+            flat = [item for group in nested for item in group]
+            failures = [
+                {"operation": label, "status_code": status, "latency_ms": round(latency, 2)}
+                for label, latency, status in flat
+                if status >= 400
+            ]
+            latencies = [latency for _, latency, status in flat if status < 400]
+            by_operation: dict[str, list[float]] = {}
+            for label, latency, status in flat:
+                if status < 400:
+                    by_operation.setdefault(label, []).append(latency)
+
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "users": users,
+                "iterations_per_user": iterations,
+                "requests_total": len(flat),
+                "duration_seconds": round(elapsed, 3),
+                "throughput_requests_per_second": round(len(flat) / elapsed, 2),
+                "failures": failures,
+                "latency_ms": {
+                    "median": round(statistics.median(latencies), 2),
+                    "p95": round(_percentile(latencies, 95), 2),
+                    "max": round(max(latencies), 2),
+                },
+                "operations": {
+                    name: {
+                        "count": len(values),
+                        "p95_ms": round(_percentile(values, 95), 2),
+                        "max_ms": round(max(values), 2),
+                    }
+                    for name, values in sorted(by_operation.items())
+                },
+            }
 
 
 def main() -> int:

@@ -4,6 +4,7 @@ Covers license CRUD, heartbeat, contacts, analytics, audit, bulk, tickets.
 """
 import json
 import os
+import runpy
 from pathlib import Path
 import pytest
 
@@ -148,6 +149,7 @@ def _add_admin(app_module, email: str, password: str, role: str, *, disabled: bo
     admins[admin_id] = {
         "id": admin_id,
         "email": email,
+        "display_name": email.split("@")[0],
         "hash": app_module.pwd_ctx.hash(password),
         "role": role,
         "mfa_secret": "",
@@ -273,6 +275,38 @@ def test_admin_login_lockout_after_repeated_failures(client, app_module):
     assert any(e["action"] == "admin_login_lockout" for e in audit)
 
 
+def test_admin_login_lockout_persists_across_app_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-lockout-secret")
+    monkeypatch.setenv("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES", "2")
+    monkeypatch.setenv("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN", "15")
+    monkeypatch.setenv("AUTH_RATE_MAX", "10")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_lockout_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_lockout_b")
+    from fastapi.testclient import TestClient
+
+    bad_login = {"email": "admin@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post("/api/admin/auth/login", json=bad_login).status_code == 401
+        assert first_client.post("/api/admin/auth/login", json=bad_login).status_code == 401
+
+        locked = second_client.post(
+            "/api/admin/auth/login",
+            json={"email": "admin@example.com", "password": "admin-pass-123"},
+        )
+
+        assert locked.status_code == 423
+        assert second._admin_by_email("admin@example.com")["lockout_until"] > second._utcnow().isoformat()
+
+
 def test_admin_successful_login_resets_failed_login_state(client, app_module):
     admin = app_module._admin_by_email("admin@example.com")
     admins = app_module._load_admins()
@@ -334,6 +368,88 @@ def test_owner_can_reset_admin_mfa(client, app_module):
     target = app_module._load_admins()[target_id]
     assert target.get("mfa_secret", "") == ""
     assert target.get("mfa_recovery_hashes", []) == []
+
+
+def test_owner_can_create_update_disable_and_enable_admin_accounts(client, app_module):
+    from fastapi.testclient import TestClient
+
+    create = client.post(
+        "/api/admin/admins",
+        headers=ADMIN,
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+            "role": "support",
+            "display_name": "Support Agent",
+        },
+    )
+    assert create.status_code == 200
+    created = create.json()
+    admin_id = created["id"]
+    assert created["email"] == "support@example.com"
+    assert created["display_name"] == "Support Agent"
+    assert created["role"] == "support"
+    assert created["disabled"] is False
+    assert created["mfa_enabled"] is False
+
+    listing = client.get("/api/admin/admins", headers=ADMIN)
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["count"] >= 2
+    found = next(admin for admin in body["admins"] if admin["id"] == admin_id)
+    assert found["display_name"] == "Support Agent"
+    assert found["session_count"] == 0
+
+    support_client = TestClient(app_module.app)
+    login = support_client.post(
+        "/api/admin/auth/login",
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+        },
+    )
+    assert login.status_code == 200
+    support_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 200
+
+    update = client.patch(
+        f"/api/admin/admins/{admin_id}",
+        headers=ADMIN,
+        json={
+            "display_name": "Support Lead",
+            "role": "admin",
+        },
+    )
+    assert update.status_code == 200
+    assert update.json()["display_name"] == "Support Lead"
+    assert update.json()["role"] == "admin"
+
+    disable = client.post(f"/api/admin/admins/{admin_id}/disable", headers=ADMIN)
+    assert disable.status_code == 200
+    assert disable.json()["ok"] is True
+    assert disable.json()["admin"]["disabled"] is True
+    assert disable.json()["revoked"] >= 1
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 401
+
+    enable = client.post(f"/api/admin/admins/{admin_id}/enable", headers=ADMIN)
+    assert enable.status_code == 200
+    assert enable.json()["ok"] is True
+    assert enable.json()["admin"]["disabled"] is False
+
+    relogin = support_client.post(
+        "/api/admin/auth/login",
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+        },
+    )
+    assert relogin.status_code == 200
+    support_headers = {"X-CSRF-Token": relogin.json()["csrf_token"]}
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 200
+
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    actions = {event["action"] for event in audit if event.get("target") == admin_id}
+    assert {"admin_create", "admin_update", "admin_disable", "admin_enable"} <= actions
 
 
 # ── License generation ───────────────────────────────────────────
@@ -758,6 +874,45 @@ def low_rate_limit_app(tmp_path, monkeypatch):
     return importlib.import_module("pushkey_cloud_api")
 
 
+def _load_isolated_cloud_module(name: str):
+    module_globals = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "pushkey_cloud_api.py"),
+        run_name=name,
+    )
+    return type("CloudApiModule", (), module_globals)
+
+
+class _FakeRedisRateLimitClient:
+    def __init__(self):
+        self._records: dict[str, list[float]] = {}
+
+    def ping(self):
+        return True
+
+    def eval(self, script, numkeys, *args):
+        keys = args[:numkeys]
+        now = float(args[numkeys])
+        window_sec = float(args[numkeys + 1])
+        identity_limit = int(args[numkeys + 2])
+        global_limit = int(args[numkeys + 3])
+        cutoff = now - window_sec
+
+        for key, limit in ((keys[0], identity_limit), (keys[1], global_limit)):
+            hits = [hit for hit in self._records.get(key, []) if hit > cutoff]
+            self._records[key] = hits
+            if len(hits) >= limit:
+                return 0
+
+        for key in keys:
+            hits = [hit for hit in self._records.get(key, []) if hit > cutoff]
+            hits.append(now)
+            self._records[key] = hits
+        return 1
+
+    def close(self):
+        return None
+
+
 def test_auth_login_rate_limit(low_rate_limit_app):
     from fastapi.testclient import TestClient
     client = TestClient(low_rate_limit_app.app)
@@ -812,6 +967,86 @@ def test_portal_lookup_rate_limit(low_rate_limit_app):
     assert r1.status_code != 429
     assert r2.status_code != 429
     assert r3.status_code == 429
+
+
+def test_auth_rate_limit_is_shared_across_app_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-auth-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "2")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_b")
+    from fastapi.testclient import TestClient
+
+    body = {"email": "nobody@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post("/api/v1/auth/login", json=body).status_code == 401
+        assert first_client.post("/api/v1/auth/login", json=body).status_code == 401
+
+        third = second_client.post(
+            "/api/v1/auth/register",
+            json={"email": "shared@example.com", "password": "password123"},
+        )
+
+        assert third.status_code == 429
+
+
+def test_auth_rate_limit_uses_shared_redis_backend_across_app_instances(
+    tmp_path, monkeypatch
+):
+    shared_client = _FakeRedisRateLimitClient()
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-redis-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "2")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    monkeypatch.setenv("PUSHKEY_RATE_LIMIT_BACKEND", "redis")
+    monkeypatch.setenv("PUSHKEY_RATE_LIMIT_REDIS_URL", "redis://rate-limit-test/0")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    import redis
+
+    monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: shared_client)
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_redis_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_redis_b")
+    from fastapi.testclient import TestClient
+
+    body = {"email": "nobody@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post(
+            "/api/v1/auth/login",
+            json=body,
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        ).status_code == 401
+        assert first_client.post(
+            "/api/v1/auth/login",
+            json=body,
+            headers={"X-Forwarded-For": "198.51.100.25"},
+        ).status_code == 401
+
+        third = second_client.post(
+            "/api/v1/auth/register",
+            json={"email": "shared@example.com", "password": "password123"},
+            headers={"X-Forwarded-For": "192.0.2.44"},
+        )
+
+        assert third.status_code == 429
+        assert all("shared@example.com" not in key for key in shared_client._records)
+        assert all("203.0.113.10" not in key for key in shared_client._records)
+        assert all("198.51.100.25" not in key for key in shared_client._records)
+        assert all("192.0.2.44" not in key for key in shared_client._records)
 
 
 # ── Export ───────────────────────────────────────────────────────

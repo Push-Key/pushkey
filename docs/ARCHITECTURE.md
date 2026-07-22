@@ -99,17 +99,21 @@ production documentation exposure is intentionally disabled.
   versioning remains a separate Phase 1 slice.
 # Proxy trust and client IPs
 
-Production commands currently pass `--no-proxy-headers`. Rate limiting therefore
+Production commands currently pass `--no-proxy-headers`. The limiter therefore
 uses the immediate TCP peer address and never trusts arbitrary client-supplied
 `X-Forwarded-For` values. A deployment may enable proxy headers only after setting
 Uvicorn's `--forwarded-allow-ips` to the exact addresses or networks of its trusted
 load balancers. Do not use `*` on an internet-reachable service.
 
-Lifecycle rate limiting uses license identity plus a process-global bucket. This
-prevents every customer behind one ingress peer from sharing a single IP quota.
-Per-IP lifecycle limiting is deferred until the trusted-proxy integration phase;
-it must not be advertised or enabled while deployments use
-`--no-proxy-headers`.
+Distributed auth, activation, heartbeat, portal, and admin rate limiting use a
+shared backend. In production that backend should be Redis or an equivalent API
+gateway control plane. The code hashes bucket identities before storage so the
+rate-limit store does not leak raw emails or license keys. SQLite remains the
+local/dev fallback only.
+
+Lifecycle and auth rate limiting use the request peer address plus license or
+account identity, which prevents forged proxy headers from bypassing the bucket
+while still allowing one limiter to be shared across app instances.
 
 ## Client compatibility and forced upgrades
 

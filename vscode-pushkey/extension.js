@@ -20,9 +20,13 @@ function makeDecorationType(iconFile) {
 
 function loadHealth() {
     try {
-        if (fs.existsSync(HEALTH_FILE)) {
-            healthData = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8'));
+        if (!fs.existsSync(HEALTH_FILE)) {
+            // Missing sidecar should behave like an empty health object.
+            healthData = {};
+            return;
         }
+        const parsed = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8'));
+        healthData = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     } catch (_) {
         healthData = {};
     }

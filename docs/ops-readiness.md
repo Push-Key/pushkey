@@ -56,6 +56,12 @@ The placeholder `@push-key.com` operator aliases must be replaced with live
 mailbox or incident-tool destinations before claiming that alerts reach an
 accountable operator.
 
+The remaining external production gates and their evidence fields are tracked
+in
+[production-external-gate-handoff-checklist.md](production-external-gate-handoff-checklist.md).
+Use that checklist to record the live operator destination, alert proof, and
+the production monitoring evidence that supports release readiness.
+
 ## Telemetry Redaction
 
 Logs, metrics, alerts, dead letters, exports, and dashboard labels must not include plaintext secrets.

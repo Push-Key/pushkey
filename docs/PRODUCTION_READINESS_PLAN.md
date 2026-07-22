@@ -282,8 +282,8 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add a formal migration framework.
 - [x] Create initial schema migrations with constraints and indexes.
 - [x] Store only hashed license keys and reset tokens.
-- [ ] Migrate encrypted vault blobs to object storage.
-- [ ] Store vault revision metadata transactionally in PostgreSQL.
+- [x] Migrate encrypted vault blobs to object storage.
+- [x] Store vault revision metadata transactionally in PostgreSQL.
 - [x] Add conditional writes using revision or `If-Match`.
 - [x] Return conflict responses without destroying either revision.
 - [x] Add per-account storage quotas and maximum request sizes.
@@ -293,15 +293,15 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add migration dry-run, reconciliation, rollback, and idempotency.
 - [x] Verify the server never receives password, salt, decrypted vault, or vault key.
 - [x] Define account export and deletion workflows.
-- [ ] Remove production flat-file write paths after migration.
+- [x] Remove production flat-file write paths after migration.
 
 ## Verification
 
 - [x] Import a seeded legacy dataset and reconcile record counts and hashes.
 - [x] Run concurrent license, contact, and vault writes.
 - [x] Prove stale revisions cannot overwrite newer vaults.
-- [ ] Verify zero-knowledge properties at API, logs, DB, and object storage.
-- [ ] Load-test expected beta and launch concurrency.
+- [x] Verify zero-knowledge properties at API, logs, DB, and object storage.
+- [x] Load-test expected beta and launch concurrency.
 
 ## Exit Gate
 
@@ -322,7 +322,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Add issuer, audience, subject, expiry, issued-at, and unique token IDs.
 - [x] Add signing-key rotation.
 - [x] Revoke sessions on password change, reset, compromise, and account closure.
-- [ ] Add distributed rate limiting through Redis or the API gateway.
+- [x] Add distributed rate limiting through Redis or the API gateway.
 - [x] Configure trusted proxies before using forwarded client IPs.
 - [x] Add per-endpoint limits, quotas, and `Retry-After`.
 - [x] Rate-limit registration, login, reset, activation, heartbeat, sync, portal, support, and admin endpoints.
@@ -338,7 +338,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Exit Gate
 
-- [ ] Distributed controls cannot be bypassed by restart or horizontal scaling
+- [x] Distributed controls cannot be bypassed by restart or horizontal scaling
 - [x] Token revocation and key rotation proven
 - [x] Network and browser policies verified in production-like infrastructure
 
@@ -368,13 +368,13 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Configure `metadataBase`, canonical URLs, sitemap, robots, Open Graph, and error pages.
 - [x] Add CSP-compatible analytics and consent behavior if analytics is used.
 - [x] Add portal tests for license lookup, renewal, support, and privacy-safe failures.
-- [ ] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
+- [x] Add admin Playwright coverage for license, contact, audit, settings, and support journeys.
 - [x] Replace boilerplate `web/README.md` with an operator/developer runbook.
 
 ## Exit Gate
 
-- [ ] Critical UI journeys pass in Chromium, Firefox, and WebKit where applicable
-- [ ] WCAG audit has no critical failures
+- [x] Critical UI journeys pass in Chromium, Firefox, and WebKit where applicable
+- [x] WCAG audit has no critical failures
 - [x] No unimplemented controls appear as functional production features
 
 ---
@@ -408,7 +408,7 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 ## npm wrapper tasks
 
 - [x] Align installer asset names with CI release artifacts.
-- [ ] Verify checksums/signatures before installation.
+- [x] Verify checksums/signatures before installation.
 - [x] Fail with a nonzero exit code on unsuccessful installation.
 - [x] Handle unsupported OS/architecture explicitly.
 - [x] Add arm64 support or document it as unsupported.
@@ -428,9 +428,9 @@ npm pack --dry-run
 
 ## Exit Gate
 
-- [ ] Reproducible package and binary builds
+- [x] Reproducible package and binary builds
 - [ ] Signed and checksummed artifacts
-- [ ] Clean installation on every claimed platform
+- [x] Clean installation on every claimed platform
 
 ---
 
@@ -517,10 +517,10 @@ npm pack --dry-run
 - [ ] Configure versioned object-storage backups.
 - [x] Add offsite retention and deletion policies.
 - [x] Write and automate restoration procedures.
-- [ ] Conduct and record a destructive restore drill.
+- [x] Conduct and record a destructive restore drill.
 - [x] Write deployment, rollback, migration, incident, compromise, and key-rotation runbooks.
 - [x] Configure managed secrets and documented rotation.
-- [ ] Run capacity and load tests.
+- [x] Run capacity and load tests.
 - [ ] Run a production rollback drill.
 - [x] Define on-call and escalation ownership.
 
@@ -578,9 +578,9 @@ while tracking independent review and formal GA certification separately.
 - [x] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
 - [ ] Resolve all critical and high findings.
 - [ ] Triage medium/low findings with owners and deadlines.
-- [ ] Re-run the full test, build, scan, and packaging matrix.
-- [ ] Conduct a clean-room installation on each supported platform.
-- [ ] Test upgrade from the latest public version.
+- [x] Re-run the full test, build, scan, and packaging matrix.
+- [x] Conduct a clean-room installation on each supported platform.
+- [x] Test upgrade from the latest public version.
 - [ ] Test rollback without vault or cloud data loss.
 - [x] Run a private beta with representative developers.
 - [x] Measure onboarding completion, crash/error rate, sync reliability, and support volume.

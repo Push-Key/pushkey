@@ -116,6 +116,35 @@ jobs:
             sha256sum "$file" > "$file.sha256"
           done
 
+      - name: Sign release binaries
+        if: ${{ secrets.PUSHKEY_RELEASE_PRIVATE_KEY_PEM != '' }}
+        env:
+          PUSHKEY_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.PUSHKEY_RELEASE_PRIVATE_KEY_PEM }}
+        run: |
+          node <<'NODE'
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const path = require('path');
+
+          const privateKeyPem = process.env.PUSHKEY_RELEASE_PRIVATE_KEY_PEM;
+          if (!privateKeyPem) {
+            throw new Error('missing PUSHKEY_RELEASE_PRIVATE_KEY_PEM');
+          }
+
+          const dist = path.resolve('dist');
+          const assets = [
+            'pushkey-windows-x64.exe',
+            'pushkey-macos-x64',
+            'pushkey-linux-x64',
+          ];
+
+          for (const asset of assets) {
+            const assetPath = path.join(dist, asset);
+            const signature = crypto.sign(null, fs.readFileSync(assetPath), privateKeyPem).toString('base64');
+            fs.writeFileSync(`${assetPath}.sig`, `${signature}\n`, 'utf8');
+          }
+          NODE
+
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
         with:

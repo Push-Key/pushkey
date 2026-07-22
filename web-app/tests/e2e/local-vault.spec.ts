@@ -57,13 +57,14 @@ async function api<T>(page: Page, pathName: string, init: RequestInit = {}): Pro
   ) as Promise<T>;
 }
 
-test("local vault browser journey unlocks, mutates, injects, and locks", async ({ page }) => {
+test("local vault browser journey unlocks, mutates, injects, and locks", async ({ page }, testInfo) => {
   const home = mkdtempSync(path.join(tmpdir(), "pushkey-e2e-"));
   const projectDir = path.join(home, "project");
   mkdirSync(projectDir);
   writeFileSync(path.join(projectDir, ".gitignore"), "", "utf-8");
   const token = "e2e-launch-token";
-  const port = 7765;
+  const portBase = testInfo.project.name === "firefox" ? 100 : testInfo.project.name === "webkit" ? 200 : 0;
+  const port = 7765 + portBase + testInfo.workerIndex;
 
   const seed = [
     "from pushkey_vault import save_vault",
@@ -141,6 +142,16 @@ test("local vault browser journey unlocks, mutates, injects, and locks", async (
       { method: "POST", body: JSON.stringify({}) },
     );
     expect(injected).toMatchObject({ injected: ["NEW_KEY"], wrote: true });
+
+    await page.getByRole("button", { name: "Open Projects" }).click();
+    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+    const projectToggle = page.getByRole("button", { name: /E2E Project/ }).first();
+    await expect(projectToggle).toHaveAttribute("aria-expanded", "false");
+    await projectToggle.click();
+    await expect(projectToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("button", { name: /Unassign NEW_KEY from E2E Project/ })).toBeVisible();
+    await page.getByRole("button", { name: /Inject environment file for E2E Project/ }).click();
+    await expect(page.getByRole("status")).toContainText("Wrote");
 
     await page.route("**/api/status", (route) => route.abort());
     await page.reload();
