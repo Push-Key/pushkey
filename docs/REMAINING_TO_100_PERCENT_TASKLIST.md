@@ -75,13 +75,13 @@ Goal: make paid/evaluation alpha launchable without overstating GA readiness.
 - [ ] Ensure every alpha blocker in
   `docs/ALPHA_SELLABLE_READINESS_CHECKLIST.md` is checked or explicitly removed
   from alpha scope.
-- [ ] Re-run the full Python test suite.
-- [ ] Re-run both frontend lint/build pipelines.
+- [x] Re-run the full Python test suite.
+- [x] Re-run both frontend lint/build pipelines.
 - [x] Re-run web-app Playwright coverage for local vault journeys.
 - [x] Re-run web/admin portal coverage for license, support, audit, MFA,
   session, and role journeys.
-- [ ] Re-run package/install smoke tests from clean temp homes.
-- [ ] Record the alpha launch decision, known limitations, and accepted risks in
+- [x] Re-run package/install smoke tests from clean temp homes.
+- [x] Record the alpha launch decision, known limitations, and accepted risks in
   a dated readiness note.
 
 Verification:
