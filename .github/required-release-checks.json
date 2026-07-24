@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Required check contexts that must have concluded successfully on a commit",
+    "before that commit may be released. These mirror the contexts enforced by",
+    "the `main` branch protection rule. scripts/verify_release_commit_provenance.py",
+    "reads this file and the Release workflow refuses to build unless every",
+    "listed context passed on the tagged commit AND the tagged commit is",
+    "contained in the protected branch.",
+    "Keep this list in sync with .github/workflows/ci.yml job names and with the",
+    "required_status_checks contexts recorded in",
+    "docs/release-branch-protection-verification-results.json."
+  ],
+  "protected_branch": "main",
+  "required_contexts": [
+    "CI / Python tests",
+    "CI / Web build",
+    "CI / Local web app build",
+    "CI / Package smoke (windows-latest)",
+    "CI / Package smoke (ubuntu-latest)",
+    "CI / Package smoke (macos-latest)",
+    "CI / Security scans"
+  ]
+}

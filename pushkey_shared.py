@@ -155,3 +155,37 @@ def ensure_vault_dir():
             "Example: alpaca.txt → ALPACA_KEY, ALPACA_SECRET\n",
             encoding="utf-8",
         )
+
+
+# ── Network egress guard ─────────────────────────────────────────
+#: Schemes `urlopen` is allowed to open. urllib also understands `file:`,
+#: `ftp:`, and `data:`, so any endpoint that reaches urlopen from configuration
+#: -- PUSHKEY_SERVER, PROVIDERS_REGISTRY_URL, a provider entry in a user-edited
+#: providers.json -- could otherwise be pointed at `file:///etc/passwd` and have
+#: the contents read back and, in the sync paths, uploaded.
+ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+class UnsafeURLSchemeError(ValueError):
+    """Raised when a URL uses a scheme this application must never open."""
+
+
+def urlopen_checked(request, *, timeout=None):
+    """`urllib.request.urlopen` restricted to http and https.
+
+    Accepts the same first argument as urlopen: a URL string or a Request.
+    """
+
+    import urllib.request
+
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+    if scheme not in ALLOWED_URL_SCHEMES:
+        raise UnsafeURLSchemeError(
+            f"refusing to open {scheme or 'scheme-less'} URL; "
+            f"allowed schemes are {sorted(ALLOWED_URL_SCHEMES)}"
+        )
+    # This is the one sanctioned urlopen in the codebase. The scheme check above
+    # is exactly the audit B310 asks for, and every other module calls this
+    # function rather than urlopen directly.
+    return urllib.request.urlopen(request, timeout=timeout)  # nosec B310

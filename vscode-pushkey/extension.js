@@ -9,6 +9,7 @@ const HEALTH_FILE = path.join(os.homedir(), '.pushkey', 'health.json');
 let decorations = {};
 let healthData = {};
 let fileWatcher = null;
+let reattachTimer = null;
 
 function makeDecorationType(iconFile) {
     return vscode.window.createTextEditorDecorationType({
@@ -19,9 +20,13 @@ function makeDecorationType(iconFile) {
 
 function loadHealth() {
     try {
-        if (fs.existsSync(HEALTH_FILE)) {
-            healthData = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8'));
+        if (!fs.existsSync(HEALTH_FILE)) {
+            // Missing sidecar should behave like an empty health object.
+            healthData = {};
+            return;
         }
+        const parsed = JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8'));
+        healthData = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     } catch (_) {
         healthData = {};
     }
@@ -98,12 +103,35 @@ function refreshAll() {
     }
 }
 
+function clearReattachTimer() {
+    if (reattachTimer) {
+        clearTimeout(reattachTimer);
+        reattachTimer = null;
+    }
+}
+
+function scheduleWatchReattach(delayMs = 1000) {
+    clearReattachTimer();
+    reattachTimer = setTimeout(() => {
+        reattachTimer = null;
+        watchHealthFile();
+    }, delayMs);
+    if (reattachTimer && typeof reattachTimer.unref === 'function') {
+        reattachTimer.unref();
+    }
+}
+
 function watchHealthFile() {
+    clearReattachTimer();
     if (fileWatcher) fileWatcher.close();
     try {
         fileWatcher = fs.watch(path.dirname(HEALTH_FILE), (eventType, filename) => {
             if (filename === 'health.json') refreshAll();
         });
+        if (fileWatcher && typeof fileWatcher.on === 'function') {
+            fileWatcher.on('error', () => scheduleWatchReattach());
+            fileWatcher.on('close', () => scheduleWatchReattach());
+        }
     } catch (_) {
         // ~/.pushkey doesn't exist yet — retry when first used
     }
@@ -137,8 +165,18 @@ function activate(context) {
 }
 
 function deactivate() {
+    clearReattachTimer();
     if (fileWatcher) fileWatcher.close();
+    fileWatcher = null;
     for (const dec of Object.values(decorations)) dec.dispose();
 }
 
-module.exports = { activate, deactivate };
+module.exports = {
+    activate,
+    deactivate,
+    _internals: {
+        watchHealthFile,
+        scheduleWatchReattach,
+        clearReattachTimer,
+    },
+};

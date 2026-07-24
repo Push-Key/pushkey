@@ -1,7 +1,7 @@
 # Pushkey Deployment Guide
 
 Two services to deploy:
-1. **Cloud API** (FastAPI / Python). License backend and admin endpoints.
+1. **Cloud API** (`pushkey_cloud_api.py`, FastAPI / Python). License backend and admin endpoints.
 2. **Admin frontend** (Next.js). Admin console UI.
 
 ---
@@ -116,7 +116,7 @@ For other providers (SendGrid, Mailgun, AWS SES), use their SMTP relay credentia
 - [ ] Admin frontend deployed with correct `NEXT_PUBLIC_ADMIN_API_URL`
 - [ ] CORS `ADMIN_ORIGIN` matches admin frontend URL
 - [ ] Volume mounted at `/data` so JSON compatibility storage persists
-- [ ] Exactly one API worker and one machine are running until Phase 4 database migration
+- [ ] Exactly one API worker and one machine must remain running until Phase 4 database migration
 - [ ] Desktop app rebuilt with `PUSHKEY_SERVER` baked in
 - [ ] Generate a test license, activate from desktop, verify heartbeat lands
 

@@ -4,6 +4,7 @@ Covers license CRUD, heartbeat, contacts, analytics, audit, bulk, tickets.
 """
 import json
 import os
+import runpy
 from pathlib import Path
 import pytest
 
@@ -62,6 +63,61 @@ def test_admin_endpoints_reject_missing_secret(client):
     assert r.status_code == 401
 
 
+def test_cloud_api_applies_security_headers_and_readiness(client):
+    r = client.get("/api/v1/health")
+
+    assert r.status_code == 200
+    assert r.headers["strict-transport-security"] == "max-age=31536000; includeSubDomains"
+    assert r.headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["referrer-policy"] == "no-referrer"
+
+
+def test_cloud_api_rejects_oversized_request_body(app_module):
+    from fastapi.testclient import TestClient
+
+    app_module.MAX_REQUEST_BYTES = 8
+    client = TestClient(app_module.app)
+
+    r = client.post(
+        "/api/v1/auth/register",
+        headers={"Content-Length": "9"},
+        content=b"123456789",
+    )
+
+    assert r.status_code == 413
+    assert r.json() == {"detail": "Request body too large"}
+
+
+def test_cloud_api_records_structured_redacted_request_logs(client, app_module):
+    r = client.get(
+        "/api/v1/health",
+        headers={"X-Request-ID": "req-test-1", "Authorization": "Bearer secret-token"},
+    )
+
+    assert r.status_code == 200
+    assert r.headers["x-request-id"] == "req-test-1"
+    event = app_module.app.state.request_logs[-1]
+    assert event["request_id"] == "req-test-1"
+    assert event["method"] == "GET"
+    assert event["path"] == "/api/v1/health"
+    assert event["status_code"] == 200
+    assert "secret-token" not in json.dumps(event)
+
+
+def test_cloud_api_exposes_operational_metrics(client):
+    client.get("/api/v1/health", headers={"X-Request-ID": "metrics-1"})
+
+    r = client.get("/api/v1/ops/metrics")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["requests_total"] >= 1
+    assert body["status_families"]["2xx"] >= 1
+    assert body["routes"]["GET /api/v1/health"] >= 1
+
+
 def test_admin_endpoints_reject_wrong_secret(client):
     r = client.post("/api/admin/licenses/generate", json={"tier": "pro"}, headers={"X-CSRF-Token": "wrong"})
     assert r.status_code == 403
@@ -85,6 +141,315 @@ def test_admin_logout_revokes_session(client):
     assert r.status_code == 200
     r = client.get("/api/admin/stats", headers=ADMIN)
     assert r.status_code == 401
+
+
+def _add_admin(app_module, email: str, password: str, role: str, *, disabled: bool = False) -> str:
+    admin_id = f"{role}-{email.split('@')[0]}"
+    admins = app_module._load_admins()
+    admins[admin_id] = {
+        "id": admin_id,
+        "email": email,
+        "display_name": email.split("@")[0],
+        "hash": app_module.pwd_ctx.hash(password),
+        "role": role,
+        "mfa_secret": "",
+        "created": app_module._utcnow().isoformat(),
+        "disabled": disabled,
+    }
+    app_module._save_admins(admins)
+    return admin_id
+
+
+def _login_as(client, email: str, password: str) -> dict:
+    r = client.post("/api/admin/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200
+    return {"X-CSRF-Token": r.json()["csrf_token"]}
+
+
+def test_disabled_admin_cannot_login(client, app_module):
+    _add_admin(app_module, "disabled@example.com", "disabled-pass-123", "billing", disabled=True)
+    r = client.post("/api/admin/auth/login", json={
+        "email": "disabled@example.com",
+        "password": "disabled-pass-123",
+    })
+    assert r.status_code == 401
+    assert "disabled@example.com" not in r.text
+
+
+def test_expired_admin_session_is_rejected(client, app_module):
+    sessions = app_module._load_admin_sessions()
+    for session in sessions.values():
+        session["expires_at"] = "2000-01-01T00:00:00"
+    app_module._save_admin_sessions(sessions)
+    r = client.get("/api/admin/stats", headers=ADMIN)
+    assert r.status_code == 401
+
+
+def test_admin_role_boundaries(client, app_module):
+    _add_admin(app_module, "viewer@example.com", "viewer-pass-123", "viewer")
+    viewer = _login_as(client, "viewer@example.com", "viewer-pass-123")
+    assert client.get("/api/admin/stats", headers=viewer).status_code == 200
+    assert client.post("/api/admin/licenses/generate", headers=viewer, json={"tier": "pro"}).status_code == 403
+
+    _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing = _login_as(client, "billing@example.com", "billing-pass-123")
+    assert client.post("/api/admin/licenses/generate", headers=billing, json={"tier": "pro"}).status_code == 200
+    assert client.get("/api/admin/backup", headers=billing).status_code == 403
+
+
+def test_admin_mutation_audit_includes_actor_and_request(client, app_module):
+    _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing = _login_as(client, "billing@example.com", "billing-pass-123")
+    billing["X-Request-ID"] = "req-test-123"
+    r = client.post("/api/admin/licenses/generate", headers=billing, json={"tier": "pro"})
+    assert r.status_code == 200
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    event = next(e for e in audit if e["action"] == "generate_license" and e["request_id"] == "req-test-123")
+    assert event["actor_id"] == "billing-billing"
+    assert event["actor_email"] == "billing@example.com"
+    assert event["actor_role"] == "billing"
+
+    outbox = app_module._load_outbox()
+    outbox_event = next(e for e in outbox if e["event_type"] == "generate_license")
+    assert outbox_event["aggregate_type"] == "audit"
+    assert outbox_event["aggregate_id"] == event["target"]
+    assert outbox_event["request_id"] == "req-test-123"
+    assert outbox_event["payload"]["actor_email"] == "billing@example.com"
+
+
+def test_admin_refresh_rotates_session_and_csrf(client, app_module):
+    old_sessions = app_module._load_admin_sessions()
+    assert len(old_sessions) == 1
+    old_hash = next(iter(old_sessions))
+    old_admin_id = old_sessions[old_hash]["admin_id"]
+    old_csrf = ADMIN["X-CSRF-Token"]
+
+    r = client.post("/api/admin/auth/refresh", headers=ADMIN)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["csrf_token"] != old_csrf
+    sessions = app_module._load_admin_sessions()
+    assert sessions[old_hash]["revoked"] is True
+    live_sessions = [s for s in sessions.values() if not s.get("revoked")]
+    assert len(live_sessions) == 1
+    assert live_sessions[0]["admin_id"] == old_admin_id
+    ADMIN["X-CSRF-Token"] = body["csrf_token"]
+    assert client.get("/api/admin/stats", headers=ADMIN).status_code == 200
+
+
+def test_owner_can_revoke_admin_sessions(client, app_module):
+    from fastapi.testclient import TestClient
+
+    target_id = _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    billing_client = TestClient(app_module.app)
+    billing = _login_as(billing_client, "billing@example.com", "billing-pass-123")
+    assert billing_client.get("/api/admin/stats", headers=billing).status_code == 200
+
+    r = client.post(f"/api/admin/admins/{target_id}/sessions/revoke", headers=ADMIN)
+
+    assert r.status_code == 200
+    assert r.json()["revoked"] >= 1
+    assert billing_client.get("/api/admin/stats", headers=billing).status_code == 401
+
+
+def test_admin_login_lockout_after_repeated_failures(client, app_module):
+    for _ in range(app_module.ADMIN_LOGIN_LOCKOUT_FAILURES):
+        r = client.post("/api/admin/auth/login", json={
+            "email": "admin@example.com",
+            "password": "wrong-password",
+        })
+        assert r.status_code == 401
+
+    locked = client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    })
+
+    assert locked.status_code == 423
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin["failed_login_count"] == app_module.ADMIN_LOGIN_LOCKOUT_FAILURES
+    assert admin["lockout_until"] > app_module._utcnow().isoformat()
+    audit = app_module._load_audit()
+    assert any(e["action"] == "admin_login_lockout" for e in audit)
+
+
+def test_admin_login_lockout_persists_across_app_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-lockout-secret")
+    monkeypatch.setenv("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES", "2")
+    monkeypatch.setenv("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN", "15")
+    monkeypatch.setenv("AUTH_RATE_MAX", "10")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_lockout_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_lockout_b")
+    from fastapi.testclient import TestClient
+
+    bad_login = {"email": "admin@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post("/api/admin/auth/login", json=bad_login).status_code == 401
+        assert first_client.post("/api/admin/auth/login", json=bad_login).status_code == 401
+
+        locked = second_client.post(
+            "/api/admin/auth/login",
+            json={"email": "admin@example.com", "password": "admin-pass-123"},
+        )
+
+        assert locked.status_code == 423
+        assert second._admin_by_email("admin@example.com")["lockout_until"] > second._utcnow().isoformat()
+
+
+def test_admin_successful_login_resets_failed_login_state(client, app_module):
+    admin = app_module._admin_by_email("admin@example.com")
+    admins = app_module._load_admins()
+    admins[admin["id"]]["failed_login_count"] = 2
+    admins[admin["id"]]["lockout_until"] = ""
+    app_module._save_admins(admins)
+
+    r = client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    })
+
+    assert r.status_code == 200
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin.get("failed_login_count", 0) == 0
+    assert admin.get("lockout_until", "") == ""
+
+
+def test_admin_mfa_enrollment_and_login_flow(client, app_module):
+    setup = client.post("/api/admin/auth/mfa/setup", headers=ADMIN)
+    assert setup.status_code == 200
+    secret = setup.json()["secret"]
+    recovery_codes = setup.json()["recovery_codes"]
+    assert len(recovery_codes) == app_module.ADMIN_MFA_RECOVERY_CODE_COUNT
+    assert all(code.startswith("PK-MFA-") for code in recovery_codes)
+
+    code = app_module._totp_code(secret, int(app_module.time.time() // 30))
+    confirm = client.post("/api/admin/auth/mfa/confirm", headers=ADMIN, json={"code": code})
+    assert confirm.status_code == 200
+    assert confirm.json()["enabled"] is True
+    admin = app_module._admin_by_email("admin@example.com")
+    assert admin["mfa_secret"] == secret
+    assert "mfa_pending_secret" not in admin
+    assert all("recovery_codes" not in session for session in app_module._load_admin_sessions().values())
+
+    client.cookies.clear()
+    assert client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+    }).status_code == 401
+    assert client.post("/api/admin/auth/login", json={
+        "email": "admin@example.com",
+        "password": "admin-pass-123",
+        "mfa_code": app_module._totp_code(secret, int(app_module.time.time() // 30)),
+    }).status_code == 200
+
+
+def test_owner_can_reset_admin_mfa(client, app_module):
+    target_id = _add_admin(app_module, "billing@example.com", "billing-pass-123", "billing")
+    admins = app_module._load_admins()
+    admins[target_id]["mfa_secret"] = "JBSWY3DPEHPK3PXP"
+    admins[target_id]["mfa_recovery_hashes"] = ["hash"]
+    app_module._save_admins(admins)
+
+    r = client.post(f"/api/admin/admins/{target_id}/mfa/reset", headers=ADMIN)
+
+    assert r.status_code == 200
+    assert r.json()["reset"] is True
+    target = app_module._load_admins()[target_id]
+    assert target.get("mfa_secret", "") == ""
+    assert target.get("mfa_recovery_hashes", []) == []
+
+
+def test_owner_can_create_update_disable_and_enable_admin_accounts(client, app_module):
+    from fastapi.testclient import TestClient
+
+    create = client.post(
+        "/api/admin/admins",
+        headers=ADMIN,
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+            "role": "support",
+            "display_name": "Support Agent",
+        },
+    )
+    assert create.status_code == 200
+    created = create.json()
+    admin_id = created["id"]
+    assert created["email"] == "support@example.com"
+    assert created["display_name"] == "Support Agent"
+    assert created["role"] == "support"
+    assert created["disabled"] is False
+    assert created["mfa_enabled"] is False
+
+    listing = client.get("/api/admin/admins", headers=ADMIN)
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["count"] >= 2
+    found = next(admin for admin in body["admins"] if admin["id"] == admin_id)
+    assert found["display_name"] == "Support Agent"
+    assert found["session_count"] == 0
+
+    support_client = TestClient(app_module.app)
+    login = support_client.post(
+        "/api/admin/auth/login",
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+        },
+    )
+    assert login.status_code == 200
+    support_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 200
+
+    update = client.patch(
+        f"/api/admin/admins/{admin_id}",
+        headers=ADMIN,
+        json={
+            "display_name": "Support Lead",
+            "role": "admin",
+        },
+    )
+    assert update.status_code == 200
+    assert update.json()["display_name"] == "Support Lead"
+    assert update.json()["role"] == "admin"
+
+    disable = client.post(f"/api/admin/admins/{admin_id}/disable", headers=ADMIN)
+    assert disable.status_code == 200
+    assert disable.json()["ok"] is True
+    assert disable.json()["admin"]["disabled"] is True
+    assert disable.json()["revoked"] >= 1
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 401
+
+    enable = client.post(f"/api/admin/admins/{admin_id}/enable", headers=ADMIN)
+    assert enable.status_code == 200
+    assert enable.json()["ok"] is True
+    assert enable.json()["admin"]["disabled"] is False
+
+    relogin = support_client.post(
+        "/api/admin/auth/login",
+        json={
+            "email": "support@example.com",
+            "password": "support-pass-123",
+        },
+    )
+    assert relogin.status_code == 200
+    support_headers = {"X-CSRF-Token": relogin.json()["csrf_token"]}
+    assert support_client.get("/api/admin/stats", headers=support_headers).status_code == 200
+
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    actions = {event["action"] for event in audit if event.get("target") == admin_id}
+    assert {"admin_create", "admin_update", "admin_disable", "admin_enable"} <= actions
 
 
 # ── License generation ───────────────────────────────────────────
@@ -360,8 +725,60 @@ def test_test_email_no_smtp(client):
     assert "smtp" in body["reason"].lower() or "configured" in body["reason"].lower()
 
 
+def test_email_sender_retries_and_dead_letters_without_body(app_module, monkeypatch):
+    class FailingSMTP:
+        attempts = 0
+
+        def __init__(self, host, port, timeout=None):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def starttls(self):
+            return None
+
+        def login(self, *_):
+            return None
+
+        def sendmail(self, *_):
+            FailingSMTP.attempts += 1
+            raise OSError("smtp down")
+
+    monkeypatch.setattr(app_module, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(app_module, "SMTP_USER", "smtp-user")
+    monkeypatch.setattr(app_module, "SMTP_PASS", "smtp-pass")
+    monkeypatch.setattr(app_module, "FROM_EMAIL", "from@example.com")
+    monkeypatch.setattr(app_module, "SMTP_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(app_module, "SMTP_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(app_module.smtplib, "SMTP", FailingSMTP)
+
+    result = app_module._send_email_html(
+        "to@example.com",
+        "Subject",
+        "<p>secret-html-body</p>",
+        "secret-plain-body",
+    )
+
+    assert result["sent"] is False
+    assert result["reason"] == "dead_lettered"
+    assert FailingSMTP.attempts == 2
+    dead_letters = list(app_module.DEAD_LETTER_DIR.glob("email-*.json"))
+    assert len(dead_letters) == 1
+    text = dead_letters[0].read_text(encoding="utf-8")
+    assert "to@example.com" in text
+    assert "Subject" in text
+    assert "secret-html-body" not in text
+    assert "secret-plain-body" not in text
+
+
 # ── License-CRM E2E flow ─────────────────────────────────────────
-def test_license_crm_e2e_issue_to_contact_to_invite(client):
+def test_license_crm_e2e_issue_to_contact_to_invite(client, app_module):
     """End-to-end: issue trial → appears in /contacts → update stage → resend invite."""
     # 1. Issue a trial license
     r1 = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
@@ -396,11 +813,8 @@ def test_license_crm_e2e_issue_to_contact_to_invite(client):
     assert r3.status_code == 200
     assert r3.json()["updated"] == 1
 
-    # 4. Confirm stage written to license file
-    import json as _json
-    from pathlib import Path
-    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
-    data = _json.loads(licenses_file.read_text())
+    # 4. Confirm stage persisted in the transactional license store
+    data = app_module._load_licenses()
     assert data[key]["stage"] == "converted"
 
     # 5. Trigger resend invite (no SMTP → sent=False, but endpoint should not 500)
@@ -410,9 +824,9 @@ def test_license_crm_e2e_issue_to_contact_to_invite(client):
     assert "sent" in body  # may be False (no SMTP); just verify shape
 
 
-def test_license_crm_auto_expire_flips_status(client):
+def test_license_crm_auto_expire_flips_status(client, app_module):
     """Issuing with a past expires_at and listing should auto-flip status to expired."""
-    # Issue normally then mutate expires_at to past via direct file (simulating time passing)
+    # Issue normally then mutate expires_at to past via the transactional store
     r = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
         "tier": "pro", "email": "exp@x.com", "trial_days": 7,
     })
@@ -420,19 +834,16 @@ def test_license_crm_auto_expire_flips_status(client):
     key = r.json()["key"]
 
     # Force expires_at into the past
-    import json as _json
-    from pathlib import Path
-    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
-    data = _json.loads(licenses_file.read_text())
+    data = app_module._load_licenses()
     data[key]["expires_at"] = "2000-01-01T00:00:00"
-    licenses_file.write_text(_json.dumps(data))
+    app_module._save_licenses(data)
 
     # Hit /contacts which calls _auto_expire
     r2 = client.get("/api/admin/contacts", headers=ADMIN)
     assert r2.status_code == 200
 
     # Reload — status should now be "expired"
-    data2 = _json.loads(licenses_file.read_text())
+    data2 = app_module._load_licenses()
     assert data2[key]["status"] == "expired"
 
 
@@ -457,6 +868,45 @@ def low_rate_limit_app(tmp_path, monkeypatch):
     return importlib.import_module("pushkey_cloud_api")
 
 
+def _load_isolated_cloud_module(name: str):
+    module_globals = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "pushkey_cloud_api.py"),
+        run_name=name,
+    )
+    return type("CloudApiModule", (), module_globals)
+
+
+class _FakeRedisRateLimitClient:
+    def __init__(self):
+        self._records: dict[str, list[float]] = {}
+
+    def ping(self):
+        return True
+
+    def eval(self, script, numkeys, *args):
+        keys = args[:numkeys]
+        now = float(args[numkeys])
+        window_sec = float(args[numkeys + 1])
+        identity_limit = int(args[numkeys + 2])
+        global_limit = int(args[numkeys + 3])
+        cutoff = now - window_sec
+
+        for key, limit in ((keys[0], identity_limit), (keys[1], global_limit)):
+            hits = [hit for hit in self._records.get(key, []) if hit > cutoff]
+            self._records[key] = hits
+            if len(hits) >= limit:
+                return 0
+
+        for key in keys:
+            hits = [hit for hit in self._records.get(key, []) if hit > cutoff]
+            hits.append(now)
+            self._records[key] = hits
+        return 1
+
+    def close(self):
+        return None
+
+
 def test_auth_login_rate_limit(low_rate_limit_app):
     from fastapi.testclient import TestClient
     client = TestClient(low_rate_limit_app.app)
@@ -469,7 +919,24 @@ def test_auth_login_rate_limit(low_rate_limit_app):
     # Third hits the limiter
     r3 = client.post("/api/v1/auth/login", json=body)
     assert r3.status_code == 429
+    assert r3.headers["retry-after"] == str(low_rate_limit_app.AUTH_RATE_WINDOW_SEC)
     assert "try again" in r3.json()["detail"].lower()
+
+
+def test_rate_limit_abuse_alert_is_recorded_without_secret_body(low_rate_limit_app):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(low_rate_limit_app.app)
+    body = {"email": "u@x.com", "password": "secret-password"}
+    client.post("/api/v1/auth/login", json=body)
+    client.post("/api/v1/auth/login", json=body)
+    r3 = client.post("/api/v1/auth/login", json=body)
+
+    assert r3.status_code == 429
+    alerts = low_rate_limit_app.app.state.alerts
+    assert alerts[-1]["type"] == "rate_limit"
+    assert alerts[-1]["path"] == "/api/v1/auth/login"
+    assert "secret-password" not in json.dumps(alerts[-1])
 
 
 def test_auth_register_rate_limit_shares_bucket_with_login(low_rate_limit_app):
@@ -496,7 +963,167 @@ def test_portal_lookup_rate_limit(low_rate_limit_app):
     assert r3.status_code == 429
 
 
+def test_auth_rate_limit_is_shared_across_app_instances(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-auth-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "2")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_b")
+    from fastapi.testclient import TestClient
+
+    body = {"email": "nobody@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post("/api/v1/auth/login", json=body).status_code == 401
+        assert first_client.post("/api/v1/auth/login", json=body).status_code == 401
+
+        third = second_client.post(
+            "/api/v1/auth/register",
+            json={"email": "shared@example.com", "password": "password123"},
+        )
+
+        assert third.status_code == 429
+
+
+def test_auth_rate_limit_uses_shared_redis_backend_across_app_instances(
+    tmp_path, monkeypatch
+):
+    shared_client = _FakeRedisRateLimitClient()
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "shared-redis-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "2")
+    monkeypatch.setenv("AUTH_RATE_WINDOW", "60")
+    monkeypatch.setenv("PUSHKEY_RATE_LIMIT_BACKEND", "redis")
+    monkeypatch.setenv("PUSHKEY_RATE_LIMIT_REDIS_URL", "redis://rate-limit-test/0")
+    for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "FROM_EMAIL"):
+        monkeypatch.setenv(_k, "")
+
+    import redis
+
+    monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: shared_client)
+
+    first = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_redis_a")
+    second = _load_isolated_cloud_module("pushkey_cloud_api_rate_limit_redis_b")
+    from fastapi.testclient import TestClient
+
+    body = {"email": "nobody@example.com", "password": "wrong-password"}
+
+    with TestClient(first.app) as first_client, TestClient(second.app) as second_client:
+        assert first_client.post(
+            "/api/v1/auth/login",
+            json=body,
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        ).status_code == 401
+        assert first_client.post(
+            "/api/v1/auth/login",
+            json=body,
+            headers={"X-Forwarded-For": "198.51.100.25"},
+        ).status_code == 401
+
+        third = second_client.post(
+            "/api/v1/auth/register",
+            json={"email": "shared@example.com", "password": "password123"},
+            headers={"X-Forwarded-For": "192.0.2.44"},
+        )
+
+        assert third.status_code == 429
+        assert all("shared@example.com" not in key for key in shared_client._records)
+        assert all("203.0.113.10" not in key for key in shared_client._records)
+        assert all("198.51.100.25" not in key for key in shared_client._records)
+        assert all("192.0.2.44" not in key for key in shared_client._records)
+
+
 # ── Export ───────────────────────────────────────────────────────
+def test_portal_lookup_returns_sanitized_license_summary(client):
+    key = _make_key(client, tier="starter", email="customer@example.com")
+
+    r = client.post("/api/v1/portal/lookup", json={"license_key": key.lower()})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["key"] == key
+    assert body["tier"] == "starter"
+    assert body["email"] == "customer@example.com"
+    assert "devices" not in body
+    assert "admin_notes" not in body
+
+
+def test_portal_unknown_license_failure_is_privacy_safe(client):
+    _make_key(client, email="real-customer@example.com")
+
+    r = client.post("/api/v1/portal/lookup", json={"license_key": "PRO-DOES-NOT-EXIST"})
+
+    assert r.status_code == 404
+    body = json.dumps(r.json())
+    assert "real-customer@example.com" not in body
+    assert "PRO-" not in body
+
+
+def test_portal_renewal_request_creates_internal_ticket(client):
+    key = _make_key(client, tier="pro", email="renew@example.com")
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        json={"license_key": key, "message": "Please renew my alpha license."},
+    )
+
+    assert r.status_code == 200
+    ticket_id = r.json()["ticket_id"]
+    tickets = client.get("/api/admin/tickets", headers=ADMIN).json()
+    ticket = next(t for t in tickets if t["id"] == ticket_id)
+    assert ticket["type"] == "renewal_request"
+    assert ticket["email"] == "renew@example.com"
+    assert ticket["license_key"] == key
+    assert "Please renew my alpha license." in ticket["message"]
+
+
+def test_portal_renewal_unknown_license_failure_is_privacy_safe(client):
+    real_key = _make_key(client, email="real-renew@example.com")
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        json={"license_key": "PRO-DOES-NOT-EXIST", "message": "renewal please"},
+    )
+
+    assert r.status_code == 404
+    combined = json.dumps(r.json())
+    assert "real-renew@example.com" not in combined
+    assert real_key not in combined
+    assert "PRO-DOES-NOT-EXIST" not in combined
+
+
+def test_portal_renewal_audit_uses_request_context_without_customer_message(client, app_module):
+    key = _make_key(client, tier="pro", email="audit-renew@example.com")
+    secret_message = "renew me but do not put this private support text in audit"
+
+    r = client.post(
+        "/api/v1/portal/request-renewal",
+        headers={"X-Request-ID": "portal-renewal-1"},
+        json={"license_key": key, "message": secret_message},
+    )
+
+    assert r.status_code == 200
+    audit = client.get("/api/admin/audit", headers=ADMIN).json()
+    event = next(e for e in audit if e["action"] == "portal_renewal_request")
+    encoded = json.dumps(event)
+    assert event["target"] == key
+    assert event["request_id"] == "portal-renewal-1"
+    assert "audit-renew@example.com" in encoded
+    assert secret_message not in encoded
+    outbox = json.dumps([e for e in app_module._load_outbox() if e["event_type"] == "portal_renewal_request"])
+    assert secret_message not in outbox
+
+
 def test_csv_export(client):
     _make_key(client, email="ex@x.com")
     r = client.get("/api/admin/export", headers=ADMIN)
@@ -536,6 +1163,12 @@ def test_heartbeat_rate_limit(client, monkeypatch):
     assert r.status_code == 429
 
 
+def test_license_save_persists_transactionally(app_module):
+    app_module._save_licenses({"retry-key": {"status": "active"}})
+
+    assert app_module._load_licenses()["retry-key"]["status"] == "active"
+
+
 def test_heartbeat_requires_license_key(client):
     r = client.post("/v1/heartbeat", json={})
     assert r.status_code == 400
@@ -558,7 +1191,7 @@ def test_password_reset_full_flow(client, app_module):
     r = client.post("/api/v1/auth/request-reset", json={"email": "u@x.com"})
     assert r.status_code == 200
 
-    # Read token from users.json (simulates clicking email link)
+    # Read token from the transactional user store (simulates clicking email link)
     users = app_module._load_users()
     token_hash = users["u@x.com"]["reset_token_hash"]
     assert token_hash is not None
@@ -614,3 +1247,32 @@ def test_backup_returns_tarball(client):
     with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as t:
         names = t.getnames()
         assert "licenses.json" in names
+        assert "outbox.jsonl" in names
+
+
+def test_admin_backup_excludes_zero_knowledge_vault_blobs(client):
+    blob = b"plaintext-looking-secret=sk-admin-backup-leak-check"
+    assert client.post(
+        "/api/v1/auth/register",
+        json={"email": "vault-user@example.com", "password": "correct horse battery staple"},
+    ).status_code == 200
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "vault-user@example.com", "password": "correct horse battery staple"},
+    )
+    assert login.status_code == 200
+    assert client.put(
+        "/api/v1/vault",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+        content=blob,
+    ).status_code == 200
+
+    backup = client.get("/api/admin/backup", headers=ADMIN)
+
+    assert backup.status_code == 200
+    assert blob not in backup.content
+    import tarfile, io
+    with tarfile.open(fileobj=io.BytesIO(backup.content), mode="r:gz") as archive:
+        names = archive.getnames()
+    assert all(not name.startswith("vaults/") for name in names)
+    assert all("vault" not in name.lower() for name in names)

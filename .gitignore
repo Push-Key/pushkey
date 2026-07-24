@@ -43,6 +43,19 @@ build/
 dist/
 *.egg-info/
 *.spec
+# setuptools stages the sdist into <name>-<version>/ at the repo root. Files
+# committed from there make `python -m build` fail on the staging cleanup.
+/pushkey-[0-9]*/
+
+# Test and tooling scratch output
+web-app/test-results/
+web/test-results/
+web-app/.next-start.log
+web-app/.static-server.log
+.playwright-mcp/
+
+# Supabase CLI local link state (internal project identifiers, not for git)
+supabase/.temp/
 
 # Tooling scratch
 .git-rewrite/
@@ -53,9 +66,14 @@ _debug.log
 =*
 
 # Release / test scratch
-release-*.json
+# Anchored to the repo root: this rule is for throwaway release metadata dumps
+# like release-v2.1.0.json. Release evidence and policy under docs/ (for
+# example docs/release-tag-ruleset.json and the branch-protection verification
+# results) must stay tracked.
+/release-*.json
 test_bulk_keys.txt
 test_dashboard_format.txt
 
 # VS Code extension build output
 vscode-pushkey/*.vsix
+.vercel

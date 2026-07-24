@@ -3,6 +3,8 @@ CLI tests — call cmd_* functions directly with Namespace args.
 Vault dir patched to tmp_path; password injected via PUSHKEY_MASTER env var.
 """
 import json
+import os
+import subprocess
 import sys
 from argparse import Namespace
 from datetime import datetime
@@ -11,11 +13,12 @@ from pathlib import Path
 import pytest
 import pushkey_shared
 import pushkey_cli as cli
-from pushkey_vault import save_vault
+from pushkey_vault import load_vault, save_vault
 from pushkey_crypto import _V3_MAGIC, decrypt_data_v3
 
 
 PASSWORD = "cli-test-password"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +55,38 @@ def _vault_with_key():
     }
 
 
+def _subprocess_env(home: Path, password: str | None = PASSWORD) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["USERPROFILE"] = str(home)
+    env["HOME"] = str(home)
+    if password is None:
+        env.pop("PUSHKEY_MASTER", None)
+    else:
+        env["PUSHKEY_MASTER"] = password
+    return env
+
+
+def test_cli_exit_code_constants_are_stable():
+    assert cli.EXIT_OK == 0
+    assert cli.EXIT_USAGE == 2
+    assert cli.EXIT_AUTH == 10
+    assert cli.EXIT_IO == 20
+    assert cli.EXIT_CORRUPTION == 30
+    assert cli.EXIT_NETWORK == 40
+    assert cli.EXIT_INTERRUPTED == 130
+
+
+def test_open_vault_wrong_password_uses_auth_exit(monkeypatch):
+    monkeypatch.setattr(cli, "load_vault", lambda password: (None, None))
+
+    with pytest.raises(SystemExit) as exc:
+        cli._open_vault(Namespace(password="bad"))
+
+    assert exc.value.code == cli.EXIT_AUTH
+
+
 def test_cmd_init_noninteractive_creates_v3_without_printing_recovery(monkeypatch, capsys, tmp_path):
     answers = iter(["new-password", "new-password"])
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(answers))
@@ -65,6 +100,23 @@ def test_cmd_init_noninteractive_creates_v3_without_printing_recovery(monkeypatc
     output = capsys.readouterr().out
     recovery = recovery_file.read_text().strip()
     assert recovery not in output
+    plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
+    assert json.loads(plaintext)["keys"] == {}
+
+
+def test_cmd_init_accepts_explicit_password_without_prompt(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: pytest.fail("prompted"))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+
+    recovery_file = tmp_path / "recovery.txt"
+    cli._cmd_init(str(recovery_file), password="new-password")
+
+    raw = pushkey_shared.VAULT_FILE.read_bytes()
+    recovery = recovery_file.read_text(encoding="ascii").strip()
+    output = capsys.readouterr().out
+    assert recovery not in output
+    vault, _ = load_vault("new-password")
+    assert vault == {}
     plaintext, _ = decrypt_data_v3(raw, recovery_code=recovery)
     assert json.loads(plaintext)["keys"] == {}
 
@@ -90,6 +142,77 @@ def test_cmd_init_noninteractive_requires_recovery_file(monkeypatch, capsys):
     assert exc.value.code == 2
     assert "PUSH-" not in capsys.readouterr().out
     assert not pushkey_shared.VAULT_FILE.exists()
+
+
+def _seed_subprocess_vault(home: Path, password: str = "subproc-password") -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pushkey_vault import save_vault; "
+            "save_vault({'OPENAI_API_KEY': {'value': 'sk-subproc', 'created': '2026-01-01', 'rotated': None, 'provider': 'OpenAI', 'env': 'all', 'projects': [], 'notes': '', 'rotation_count': 0}}, "
+            "          'subproc-password')",
+        ],
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        env=_subprocess_env(home, password=password),
+        timeout=30,
+    )
+    assert completed.returncode == cli.EXIT_OK, completed.stderr
+
+
+def test_subprocess_status_uses_isolated_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_subprocess_vault(home)
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pushkey_cli", "status"],
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        env=_subprocess_env(home, password="subproc-password"),
+        timeout=30,
+    )
+
+    assert completed.returncode == cli.EXIT_OK
+    assert "1 key" in completed.stdout
+    assert "sk-subproc" not in completed.stdout
+
+
+def test_subprocess_add_and_list_use_isolated_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_subprocess_vault(home)
+    env = _subprocess_env(home, password="subproc-password")
+
+    added = subprocess.run(
+        [sys.executable, "-m", "pushkey_cli", "add", "STRIPE_KEY", "sk-stripe"],
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert added.returncode == cli.EXIT_OK
+    assert "Added STRIPE_KEY" in added.stdout
+    assert "sk-stripe" not in added.stdout
+
+    listed = subprocess.run(
+        [sys.executable, "-m", "pushkey_cli", "list", "--json"],
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        env=env,
+        timeout=30,
+    )
+    assert listed.returncode == cli.EXIT_OK
+    rows = json.loads(listed.stdout)
+    names = {row["name"] for row in rows}
+    assert {"OPENAI_API_KEY", "STRIPE_KEY"} <= names
+    assert "sk-subproc" not in listed.stdout
+    assert "sk-stripe" not in listed.stdout
 
 
 def test_v3_cli_mutations_preserve_recovery_unlock(tmp_path):
@@ -130,8 +253,9 @@ def test_cmd_add_new_key(capsys):
 def test_cmd_add_duplicate_exits():
     vault = _vault_with_key()
     args = Namespace(name="OPENAI_API_KEY", value="sk-new", notes=None)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         cli.cmd_add(args, vault, PASSWORD)
+    assert exc.value.code == cli.EXIT_USAGE
 
 
 def test_cmd_add_normalises_name_to_upper(capsys):
@@ -168,8 +292,9 @@ def test_cmd_get_case_insensitive(capsys):
 def test_cmd_get_missing_exits():
     vault = _empty_vault()
     args = Namespace(name="MISSING_KEY", clip=False)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         cli.cmd_get(args, vault, PASSWORD)
+    assert exc.value.code == cli.EXIT_USAGE
 
 
 # ── list ─────────────────────────────────────────────────────────────────────
@@ -307,8 +432,25 @@ def test_cmd_import_ignores_comments(tmp_path, capsys):
 def test_cmd_import_missing_file_exits(tmp_path):
     vault = _empty_vault()
     args = Namespace(file=str(tmp_path / "nonexistent.env"))
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         cli.cmd_import(args, vault, PASSWORD)
+    assert exc.value.code == cli.EXIT_IO
+
+
+def test_completion_bash_outputs_commands(capsys):
+    cli.cmd_completion(Namespace(shell="bash"))
+    out = capsys.readouterr().out
+    assert "complete -F _pushkey_complete pushkey" in out
+    assert "set-backup" in out
+    assert "completion" in out
+
+
+def test_completion_powershell_outputs_commands(capsys):
+    cli.cmd_completion(Namespace(shell="powershell"))
+    out = capsys.readouterr().out
+    assert "Register-ArgumentCompleter" in out
+    assert "'set-backup'" in out
+    assert "'completion'" in out
 
 
 # ── inject ───────────────────────────────────────────────────────────────────
@@ -383,3 +525,44 @@ def test_frozen_app_launcher_reexecutes_binary(monkeypatch):
 
     assert calls["command"] == [cli.sys.executable, "--local-api-server"]
     assert calls["env"]["PUSHKEY_PARENT_PID"] == str(cli.os.getpid())
+
+
+def test_cmd_set_backup_uses_getpass_and_does_not_print_secret(monkeypatch, capsys):
+    vault = _vault_with_key()
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "sk-backup-secret")
+
+    cli.cmd_set_backup(Namespace(name="OPENAI_API_KEY"), vault, PASSWORD)
+
+    out = capsys.readouterr().out
+    assert vault["OPENAI_API_KEY"]["next_value"] == "sk-backup-secret"
+    assert vault["OPENAI_API_KEY"]["next_added"] is not None
+    assert vault["OPENAI_API_KEY"]["dual_rotation"] is True
+    assert "Backup staged for OPENAI_API_KEY" in out
+    assert "sk-backup-secret" not in out
+
+
+def test_cmd_set_backup_missing_key_exits(monkeypatch):
+    vault = _empty_vault()
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "sk-backup-secret")
+
+    with pytest.raises(SystemExit):
+        cli.cmd_set_backup(Namespace(name="MISSING"), vault, PASSWORD)
+
+
+def test_main_parser_accepts_set_backup(monkeypatch):
+    opened = {"called": False}
+
+    def fake_open_vault(args):
+        opened["called"] = True
+        assert args.command == "set-backup"
+        assert args.name == "OPENAI_API_KEY"
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli.sys, "argv", ["pushkey", "set-backup", "OPENAI_API_KEY"])
+    monkeypatch.setattr(cli, "_open_vault", fake_open_vault)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+    assert opened["called"] is True

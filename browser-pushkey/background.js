@@ -3,12 +3,48 @@
 
 const HEALTH_URL = "http://127.0.0.1:7654/health";
 const POLL_MINUTES = 5;
+const MAX_KEYS = 500;
+const VALID_STATUSES = new Set(["healthy", "warning", "critical"]);
+
+function sanitizeText(value, maxLength = 256) {
+  if (value == null) return null;
+  return String(value).slice(0, maxLength);
+}
+
+function sanitizeHealth(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {};
+  }
+
+  const clean = {};
+  for (const [rawName, rawInfo] of Object.entries(payload).slice(0, MAX_KEYS)) {
+    if (!rawInfo || typeof rawInfo !== "object" || Array.isArray(rawInfo)) {
+      continue;
+    }
+    const name = sanitizeText(rawName, 128);
+    const status = VALID_STATUSES.has(rawInfo.status) ? rawInfo.status : "healthy";
+    const daysOld =
+      Number.isFinite(rawInfo.days_old) && rawInfo.days_old >= 0 ? rawInfo.days_old : null;
+    clean[name] = {
+      status,
+      days_old: daysOld,
+      provider: sanitizeText(rawInfo.provider, 64),
+      category: sanitizeText(rawInfo.category, 64),
+      first_used: sanitizeText(rawInfo.first_used, 64),
+      last_used: sanitizeText(rawInfo.last_used, 64),
+      created: sanitizeText(rawInfo.created, 64),
+      rotated: sanitizeText(rawInfo.rotated, 64),
+      rotation_count: Number.isInteger(rawInfo.rotation_count) ? rawInfo.rotation_count : 0,
+    };
+  }
+  return clean;
+}
 
 async function fetchHealth() {
   try {
     const resp = await fetch(HEALTH_URL, { cache: "no-store" });
     if (!resp.ok) return null;
-    return await resp.json();
+    return sanitizeHealth(await resp.json());
   } catch (_) {
     return null;
   }

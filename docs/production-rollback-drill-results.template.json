@@ -1,0 +1,44 @@
+{
+  "generated_at": "<ISO-8601 timestamp>",
+  "verification_scope": "<hosted production>",
+  "environment": {
+    "provider": "<cloud provider>",
+    "region": "<region>",
+    "service": "<service name>",
+    "deployment_commit": "<git sha or release tag>"
+  },
+  "backup": {
+    "database_snapshot_id": "<snapshot id>",
+    "object_storage_version_id": "<version id>",
+    "backup_timestamp": "<ISO-8601 timestamp>",
+    "retention_policy": "<policy summary>"
+  },
+  "rollback": {
+    "bad_deploy_commit": "<git sha or release tag>",
+    "rolled_back_to": "<git sha or release tag>",
+    "rollback_timestamp": "<ISO-8601 timestamp>",
+    "rollback_result": "<success or failure>"
+  },
+  "restore": {
+    "restore_type": "<destructive restore from backup/PITR>",
+    "restore_timestamp": "<ISO-8601 timestamp>",
+    "restored_metadata": true,
+    "restored_encrypted_blobs": true,
+    "record_count_check": "<pass/fail and details>",
+    "hash_reconciliation": "<pass/fail and details>"
+  },
+  "smoke_tests": [
+    "health",
+    "admin_login",
+    "activation",
+    "vault_blob_access"
+  ],
+  "alerts": {
+    "operator": "<name or role>",
+    "delivery_proof": "<ticket, page, or notification reference>",
+    "delivery_blocker": "<why proof is unavailable, if applicable>"
+  },
+  "rpo_seconds": "<measured RPO>",
+  "rto_seconds": "<measured RTO>",
+  "residual_risk": "Replace this template with a real hosted drill record before claiming production readiness."
+}

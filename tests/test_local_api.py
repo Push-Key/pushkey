@@ -121,6 +121,27 @@ def test_lock_clears_session(client, auth):
     assert client.get("/api/status", headers=auth).status_code == 401
 
 
+def test_lifespan_shutdown_clears_session_state(fresh_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(fresh_app.app) as local_client:
+        token = local_client.post(
+            "/api/bootstrap",
+            headers={"Authorization": "Bearer test-launch-token"},
+        ).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        assert local_client.post("/api/init", headers=auth, json={"password": "master-pw"}).status_code == 200
+        assert local_client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
+        assert fresh_app.app.state.session.vault is not None
+        assert fresh_app.app.state.sessions
+
+    assert fresh_app.app.state.session.vault is None
+    assert fresh_app.app.state.session.password is None
+    assert fresh_app.app.state.session.vault_key is None
+    assert fresh_app.app.state.sessions == {}
+    assert fresh_app.app.state.bootstrap_token is None
+
+
 # ── keys read-only ────────────────────────────────────────────────
 def test_keys_blocked_when_locked(client, auth):
     r = client.get("/api/keys", headers=auth)
@@ -483,9 +504,10 @@ def test_create_and_list_project(unlocked, auth, tmp_path):
 def test_create_project_duplicate(unlocked, auth, tmp_path):
     p = str(tmp_path / "p")
     (tmp_path / "p").mkdir()
-    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    first = unlocked.post("/api/projects", headers=auth, json={"path": p})
+    assert first.status_code == 201, first.text
     r = unlocked.post("/api/projects", headers=auth, json={"path": p})
-    assert r.status_code == 409
+    assert r.status_code == 409, r.text
 
 
 def test_create_project_rejects_relative_path(unlocked, auth):
@@ -527,11 +549,16 @@ def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
 def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch, fresh_app):
     project = tmp_path / "project"
     project.mkdir()
-    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
-    unlocked.post(
+    # Assert the setup calls. Ignoring them turns any setup failure into a
+    # confusing "DID NOT RAISE" on the assertion below instead of pointing at
+    # the step that actually broke.
+    created = unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    assert created.status_code == 201, created.text
+    assigned = unlocked.post(
         "/api/projects/assign", headers=auth, params={"path": str(project)},
         json={"keys": ["OPENAI_API_KEY"]},
     )
+    assert assigned.status_code < 400, assigned.text
     original = fresh_app._atomic_project_write
 
     def fail_ignore(registered, filename, data, expected_identity=None):
@@ -605,6 +632,37 @@ def test_project_transaction_rolls_back_config_and_session(unlocked, auth, tmp_p
     monkeypatch.setattr(pushkey_vault, "save_vault", original)
 
 
+def test_failed_vault_save_does_not_clobber_a_concurrent_writers_vault(
+    unlocked, auth, tmp_path, monkeypatch
+):
+    """A vault conflict must not roll the on-disk vault back over a newer one.
+
+    Reproduces the cross-writer loss: the GUI session is unlocked at revision A
+    while a separate process (CLI/MCP) commits revision B; the GUI's next
+    project mutation then fails the revision check. The transaction rollback
+    must leave B on disk, not restore its pre-request snapshot A.
+    """
+    import pushkey_vault
+
+    project = tmp_path / "concurrent-writer"
+    project.mkdir()
+    concurrent_vault = _s.VAULT_FILE.read_bytes() + b"\x00CONCURRENT-COMMIT-B"
+
+    def commit_b_then_conflict(*args, **kwargs):
+        # Stand in for another process committing a newer vault, after which our
+        # revision-checked save detects the conflict instead of overwriting it.
+        _s.VAULT_FILE.write_bytes(concurrent_vault)
+        raise pushkey_vault.VaultConflictError("stale_vault_revision")
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", commit_b_then_conflict)
+    with pytest.raises(pushkey_vault.VaultConflictError):
+        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+
+    assert _s.VAULT_FILE.read_bytes() == concurrent_vault, (
+        "rollback overwrote the concurrently committed vault with a stale snapshot"
+    )
+
+
 def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from pushkey_vault import load_config
@@ -618,7 +676,8 @@ def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_pa
             ),
             projects,
         ))
-    assert [response.status_code for response in responses] == [201, 201]
+    assert [response.status_code for response in responses] == [201, 201], \
+        [(response.status_code, response.text) for response in responses]
     stored = load_config()["projects"]
     assert all(str(project.resolve()) in stored for project in projects)
 
@@ -732,7 +791,9 @@ def test_inject_preview_does_not_write(unlocked, auth, tmp_path):
     r = unlocked.post("/api/projects/inject", headers=auth,
                       params={"path": p, "write": False}, json={})
     body = r.json()
-    assert "OPENAI_API_KEY=sk-original" in body["injected"]
+    assert body["injected"] == ["OPENAI_API_KEY"]
+    assert "sk-original" not in str(body)
+    assert "OPENAI_API_KEY=sk-original" not in str(body)
     assert body["wrote"] is False
     assert not (tmp_path / "proj" / ".env").exists()
 
@@ -755,10 +816,13 @@ def test_inject_skips_existing_env_keys(unlocked, auth, tmp_path):
     p = str(tmp_path / "proj")
     (tmp_path / "proj").mkdir()
     (tmp_path / "proj" / ".env").write_text("OPENAI_API_KEY=preexisting\n", encoding="utf-8")
-    unlocked.post("/api/projects", headers=auth, json={"path": p})
-    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
-                  json={"keys": ["OPENAI_API_KEY"]})
+    r_register = unlocked.post("/api/projects", headers=auth, json={"path": p})
+    assert r_register.status_code == 201, r_register.text
+    r_assign = unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                             json={"keys": ["OPENAI_API_KEY"]})
+    assert r_assign.status_code == 200, r_assign.text
     r = unlocked.post("/api/projects/inject", headers=auth, params={"path": p}, json={})
+    assert r.status_code == 200, r.text
     body = r.json()
     assert body["injected"] == []
     assert "OPENAI_API_KEY" in body["skipped_existing"]

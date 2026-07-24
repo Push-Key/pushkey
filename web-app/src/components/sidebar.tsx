@@ -75,15 +75,17 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
   const renderBadge = (id: Tab) => {
     if (id === "health" && staleCount > 0) {
       return (
-        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-destructive)] px-1.5 text-[10px] font-semibold text-white">
+        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-destructive-strong)] px-1.5 text-[10px] font-semibold text-white">
           {staleCount}
+          <span className="sr-only"> stale keys</span>
         </span>
       );
     }
     if (id === "forecast" && overdueCount > 0) {
       return (
-        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-orange-500 px-1.5 text-[10px] font-semibold text-white">
+        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-warning-strong)] px-1.5 text-[10px] font-semibold text-white">
           {overdueCount}
+          <span className="sr-only"> overdue rotations</span>
         </span>
       );
     }
@@ -91,7 +93,7 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
   };
 
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r bg-[var(--color-card)]">
+    <aside className="flex w-full md:w-56 shrink-0 flex-col border-b bg-[var(--color-card)] md:h-screen md:border-b-0 md:border-r">
       <div className="flex items-center gap-2 px-4 py-4">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="Pushkey" className="h-8 w-8 shrink-0" />
@@ -101,10 +103,13 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
         </div>
       </div>
 
-      <nav className="flex-1 space-y-1 px-2">
+      <nav className="flex-1 space-y-1 px-2" aria-label="Primary navigation">
         {items.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
+            type="button"
+            aria-current={active === id ? "page" : undefined}
+            aria-label={`Open ${label}`}
             onClick={() => onSelect(id)}
             className={cn(
               "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
@@ -122,14 +127,18 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
 
       <div className="border-t p-3 space-y-2">
         <button
+          type="button"
+          aria-label="Lock vault"
           onClick={onLock}
           className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[var(--color-muted-foreground)] hover:bg-[var(--color-muted)] hover:text-[var(--color-destructive)]"
         >
           <Lock className="h-4 w-4" /> Lock vault
         </button>
-        <div className="flex items-center justify-between px-3 text-[10px] text-[var(--color-muted-foreground)]/70">
+        <div className="flex items-center justify-between px-3 text-[10px] text-[var(--color-muted-foreground)]">
           <span>v0.1.0</span>
           <button
+            type="button"
+            aria-label="Open Settings"
             onClick={() => onSelect("settings")}
             className="hover:text-[var(--color-foreground)] hover:underline"
           >

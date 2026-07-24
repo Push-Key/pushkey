@@ -7,7 +7,8 @@
     "build": "next build && node scripts/generate-integrity.mjs",
     "integrity": "node scripts/generate-integrity.mjs",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.6",
@@ -19,17 +20,25 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.454.0",
-    "next": "^16.2.4",
+    "next": "^16.2.11",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "tailwind-merge": "^2.5.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.57.0",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.11",
     "tailwindcss": "^4.0.0",
     "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "^8.5.14",
+    "sharp": "^0.35.3"
   }
 }

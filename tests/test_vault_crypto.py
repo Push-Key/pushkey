@@ -1,7 +1,11 @@
+from datetime import datetime
 from pathlib import Path
 import base64
 import hashlib
 import json
+import os
+
+import pytest
 
 import pushkey
 
@@ -23,7 +27,55 @@ def test_save_and_load_vault_roundtrip(tmp_path: Path, monkeypatch):
     assert bad is None
 
 
-import pytest
+@pytest.mark.parametrize(
+    "vault",
+    [
+        {},
+        {"UNICODE_秘密": {"value": "sk-test-雪", "notes": "emoji-free unicode: café"}},
+        {"EMPTY_VALUE": {"value": "", "created": "", "provider": None, "projects": []}},
+        {
+            "LONG_METADATA": {
+                "value": "x" * 8192,
+                "created": "2026-07-21T12:00:00",
+                "rotated": "2026-07-21T12:30:00",
+                "provider": "Custom",
+                "env": "production",
+                "projects": ["C:/work/project", "\\\\server\\share\\project"],
+                "notes": "line1\nline2\n" + ("metadata " * 200),
+                "rotation_count": 999,
+                "nested": {"labels": ["alpha", "beta"], "enabled": True},
+            }
+        },
+    ],
+)
+def test_vault_round_trips_unusual_metadata(tmp_path, monkeypatch, vault):
+    monkeypatch.setattr(pushkey_shared, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(pushkey_shared, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(pushkey_shared, "SALT_FILE", tmp_path / ".salt")
+
+    save_vault(vault, "password123", recovery_code=generate_recovery_code())
+
+    loaded, vault_key = load_vault("password123")
+    assert loaded == vault
+    assert len(vault_key) == 32
+
+
+def test_vault_files_are_created_with_restrictive_permissions_where_supported(tmp_path, monkeypatch):
+    monkeypatch.setattr(pushkey_shared, "VAULT_DIR", tmp_path)
+    monkeypatch.setattr(pushkey_shared, "VAULT_FILE", tmp_path / "vault.enc")
+    monkeypatch.setattr(pushkey_shared, "SALT_FILE", tmp_path / ".salt")
+
+    save_vault({"K": {"value": "v"}}, "password123", recovery_code=generate_recovery_code())
+
+    if os.name == "nt":
+        assert pushkey_shared.VAULT_FILE.exists()
+        assert pushkey_shared.SALT_FILE.exists()
+        return
+
+    assert (pushkey_shared.VAULT_FILE.stat().st_mode & 0o077) == 0
+    assert (pushkey_shared.SALT_FILE.stat().st_mode & 0o077) == 0
+
+
 import pushkey_shared
 from pushkey_crypto import (
     generate_recovery_code,
@@ -450,6 +502,80 @@ def test_normal_saves_retain_exactly_three_rolling_backups():
         vault["K"]["value"] = str(index)
         save_vault(vault, "pw", vault_key=vault_key)
     assert len(list(_s.VAULT_DIR.glob("vault_backup_*.enc"))) == 3
+
+
+def test_backups_in_the_same_clock_tick_do_not_collide(monkeypatch):
+    # datetime.now() has ~16ms granularity on Windows, so two vault writes in
+    # the same tick previously produced the same backup filename. Exclusive
+    # creation then raised FileExistsError, which the local API surfaced as a
+    # rolled-back 500 for the second of any two rapid vault mutations.
+    import pushkey_shared as _s
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    pushkey_vault._create_rolling_backup(b"first")
+    pushkey_vault._create_rolling_backup(b"second")
+    pushkey_vault._create_rolling_backup(b"third")
+
+    backups = sorted(_s.VAULT_DIR.glob("vault_backup_*.enc"))
+    assert len(backups) == 3
+    assert {path.read_bytes() for path in backups} == {b"first", b"second", b"third"}
+
+
+def test_migration_backups_in_the_same_clock_tick_do_not_collide(monkeypatch):
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    first = pushkey_vault._create_migration_backup(b"first")
+    second = pushkey_vault._create_migration_backup(b"second")
+
+    assert first != second
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+
+
+def test_pruning_is_deterministic_when_backup_timestamps_tie(monkeypatch):
+    # Same-tick backups can also share an mtime. Sorting by mtime alone leaves
+    # the survivors up to dict/glob order, so prune ties break by name.
+    import pushkey_shared as _s
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    for index in range(5):
+        pushkey_vault._create_rolling_backup(str(index).encode())
+    for path in _s.VAULT_DIR.glob("vault_backup_*.enc"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    pushkey_vault._prune_rolling_backups()
+    survivors = sorted(p.name for p in _s.VAULT_DIR.glob("vault_backup_*.enc"))
+
+    assert len(survivors) == 3
+    pushkey_vault._prune_rolling_backups()
+    assert sorted(p.name for p in _s.VAULT_DIR.glob("vault_backup_*.enc")) == survivors
 
 
 def test_failed_normal_replace_does_not_prune_existing_history(monkeypatch):

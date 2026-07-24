@@ -50,33 +50,42 @@ export default function AdminLogin() {
           <div>
             <p className="text-sm font-semibold text-white mb-1">Admin Account</p>
             <p className="text-xs text-[#94A3B8] mb-4">Sign in with an assigned admin account.</p>
+            <label htmlFor="admin-email" className="sr-only">Admin email</label>
             <input
+              id="admin-email"
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
               placeholder="admin@example.com"
+              autoComplete="email"
               className="w-full bg-[#112233] border border-white/8 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors mb-3"
             />
             <div className="relative">
               <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#94A3B8]" />
+              <label htmlFor="admin-password" className="sr-only">Admin password</label>
               <input
+                id="admin-password"
                 type="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
                 placeholder="Password"
+                autoComplete="current-password"
                 className="w-full bg-[#112233] border border-white/8 rounded-lg pl-9 pr-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors"
               />
             </div>
+            <label htmlFor="admin-mfa-code" className="sr-only">MFA code</label>
             <input
+              id="admin-mfa-code"
               inputMode="numeric"
               value={mfaCode}
               onChange={e => setMfaCode(e.target.value)}
               placeholder="MFA code"
+              autoComplete="one-time-code"
               className="w-full bg-[#112233] border border-white/8 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-[#94A3B8]/50 outline-none focus:border-[#00DC82]/50 transition-colors mt-3"
             />
           </div>
 
-          {error && <p className="text-xs text-red-400">{error}</p>}
+          {error && <p className="text-xs text-red-400" role="alert" aria-live="assertive">{error}</p>}
 
           <button
             type="submit"

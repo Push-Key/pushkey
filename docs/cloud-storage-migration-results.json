@@ -1,0 +1,117 @@
+{
+  "boundary": "local-only",
+  "import": {
+    "applied": {
+      "counts": {
+        "licenses": 1,
+        "users": 1,
+        "vault_blobs": 1
+      },
+      "dry_run": false,
+      "hashes": {
+        "vault_blobs": [
+          "2dff74a71c4717a3f1f9639f2c4ea353a970c03e3ce52bd96091803676549f57"
+        ]
+      }
+    },
+    "dry_run": {
+      "counts": {
+        "licenses": 1,
+        "users": 1,
+        "vault_blobs": 1
+      },
+      "dry_run": true,
+      "hashes": {
+        "vault_blobs": [
+          "2dff74a71c4717a3f1f9639f2c4ea353a970c03e3ce52bd96091803676549f57"
+        ]
+      }
+    },
+    "report_exists": true
+  },
+  "legacy_dataset": {
+    "counts": {
+      "licenses": 1,
+      "users": 1,
+      "vault_blobs": 1
+    },
+    "hashes": {
+      "vault_blobs": [
+        "2dff74a71c4717a3f1f9639f2c4ea353a970c03e3ce52bd96091803676549f57"
+      ]
+    }
+  },
+  "migrations": {
+    "applied": {
+      "applied": [
+        "001_core_cloud_schema",
+        "002_constraints_and_indexes",
+        "003_transactional_revision_outbox"
+      ],
+      "dry_run": false
+    },
+    "dry_run": {
+      "applied": [
+        "001_core_cloud_schema",
+        "002_constraints_and_indexes",
+        "003_transactional_revision_outbox"
+      ],
+      "dry_run": true
+    },
+    "status": {
+      "applied": [
+        "001_core_cloud_schema",
+        "002_constraints_and_indexes",
+        "003_transactional_revision_outbox"
+      ],
+      "current": "003_transactional_revision_outbox"
+    }
+  },
+  "restore": {
+    "applied": {
+      "counts": {
+        "licenses": 1,
+        "users": 1,
+        "vault_blobs": 1
+      },
+      "dry_run": false,
+      "hashes": {
+        "vault_blobs": [
+          "2dff74a71c4717a3f1f9639f2c4ea353a970c03e3ce52bd96091803676549f57"
+        ]
+      },
+      "restored_files": [
+        "users.json",
+        "licenses.json",
+        "vaults/sample.enc"
+      ]
+    },
+    "dry_run": {
+      "counts": {
+        "licenses": 1,
+        "users": 1,
+        "vault_blobs": 1
+      },
+      "dry_run": true,
+      "hashes": {
+        "vault_blobs": [
+          "2dff74a71c4717a3f1f9639f2c4ea353a970c03e3ce52bd96091803676549f57"
+        ]
+      },
+      "restored_files": [
+        "users.json",
+        "licenses.json",
+        "vaults/sample.enc"
+      ]
+    },
+    "report_exists": true
+  },
+  "rollback_plan": [
+    "Rollback target: local smoke",
+    "Freeze writes to the migrated storage path.",
+    "Restore the last verified database snapshot and matching transactional metadata.",
+    "Restore encrypted vault blobs from the latest versioned object-storage snapshot.",
+    "Reconcile record counts, etags, and SHA-256 hashes against the smoke report.",
+    "Re-enable reads and writes only after the restored state matches the report."
+  ]
+}

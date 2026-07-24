@@ -5,18 +5,39 @@ function statusClass(status) {
   return status === "critical" ? "red" : status === "warning" ? "amber" : "green";
 }
 
+function clearElement(element) {
+  while (element.firstChild) {
+    element.removeChild(element.firstChild);
+  }
+}
+
+function appendTextElement(parent, tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) {
+    element.className = className;
+  }
+  element.textContent = text;
+  parent.appendChild(element);
+  return element;
+}
+
 function renderList(health) {
   const list = document.getElementById("key-list");
-  list.innerHTML = "";
+  clearElement(list);
+
   if (!health) {
-    list.innerHTML = `
-      <div class="offline">
-        <div class="icon">⚠️</div>
-        <div>Pushkey not running</div>
-        <div style="font-size:11px;margin-top:6px;color:#475569">
-          Launch the Pushkey desktop app to see key health.
-        </div>
-      </div>`;
+    const offline = appendTextElement(list, "div", "offline", "");
+    appendTextElement(offline, "div", "icon", "!");
+    appendTextElement(offline, "div", "", "Pushkey not running");
+    const help = appendTextElement(
+      offline,
+      "div",
+      "",
+      "Launch the Pushkey desktop app to see key health."
+    );
+    help.style.fontSize = "11px";
+    help.style.marginTop = "6px";
+    help.style.color = "#475569";
     return;
   }
 
@@ -28,65 +49,72 @@ function renderList(health) {
     });
 
   if (entries.length === 0) {
-    list.innerHTML = `<div class="offline"><div>No keys match this filter.</div></div>`;
+    const offline = appendTextElement(list, "div", "offline", "");
+    appendTextElement(offline, "div", "", "No keys match this filter.");
     return;
   }
 
   for (const [name, info] of entries) {
     const age = info.days_old != null ? `${info.days_old}d` : "?";
-    const div = document.createElement("div");
-    div.className = "item";
-    div.innerHTML = `
-      <div class="dot ${info.status || "healthy"}"></div>
-      <div class="key-name" title="${name}">${name}</div>
-      <div class="key-age ${statusClass(info.status)}">${age}</div>`;
-    list.appendChild(div);
+    const item = document.createElement("div");
+    item.className = "item";
+    appendTextElement(item, "div", `dot ${info.status || "healthy"}`, "");
+    const nameElement = appendTextElement(item, "div", "key-name", name);
+    nameElement.title = name;
+    appendTextElement(item, "div", `key-age ${statusClass(info.status)}`, age);
+    list.appendChild(item);
   }
 }
 
 function renderStats(counts) {
-  document.getElementById("ct-healthy").textContent = counts?.healthy ?? "—";
-  document.getElementById("ct-warning").textContent = counts?.warning ?? "—";
-  document.getElementById("ct-critical").textContent = counts?.critical ?? "—";
+  document.getElementById("ct-healthy").textContent = counts?.healthy ?? "-";
+  document.getElementById("ct-warning").textContent = counts?.warning ?? "-";
+  document.getElementById("ct-critical").textContent = counts?.critical ?? "-";
 }
 
 function renderTimestamp(ts) {
-  if (!ts) { document.getElementById("last-updated").textContent = "Not synced"; return; }
+  if (!ts) {
+    document.getElementById("last-updated").textContent = "Not synced";
+    return;
+  }
   const d = new Date(ts);
   document.getElementById("last-updated").textContent =
     "Updated " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 async function refresh() {
-  const { health, counts, lastUpdated } = await chrome.storage.local.get(["health","counts","lastUpdated"]);
+  const { health, counts, lastUpdated } = await chrome.storage.local.get([
+    "health",
+    "counts",
+    "lastUpdated",
+  ]);
   currentHealth = health;
   renderStats(counts);
   renderList(health);
   renderTimestamp(lastUpdated);
 }
 
-// Filter buttons
-document.querySelectorAll(".filter-btn").forEach(btn => {
+document.querySelectorAll(".filter-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".filter-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     currentFilter = btn.dataset.filter;
     renderList(currentHealth);
   });
 });
 
-// Refresh button — trigger background poll then re-read storage
 document.getElementById("refresh-btn").addEventListener("click", async () => {
-  document.getElementById("refresh-btn").textContent = "…";
+  document.getElementById("refresh-btn").textContent = "...";
   await chrome.runtime.sendMessage({ action: "poll" }).catch(() => {});
-  await new Promise(r => setTimeout(r, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 1500));
   await refresh();
   document.getElementById("refresh-btn").textContent = "Refresh";
 });
 
-// Handle poll message from background
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "healthUpdated") refresh();
+  if (msg.action === "healthUpdated") {
+    refresh();
+  }
 });
 
 refresh();

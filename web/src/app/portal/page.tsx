@@ -20,10 +20,10 @@ interface PortalLicense {
 
 const TIER_CFG: Record<string, { label: string; icon: string; color: string; bg: string; features: string[] }> = {
   free:       { label: "Free",       icon: "🔲", color: "text-sky-300",     bg: "bg-sky-900/30",    features: ["15 keys", "1 project", "1 device"] },
-  starter:    { label: "Starter",    icon: "🚀", color: "text-violet-300",  bg: "bg-violet-900/30", features: ["50 keys", "3 projects", "Cloud sync", "Git scan"] },
-  pro:        { label: "Pro",        icon: "⚡", color: "text-purple-200",  bg: "bg-purple-900/40", features: ["Unlimited keys", "Unlimited projects", "3 devices", "Cloud sync", "CI sync"] },
-  team:       { label: "Team",       icon: "👥", color: "text-teal-300",    bg: "bg-teal-900/30",   features: ["Unlimited keys", "Unlimited projects", "5 devices", "Team RBAC"] },
-  enterprise: { label: "Enterprise", icon: "🏛️", color: "text-amber-300",   bg: "bg-amber-900/30",  features: ["Unlimited everything", "Hardware MFA", "SSO", "Dynamic secrets"] },
+  starter:    { label: "Starter",    icon: "🚀", color: "text-violet-300",  bg: "bg-violet-900/30", features: ["50 keys", "3 projects", "Encrypted backup beta", "Git scan"] },
+  pro:        { label: "Pro",        icon: "⚡", color: "text-purple-200",  bg: "bg-purple-900/40", features: ["Unlimited keys", "Unlimited projects", "3 devices", "Encrypted backup beta"] },
+  team:       { label: "Team",       icon: "👥", color: "text-teal-300",    bg: "bg-teal-900/30",   features: ["Unlimited keys", "Unlimited projects", "5 devices", "Priority support"] },
+  enterprise: { label: "Enterprise", icon: "🏛️", color: "text-amber-300",   bg: "bg-amber-900/30",  features: ["Unlimited everything", "Admin MFA", "Deployment support"] },
 }
 
 const STATUS_CFG = {

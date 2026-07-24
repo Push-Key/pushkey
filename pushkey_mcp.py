@@ -42,8 +42,10 @@ choice to the user at call time.
 from mcp.server.fastmcp import FastMCP
 
 import pushkey_vault as _vault
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+import re
+from pushkey_env import mutate_env_file
 
 
 def _safe_str(s, max_len: int = 500) -> str:
@@ -57,11 +59,23 @@ def _sanitize_key_value(v: str) -> str:
     """Strip newlines from key values to prevent .env injection."""
     return v.replace("\r", "").replace("\n", "")
 
+
+_KEY_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,255}$")
+
+
+def _valid_key_name(name: str) -> bool:
+    return bool(_KEY_NAME_RE.fullmatch(name or ""))
+
+
+def _key_allows_project(meta: dict, project: str) -> bool:
+    return project in (meta.get("projects") or [])
+
 mcp = FastMCP("pushkey")
 
 # Not thread-safe — designed for single-user stdio transport.
 # SSE mode with concurrent requests can race on _SESSION mutations.
-_SESSION: dict = {}  # keys: vault, vault_key, password, scopes
+SESSION_TIMEOUT_SECONDS = 30 * 60
+_SESSION: dict = {}  # keys: vault, vault_key, password, scopes, last_activity
 
 
 def _get_raw_vault_key() -> bytes:
@@ -80,6 +94,7 @@ def _unlock_with_password(password: str) -> dict:
     _SESSION["vault_key"] = vault_key
     _SESSION["password"] = password
     _SESSION["scopes"] = ["read", "write", "inject"]  # full access
+    _SESSION["last_activity"] = datetime.now()
     return {"success": True, "key_count": len(vault), "auth": "master_password"}
 
 
@@ -95,6 +110,7 @@ def _unlock_with_token(token_value: str) -> dict:
     _SESSION["vault_key"] = vk
     _SESSION["password"] = None  # agent tokens cannot save vault (read-only path by default)
     _SESSION["scopes"] = scopes
+    _SESSION["last_activity"] = datetime.now()
     return {"success": True, "key_count": len(vault), "auth": "agent_token", "scopes": scopes}
 
 
@@ -119,6 +135,14 @@ def _unlock(password: str) -> dict:
 def _require_unlock() -> dict | None:
     if "vault" not in _SESSION:
         return {"error": "vault_locked", "hint": "Call unlock_vault first with master password or agent token"}
+    last_activity = _SESSION.get("last_activity")
+    if last_activity is None:
+        _lock()
+        return {"error": "session_expired", "hint": "Call unlock_vault again"}
+    if datetime.now() - last_activity > timedelta(seconds=SESSION_TIMEOUT_SECONDS):
+        _lock()
+        return {"error": "session_expired", "hint": "Call unlock_vault again"}
+    _SESSION["last_activity"] = datetime.now()
     return None
 
 
@@ -195,6 +219,8 @@ def get_key(name: str) -> dict:
     err = _require_scope("read")
     if err:
         return err
+    if not _valid_key_name(name):
+        return {"error": "invalid key name"}
     vault = _SESSION["vault"]
     if name not in vault:
         return {"error": f"key '{name}' not found"}
@@ -205,6 +231,11 @@ def get_key(name: str) -> dict:
         "provider": _safe_str(meta.get("provider", "Unknown")),
         "env": meta.get("env", "all"),
         "notes": _safe_str(meta.get("notes", "")),
+        "warning": (
+            "Returned value entered the MCP client context and may be retained "
+            "by the client, model provider, transcript, or telemetry. Prefer "
+            "inject_env for local file injection when plaintext display is not required."
+        ),
     }
 
 
@@ -230,6 +261,8 @@ def add_key(
     err = _require_scope("write")
     if err:
         return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
     import pushkey_providers as _prov
     vault = _SESSION["vault"]
     if name in vault and not overwrite:
@@ -282,36 +315,29 @@ def inject_env(project_path: str, keys: list[str] = None) -> dict:
             return {"success": False, "error": "no keys assigned to this project; pass keys=[...] explicitly"}
 
     missing = [k for k in keys if k not in vault]
+    invalid = [k for k in keys if not _valid_key_name(k)]
+    if invalid:
+        return {"success": False, "error": f"invalid key names: {invalid}"}
     if missing:
         return {"success": False, "error": f"keys not in vault: {missing}"}
-
-    env_path = project / ".env"
-    existing_lines = []
-    existing_keys = set()
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            existing_lines.append(line)
-            if "=" in line and not line.startswith("#"):
-                existing_keys.add(line.split("=", 1)[0].strip())
-
-    injected_names = [k for k in keys if k not in existing_keys]
-    new_lines = [f"{k}={_sanitize_key_value(vault[k]['value'])}" for k in injected_names]
-    all_lines = existing_lines + new_lines
-    env_path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
-
-    gitignore_path = project / ".gitignore"
-    gitignore_content = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
-    if ".env" not in gitignore_content.splitlines():
-        with open(gitignore_path, "a", encoding="utf-8") as f:
-            f.write("\n.env\n")
-
-    skipped_names = sorted(existing_keys & set(keys))
+    unassigned = [k for k in keys if not _key_allows_project(vault[k], resolved_project)]
+    if unassigned:
+        return {
+            "success": False,
+            "error": f"project path is not allowlisted for keys: {unassigned}",
+            "hint": "Assign keys to this project path before calling inject_env.",
+        }
+    sanitized = {
+        name: {**vault[name], "value": _sanitize_key_value(vault[name]["value"])}
+        for name in keys
+    }
+    result = mutate_env_file(project, sanitized, key_names=keys, update_existing=False)
     return {
         "success": True,
-        "injected_count": len(injected_names),
-        "injected_names": injected_names,
-        "skipped_count": len(skipped_names),
-        "skipped_existing": skipped_names,
+        "injected_count": len(result.injected_names),
+        "injected_names": result.injected_names,
+        "skipped_count": len(result.skipped_existing),
+        "skipped_existing": result.skipped_existing,
     }
 
 
@@ -372,6 +398,8 @@ def rotate_key(name: str, new_value: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
@@ -412,6 +440,8 @@ def set_backup_key(name: str, backup_value: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
     from pushkey_tiers import can_do
     if not can_do("dual_rotation"):
         return {"success": False, "error": "Dual-key rotation requires Pro or higher. Upgrade at pushkey.dev/pricing."}
@@ -466,6 +496,8 @@ def rotate_to_backup(name: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
@@ -475,7 +507,6 @@ def rotate_to_backup(name: str) -> dict:
     if not meta.get("next_value"):
         return {"success": False, "error": f"'{name}' has no backup key stored — call set_backup_key first"}
 
-    old_value = meta["value"]
     meta["value"] = meta["next_value"]
     meta["rotated"] = datetime.now().strftime("%Y-%m-%d")
     meta["next_value"] = None
@@ -492,7 +523,6 @@ def rotate_to_backup(name: str) -> dict:
         "rotated": meta["rotated"],
         "backup_slot": "empty",
         "action_needed": f"Revoke the old key at your provider, then call set_backup_key('{name}', <new_backup>) to restore the rotation cycle.",
-        "old_value_hint": old_value[:8] + "…" if len(old_value) > 8 else "…",
     }
 
 
@@ -519,6 +549,8 @@ def assign_key(key_name: str, project_path: str) -> dict:
     err = _require_scope("write")
     if err:
         return err
+    if not _valid_key_name(key_name):
+        return {"success": False, "error": "invalid key name"}
     vault = _SESSION["vault"]
     if key_name not in vault:
         return {"success": False, "error": f"key '{key_name}' not found"}

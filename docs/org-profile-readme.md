@@ -24,7 +24,7 @@
 - 🔄 **Rotation tracking** — know exactly when every key was last rotated
 - 💉 **`.env` injection** — writes `.gitignore` guard before it writes anything
 - 🆘 **Recovery key** — regain access without ever storing your password
-- ☁️ **Zero-knowledge sync** — we store ciphertext, never plaintext
+- ☁️ **Encrypted backup beta** — optional ciphertext storage, never plaintext
 - 🖥️ **Desktop app + CLI + VS Code + Chrome** — keys everywhere you work
 
 ---

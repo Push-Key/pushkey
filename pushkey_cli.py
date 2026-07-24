@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pushkey_shared as _s
 from pushkey_crypto import generate_recovery_code, log_event
+from pushkey_env import format_env_value as _format_env_value
+from pushkey_env import mutate_env_file
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
 from pushkey_vault import load_vault, save_vault
 
@@ -34,6 +36,19 @@ C_RED = "\033[91m"
 C_WHITE = "\033[97m"
 C_DIM = "\033[2m"
 C_RESET = "\033[0m"
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_AUTH = 10
+EXIT_IO = 20
+EXIT_CORRUPTION = 30
+EXIT_NETWORK = 40
+EXIT_INTERRUPTED = 130
+CLI_COMMANDS = [
+    "add", "get", "list", "rotate", "set-backup", "delete", "status",
+    "inject", "import", "init", "app", "completion",
+]
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -55,35 +70,11 @@ def _open_vault(args):
     vault, vault_key = load_vault(password)
     if vault is None:
         print("Error: wrong master password", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_AUTH)
     return vault, password, vault_key
 
 
 _ENV_LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
-
-
-def _format_env_value(value):
-    value = str(value) if value is not None else ""
-    needs_quotes = (
-        not value
-        or value[0].isspace()
-        or value[-1].isspace()
-        or any(ch in value for ch in ("\n", "\r", "\t", " ", "#", '"'))
-    )
-    if not needs_quotes:
-        return value
-    escaped = value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _ensure_gitignore(project_dir):
-    gi = Path(project_dir) / ".gitignore"
-    if gi.exists():
-        lines = gi.read_text(encoding="utf-8").splitlines()
-        if ".env" not in lines:
-            gi.write_text(gi.read_text(encoding="utf-8").rstrip() + "\n.env\n", encoding="utf-8")
-    else:
-        gi.write_text(".env\n", encoding="utf-8")
 
 
 # ── commands ──────────────────────────────────────────────────────────────────
@@ -92,7 +83,7 @@ def cmd_add(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name in vault:
         print(f"Error: '{name}' already exists. Use 'rotate' to update.", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_USAGE)
     provider = detect_provider(name, args.value)
     now = datetime.now().isoformat()
     vault[name] = {
@@ -115,7 +106,7 @@ def cmd_get(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_USAGE)
     value = vault[name]["value"]
     if args.clip:
         try:
@@ -187,6 +178,29 @@ def cmd_rotate(args, vault, password, vault_key=None):
     print(f"Rotated {name}")
 
 
+def cmd_set_backup(args, vault, password, vault_key=None):
+    name = args.name.upper()
+    if name not in vault:
+        print(f"Error: '{name}' not found", file=sys.stderr)
+        sys.exit(EXIT_INTERRUPTED)
+    try:
+        backup_value = getpass.getpass(f"Backup value for {name}: ")
+    except (EOFError, KeyboardInterrupt):
+        print("Aborted.", file=sys.stderr)
+        sys.exit(EXIT_INTERRUPTED)
+    if not backup_value:
+        print("Error: backup value cannot be empty", file=sys.stderr)
+        sys.exit(1)
+
+    info = vault[name]
+    info["next_value"] = backup_value
+    info["next_added"] = datetime.now().isoformat()
+    info["dual_rotation"] = True
+    save_vault(vault, password, vault_key=vault_key)
+    log_event(f"cli: set backup for {name}")
+    print(f"Backup staged for {name}")
+
+
 def cmd_delete(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name not in vault:
@@ -237,42 +251,21 @@ def cmd_inject(args, vault, password, vault_key=None):
             print("Assign keys via the GUI, or use --all to inject all keys.")
             sys.exit(0)
 
-    env_path = project / ".env"
-    if env_path.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        shutil.copy2(str(env_path), str(env_path.with_name(f".env.pushkey_backup_{ts}")))
-
-    existing_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    updated = set()
-    new_lines = []
-    for line in existing_lines:
-        m = _ENV_LINE.match(line)
-        if m and m.group(1) in keys_to_write:
-            key = m.group(1)
-            new_lines.append(f"{key}={_format_env_value(keys_to_write[key]['value'])}")
-            updated.add(key)
-        else:
-            new_lines.append(line)
-
-    new_keys = {k: v for k, v in keys_to_write.items() if k not in updated}
-    if new_keys:
-        if new_lines and new_lines[-1].strip():
-            new_lines.append("")
-        new_lines.append("# Managed by Pushkey")
-        for k in sorted(new_keys):
-            new_lines.append(f"{k}={_format_env_value(new_keys[k]['value'])}")
-
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    _ensure_gitignore(project)
+    result = mutate_env_file(
+        project,
+        keys_to_write,
+        update_existing=True,
+        backup_existing=True,
+    )
     log_event(f"cli: injected {len(keys_to_write)} keys into {project}")
-    print(f"Wrote {len(keys_to_write)} key(s) to {env_path}")
+    print(f"Wrote {result.changed_count} key(s) to {result.env_file}")
 
 
 def cmd_import(args, vault, password, vault_key=None):
     path = Path(args.file)
     if not path.exists():
         print(f"Error: '{path}' not found", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_IO)
     content = path.read_text(encoding="utf-8")
     now = datetime.now().isoformat()
     added = skipped = 0
@@ -307,6 +300,33 @@ def cmd_import(args, vault, password, vault_key=None):
     print(f"Imported {added} key(s), skipped {skipped} existing")
 
 
+def cmd_completion(args):
+    commands = " ".join(CLI_COMMANDS)
+    if args.shell == "bash":
+        print(
+            "_pushkey_complete() {\n"
+            "  local cur=\"${COMP_WORDS[COMP_CWORD]}\"\n"
+            f"  COMPREPLY=( $(compgen -W \"{commands}\" -- \"$cur\") )\n"
+            "}\n"
+            "complete -F _pushkey_complete pushkey"
+        )
+        return
+    if args.shell == "powershell":
+        quoted = ", ".join(f"'{command}'" for command in CLI_COMMANDS)
+        print(
+            "Register-ArgumentCompleter -Native -CommandName pushkey -ScriptBlock {\n"
+            "  param($wordToComplete)\n"
+            f"  $commands = @({quoted})\n"
+            "  $commands | Where-Object { $_ -like \"$wordToComplete*\" } | ForEach-Object {\n"
+            "    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)\n"
+            "  }\n"
+            "}"
+        )
+        return
+    print(f"Error: unsupported shell '{args.shell}'", file=sys.stderr)
+    sys.exit(EXIT_USAGE)
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -337,6 +357,9 @@ def main():
     p_rotate.add_argument("name")
     p_rotate.add_argument("new_value", nargs="?", default=None, help="New value (prompted if omitted)")
 
+    p_set_backup = sub.add_parser("set-backup", help="Stage a backup key value")
+    p_set_backup.add_argument("name")
+
     p_delete = sub.add_parser("delete", help="Delete a key")
     p_delete.add_argument("name")
     p_delete.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
@@ -356,6 +379,8 @@ def main():
         help="Required for non-interactive init; recovery code is written atomically",
     )
     sub.add_parser("app", help="Launch web UI in browser")
+    p_completion = sub.add_parser("completion", help="Print shell completion script")
+    p_completion.add_argument("shell", choices=["bash", "powershell"])
 
     args = parser.parse_args()
 
@@ -363,10 +388,14 @@ def main():
         return _repl(args)
 
     if args.command == "init":
-        return _cmd_init(args.recovery_file)
+        init_password = os.environ.get("PUSHKEY_MASTER") or args.password
+        return _cmd_init(args.recovery_file, password=init_password)
 
     if args.command == "app":
         return _cmd_app(blocking=True)
+
+    if args.command == "completion":
+        return cmd_completion(args)
 
     vault, password, vault_key = _open_vault(args)
 
@@ -375,6 +404,7 @@ def main():
         "get":    cmd_get,
         "list":   cmd_list,
         "rotate": cmd_rotate,
+        "set-backup": cmd_set_backup,
         "delete": cmd_delete,
         "status": cmd_status,
         "inject": cmd_inject,
@@ -410,26 +440,29 @@ def _write_recovery_file(path, recovery_code):
     return destination
 
 
-def _cmd_init(recovery_file=None):
+def _cmd_init(recovery_file=None, password=None):
     _s.ensure_vault_dir()
     if _s.VAULT_FILE.exists():
         print(f"{C_RED}Vault already exists at {_s.VAULT_FILE}{C_RESET}", file=sys.stderr)
         sys.exit(1)
-    try:
-        pw1 = getpass.getpass("Choose master password (>=8 chars): ")
-        if len(pw1) < 8:
-            print(f"{C_RED}Password too short.{C_RESET}", file=sys.stderr)
+    if password is not None:
+        pw1 = password
+    else:
+        try:
+            pw1 = getpass.getpass("Choose master password (>=8 chars): ")
+            pw2 = getpass.getpass("Confirm password: ")
+        except (EOFError, KeyboardInterrupt):
+            print("Aborted.", file=sys.stderr)
             sys.exit(1)
-        pw2 = getpass.getpass("Confirm password: ")
-    except (EOFError, KeyboardInterrupt):
-        print("Aborted.", file=sys.stderr)
-        sys.exit(1)
-    if pw1 != pw2:
-        print(f"{C_RED}Passwords do not match.{C_RESET}", file=sys.stderr)
+        if pw1 != pw2:
+            print(f"{C_RED}Passwords do not match.{C_RESET}", file=sys.stderr)
+            sys.exit(1)
+    if len(pw1) < 8:
+        print(f"{C_RED}Password too short.{C_RESET}", file=sys.stderr)
         sys.exit(1)
     recovery_code = generate_recovery_code()
     recovery_destination = None
-    if _stdin_is_interactive():
+    if _stdin_is_interactive() and not recovery_file:
         print(
             "\nRecovery code (store this offline; it is the only way to reset "
             "a forgotten password):"
@@ -521,7 +554,7 @@ def _cmd_app(blocking=False):
     ready = False
     for _ in range(20):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
+            _s.urlopen_checked(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
             ready = True
             break
         except Exception:
@@ -722,7 +755,9 @@ def _copy_to_clipboard(text):
         pass
     if sys.platform.startswith("win"):
         try:
-            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE, shell=True)
+            # No shell=True: the command is a fixed list, so the shell added
+            # nothing but an injection surface if this ever became dynamic.
+            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
             p.communicate(input=text.encode("utf-16le"))
             return True
         except Exception:

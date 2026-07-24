@@ -188,24 +188,56 @@ def _fsync_parent(path) -> None:
         os.close(fd)
 
 
-def _create_rolling_backup(raw: bytes) -> None:
+#: Upper bound on same-timestamp backup filenames before giving up. Far above
+#: any real burst; exists so a pathological directory cannot spin forever.
+_MAX_BACKUP_NAME_ATTEMPTS = 1000
+
+
+def _write_backup(prefix: str, raw: bytes):
+    """Exclusively create a uniquely named backup file and return its path.
+
+    Backups are always created exclusively so an existing backup can never be
+    clobbered. The timestamp alone is not unique enough to rely on for that:
+    `datetime.now()` has roughly 16ms granularity on Windows, so two vault
+    writes inside the same clock tick produce the same filename. That used to
+    raise FileExistsError out of the save path, which the local API turned into
+    a rolled-back 500 for the second of any two rapid vault mutations. Break
+    same-tick ties with a counter suffix instead of failing.
+    """
     ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    backup = _s.VAULT_DIR / f"vault_backup_{ts}.enc"
-    with backup.open("xb") as handle:
-        handle.write(raw)
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.chmod(backup, 0o600)
-    except OSError:
-        pass
-    _fsync_parent(_s.VAULT_DIR)
+    for attempt in range(_MAX_BACKUP_NAME_ATTEMPTS):
+        suffix = "" if attempt == 0 else f"_{attempt:03d}"
+        backup = _s.VAULT_DIR / f"{prefix}_{ts}{suffix}.enc"
+        try:
+            handle = backup.open("xb")
+        except FileExistsError:
+            continue
+        with handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass
+        _fsync_parent(_s.VAULT_DIR)
+        return backup
+    raise FileExistsError(
+        f"could not allocate a unique {prefix} filename after "
+        f"{_MAX_BACKUP_NAME_ATTEMPTS} attempts"
+    )
+
+
+def _create_rolling_backup(raw: bytes) -> None:
+    _write_backup("vault_backup", raw)
 
 
 def _prune_rolling_backups() -> None:
+    # Same-tick backups can share an mtime, so break ties by name. Without the
+    # tie-break, which three of a tied set survive depends on glob order.
     backups = sorted(
         _s.VAULT_DIR.glob("vault_backup_*.enc"),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: (p.stat().st_mtime, p.name),
         reverse=True,
     )
     for old in backups[3:]:
@@ -214,18 +246,7 @@ def _prune_rolling_backups() -> None:
 
 def _create_migration_backup(raw: bytes):
     """Persist the exact pre-migration vault bytes and return the backup path."""
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    backup = _s.VAULT_DIR / f"vault_migration_backup_{ts}.enc"
-    with backup.open("xb") as handle:
-        handle.write(raw)
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.chmod(backup, 0o600)
-    except OSError:
-        pass
-    _fsync_parent(_s.VAULT_DIR)
-    return backup
+    return _write_backup("vault_migration_backup", raw)
 
 
 def migrate_vault_to_v3(password: str, recovery_code: str):

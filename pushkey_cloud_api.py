@@ -5,7 +5,7 @@ Zero-knowledge: server stores only the encrypted vault blob.
 It never sees plaintext keys. Auth is email + password (hashed).
 
 Requirements:
-    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt python-jose[cryptography]
+    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt PyJWT
 
 Run:
     uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
@@ -17,12 +17,28 @@ import hashlib
 import hmac
 import html as _html
 import json
+import logging
 import os
 import secrets
+import smtplib
 import threading
 import time
 import base64
+import tempfile
+from collections import Counter, deque
 from pathlib import Path
+import sqlite3
+
+from sqlalchemy import Column, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import NullPool
+
+try:
+    import redis as redis_lib
+except ImportError:  # pragma: no cover - optional in local/dev installs
+    redis_lib = None
 
 # Load .env if present
 _env_file = Path(__file__).parent / ".env"
@@ -32,7 +48,6 @@ if _env_file.exists():
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from pushkey_shared import TIERS as PRODUCT_TIERS
 
@@ -40,22 +55,53 @@ def _utcnow() -> datetime:
     """Replacement for deprecated datetime.utcnow() — returns naive UTC datetime."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
+def _epoch(moment: datetime) -> int:
+    """Convert a naive-UTC datetime from _utcnow() to a correct Unix timestamp.
+
+    datetime.timestamp() interprets a naive datetime as *local* time, so calling
+    it directly on a _utcnow() result shifts the value by the machine's UTC
+    offset. JWT `iat` and `exp` were being stamped that far off: hours into the
+    future west of UTC, into the past east of it. python-jose never validated
+    `iat`, so it went unnoticed; a token minted on a UTC+X host would simply
+    have expired X hours early.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
+
 try:
     from fastapi import FastAPI, HTTPException, Depends, Request, Header, Cookie
     from fastapi.responses import JSONResponse, Response
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.middleware.trustedhost import TrustedHostMiddleware
     from passlib.context import CryptContext
-    from jose import jwt, JWTError
+    # PyJWT, not python-jose. python-jose depends on `ecdsa`, which carries
+    # PYSEC-2026-1325 with no fix version available, so pip-audit can never go
+    # green while it is installed. PyJWT depends only on `cryptography`, which
+    # is already a direct dependency. Tokens are unaffected: same HS256, same
+    # registered claims, so tokens issued by either library validate under the
+    # other.
+    import jwt
+    from jwt import PyJWTError as JWTError
 except ImportError:
     raise SystemExit(
-        "Missing deps — run:\n  pip install fastapi uvicorn[standard] passlib[bcrypt] python-jose[cryptography]"
+        "Missing deps — run:\n  pip install fastapi uvicorn[standard] passlib[argon2] bcrypt PyJWT"
     )
 
 # ── Config ──────────────────────────────────────────────────────
 DATA_DIR  = Path(os.environ.get("PUSHKEY_DATA_DIR", "~/.pushkey-cloud")).expanduser()
 ALGORITHM = "HS256"
-TOKEN_TTL = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "720"))  # 30 days
+TOKEN_TTL_HOURS = int(os.environ.get("PUSHKEY_TOKEN_TTL_HOURS", "1"))
+TOKEN_ISSUER = os.environ.get("PUSHKEY_TOKEN_ISSUER", "pushkey-cloud")
+TOKEN_AUDIENCE = os.environ.get("PUSHKEY_TOKEN_AUDIENCE", "pushkey-user-api")
+_cloud_metadata_url = os.environ.get("PUSHKEY_CLOUD_DATABASE_URL", "").strip()
+if not _cloud_metadata_url:
+    _candidate_metadata_url = os.environ.get("DATABASE_URL", "").strip()
+    if _candidate_metadata_url.lower().startswith("postgres"):
+        _cloud_metadata_url = _candidate_metadata_url
+CLOUD_METADATA_URL = _cloud_metadata_url
 
 _DEV_MODE  = os.environ.get("PUSHKEY_ENV", "production").lower() in ("development", "dev", "local")
 SECRET_KEY = os.environ.get("PUSHKEY_JWT_SECRET", "")
@@ -71,39 +117,153 @@ if not SECRET_KEY:
         )
 
 DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-USERS_FILE = DATA_DIR / "users.json"
-VAULTS_DIR = DATA_DIR / "vaults"
-VAULTS_DIR.mkdir(exist_ok=True)
-
-pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
-bearer  = HTTPBearer()
-app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+VAULT_STORE_DB = DATA_DIR / "vaults.sqlite"
+VAULT_OBJECTS_DIR = DATA_DIR / "vault_objects"
+LEGACY_VAULTS_DIR = DATA_DIR / "vaults"
+RATE_LIMIT_DB = DATA_DIR / "rate_limits.sqlite"
+MAX_REQUEST_BYTES = int(os.environ.get("PUSHKEY_MAX_REQUEST_BYTES", str(1024 * 1024)))
+TRUSTED_HOSTS = [
+    host.strip()
+    for host in os.environ.get("PUSHKEY_TRUSTED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    if host.strip()
+]
+ALLOWED_CORS_ORIGINS = [
+    origin
+    for origin in [
         "http://localhost:3000",
         "http://localhost:3001",
         "https://www.push-key.com",
         "https://push-key.com",
-        os.environ.get("ADMIN_ORIGIN", ""),
+        os.environ.get("ADMIN_ORIGIN", "").strip(),
+    ]
+    if origin
+]
+if MAX_REQUEST_BYTES <= 0:
+    raise RuntimeError("PUSHKEY_MAX_REQUEST_BYTES must be greater than zero")
+VAULT_OBJECTS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated=["bcrypt"])
+bearer  = HTTPBearer()
+app     = FastAPI(title="Pushkey Cloud Sync", docs_url=None, redoc_url=None)
+app.state.request_logs = deque(maxlen=1000)
+app.state.metrics = {
+    "requests_total": 0,
+    "status_families": Counter(),
+    "routes": Counter(),
+}
+app.state.idempotency_cache = {}
+app.state.alerts = deque(maxlen=1000)
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "If-Match",
+        "If-None-Match",
+        "X-CSRF-Token",
+        "X-Device-ID",
+        "X-Idempotency-Key",
+        "X-Request-ID",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    expose_headers=["ETag", "X-Request-ID"],
 )
 
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    headers = dict(exc.headers or {})
+    if exc.status_code == 429:
+        path = request.url.path
+        retry_after = RATE_LIMIT_WINDOW_SEC
+        if path.startswith("/api/v1/auth") or path.startswith("/api/admin/auth"):
+            retry_after = AUTH_RATE_WINDOW_SEC
+        elif path.startswith("/api/portal"):
+            retry_after = PORTAL_RATE_WINDOW_SEC
+        headers.setdefault("Retry-After", str(retry_after))
+        app.state.alerts.append(
+            {
+                "ts": _utcnow().isoformat(),
+                "type": "rate_limit",
+                "path": path,
+                "method": request.method,
+                "client": request.client.host if request.client else "unknown",
+                "request_id": request.headers.get("X-Request-ID", ""),
+            }
+        )
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=headers)
+
+
+@app.middleware("http")
+async def _cloud_security_boundary(request: Request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("X-Request-ID") or secrets.token_hex(8)
+    request.state.request_id = request_id
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                response.headers["X-Request-ID"] = request_id
+                return response
+        except ValueError:
+            response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            response.headers["X-Request-ID"] = request_id
+            return response
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", request_id)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    status_family = f"{response.status_code // 100}xx"
+    route_key = f"{request.method} {request.url.path}"
+    app.state.metrics["requests_total"] += 1
+    app.state.metrics["status_families"][status_family] += 1
+    app.state.metrics["routes"][route_key] += 1
+    app.state.request_logs.append(
+        {
+            "ts": _utcnow().isoformat(),
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            "client": request.client.host if request.client else "unknown",
+        }
+    )
+    return response
+
 # ── Admin config ─────────────────────────────────────────────────
-LICENSES_FILE = DATA_DIR / "licenses.json"
-ADMINS_FILE = DATA_DIR / "admins.json"
-ADMIN_SESSIONS_FILE = DATA_DIR / "admin_sessions.json"
 ADMIN_BOOTSTRAP_EMAIL = os.environ.get("PUSHKEY_ADMIN_EMAIL", "").strip().lower()
 ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
 ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
 ADMIN_SESSION_TTL_MIN = int(os.environ.get("PUSHKEY_ADMIN_SESSION_TTL_MIN", "30"))
 ADMIN_COOKIE_SECURE = os.environ.get("PUSHKEY_ADMIN_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"}
+ADMIN_LOGIN_LOCKOUT_FAILURES = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES", "3"))
+ADMIN_LOGIN_LOCKOUT_MIN = int(os.environ.get("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN", "15"))
+ADMIN_MFA_RECOVERY_CODE_COUNT = int(os.environ.get("PUSHKEY_ADMIN_MFA_RECOVERY_CODE_COUNT", "8"))
+ADMIN_ROLE_PERMISSIONS = {
+    "viewer": {"read"},
+    "support": {"read", "support"},
+    "billing": {"read", "billing"},
+    "admin": {"read", "support", "billing", "settings"},
+    "owner": {"read", "support", "billing", "settings", "backup", "admins"},
+}
 if ADMIN_SESSION_TTL_MIN <= 0:
     raise RuntimeError("PUSHKEY_ADMIN_SESSION_TTL_MIN must be greater than zero")
+if ADMIN_LOGIN_LOCKOUT_FAILURES <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_FAILURES must be greater than zero")
+if ADMIN_LOGIN_LOCKOUT_MIN <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_LOGIN_LOCKOUT_MIN must be greater than zero")
+if ADMIN_MFA_RECOVERY_CODE_COUNT <= 0:
+    raise RuntimeError("PUSHKEY_ADMIN_MFA_RECOVERY_CODE_COUNT must be greater than zero")
 if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
     if _DEV_MODE:
         ADMIN_BOOTSTRAP_EMAIL = ADMIN_BOOTSTRAP_EMAIL or "admin@localhost"
@@ -115,6 +275,11 @@ if not ADMIN_BOOTSTRAP_EMAIL or not ADMIN_BOOTSTRAP_PASSWORD:
             "Generate a password: python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
             "For local dev only, set PUSHKEY_ENV=development to bypass this check.\n"
         )
+TOKEN_SIGNING_KEYS = [
+    key.strip()
+    for key in (SECRET_KEY + "," + os.environ.get("PUSHKEY_JWT_PREVIOUS_SECRETS", "")).split(",")
+    if key.strip()
+]
 _KNOWN_PREFIXES = {"free": "FREE", "starter": "STRT", "pro": "PRO", "team": "TEAM", "enterprise": "ENT"}
 TIER_PREFIXES = {tier: _KNOWN_PREFIXES[tier] for tier in PRODUCT_TIERS}
 DEVICE_LIMITS = {
@@ -126,56 +291,276 @@ if DEVICE_TOKEN_TTL_DAYS <= 0:
 DEVICE_TOKEN_VERSION = 1
 DEVICE_TOKEN_AUDIENCE = "pushkey-device-license-v1"
 _LICENSE_LOCK = threading.RLock()
+_ADMIN_SESSION_LOCK = threading.RLock()
+_USER_LOCK = threading.RLock()
+
+_OPS_METADATA = MetaData()
+
+_OPS_DOCUMENTS = Table(
+    "cloud_documents",
+    _OPS_METADATA,
+    Column("name", String, primary_key=True),
+    Column("payload_json", Text, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+_OPS_EVENTS = Table(
+    "cloud_events",
+    _OPS_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("stream_name", String, nullable=False),
+    Column("payload_json", Text, nullable=False),
+    Column("created_at", String, nullable=False),
+)
+
+Index("idx_cloud_events_stream_id", _OPS_EVENTS.c.stream_name, _OPS_EVENTS.c.id)
 
 
-# ── User store (flat JSON, fine for <1000 users) ─────────────────
+class _CloudStateStore:
+    def __init__(self, db_path: Path, *, metadata_url: str | None = None):
+        self.db_path = db_path
+        self._metadata_url = metadata_url
+        self._lock = threading.RLock()
+        self._engine = self._build_engine()
+        self._dialect_name = self._engine.dialect.name
+        _OPS_METADATA.create_all(self._engine)
+
+    def _build_engine(self):
+        url = _vault_database_url(self.db_path, self._metadata_url)
+        options = {"poolclass": NullPool, "future": True}
+        if url.startswith("sqlite"):
+            options["connect_args"] = {"check_same_thread": False}
+        return create_engine(url, **options)
+
+    def _connect(self):
+        return self._engine.connect()
+
+    def _dialect_insert(self, table):
+        if self._dialect_name == "postgresql":
+            return pg_insert(table)
+        if self._dialect_name == "sqlite":
+            return sqlite_insert(table)
+        raise RuntimeError(f"Unsupported database dialect: {self._dialect_name}")
+
+    def load_document(self, name: str, default_factory) -> dict | list:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    select(_OPS_DOCUMENTS.c.payload_json).where(_OPS_DOCUMENTS.c.name == name)
+                ).mappings().first()
+                if not row:
+                    return default_factory()
+                payload = row["payload_json"]
+                if not payload or not str(payload).strip():
+                    return default_factory()
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    return default_factory()
+
+    def save_document(self, name: str, data: dict | list) -> None:
+        payload = json.dumps(data, indent=2)
+        now = _utcnow().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": payload,
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[_OPS_DOCUMENTS.c.name],
+                        set_={
+                            "payload_json": stmt.excluded.payload_json,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    conn.execute(stmt)
+
+    def insert_document_if_absent(self, name: str, data: dict | list) -> None:
+        payload = json.dumps(data, indent=2)
+        now = _utcnow().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": payload,
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_nothing(
+                        index_elements=[_OPS_DOCUMENTS.c.name]
+                    )
+                    conn.execute(stmt)
+
+    def mutate_document(self, name: str, default_factory, mutator):
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    row = conn.execute(
+                        select(_OPS_DOCUMENTS.c.payload_json)
+                        .where(_OPS_DOCUMENTS.c.name == name)
+                        # Row lock so concurrent multi-worker mutations on
+                        # PostgreSQL serialize instead of last-write-wins;
+                        # SQLite ignores FOR UPDATE (single-writer already).
+                        .with_for_update()
+                    ).mappings().first()
+                    if not row:
+                        data = default_factory()
+                    else:
+                        payload = row["payload_json"]
+                        if not payload or not str(payload).strip():
+                            data = default_factory()
+                        else:
+                            try:
+                                data = json.loads(payload)
+                            except json.JSONDecodeError:
+                                data = default_factory()
+                    result = mutator(data)
+                    now = _utcnow().isoformat()
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": json.dumps(data, indent=2),
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[_OPS_DOCUMENTS.c.name],
+                        set_={
+                            "payload_json": stmt.excluded.payload_json,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    conn.execute(stmt)
+                    return result
+
+    def append_event(self, stream_name: str, entry: dict) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    conn.execute(
+                        self._dialect_insert(_OPS_EVENTS).values(
+                            {
+                                "stream_name": stream_name,
+                                "payload_json": json.dumps(entry),
+                                "created_at": _utcnow().isoformat(),
+                            }
+                        )
+                    )
+
+    def load_events(self, stream_name: str, limit: int | None = None) -> list[dict]:
+        with self._lock:
+            with self._connect() as conn:
+                stmt = select(_OPS_EVENTS.c.id, _OPS_EVENTS.c.payload_json).where(
+                    _OPS_EVENTS.c.stream_name == stream_name
+                )
+                if limit is not None:
+                    stmt = stmt.order_by(_OPS_EVENTS.c.id.desc()).limit(limit)
+                else:
+                    stmt = stmt.order_by(_OPS_EVENTS.c.id)
+                rows = conn.execute(stmt).mappings().all()
+                if limit is not None:
+                    rows = list(reversed(rows))
+                out: list[dict] = []
+                for row in rows:
+                    try:
+                        out.append(json.loads(row["payload_json"]))
+                    except Exception:
+                        logging.warning(
+                            "Skipping corrupt event row (stream=%s, id=%s)",
+                            stream_name,
+                            row["id"],
+                        )
+                return out
+
+
 def _load_users() -> dict:
-    if not USERS_FILE.exists():
-        return {}
-    return json.loads(USERS_FILE.read_text())
+    with _USER_LOCK:
+        return _STATE_STORE.load_document("users", dict)
 
 def _save_users(users: dict) -> None:
-    USERS_FILE.write_text(json.dumps(users, indent=2))
+    with _USER_LOCK:
+        _STATE_STORE.save_document("users", users)
 
 
 # ── JWT helpers ──────────────────────────────────────────────────
 def _create_token(email: str) -> str:
-    exp = _utcnow() + timedelta(hours=TOKEN_TTL)
-    return jwt.encode({"sub": email, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
+    now = _utcnow()
+    exp = now + timedelta(hours=TOKEN_TTL_HOURS)
+    return jwt.encode(
+        {
+            "iss": TOKEN_ISSUER,
+            "aud": TOKEN_AUDIENCE,
+            "sub": email,
+            "iat": _epoch(now),
+            "exp": _epoch(exp),
+            "jti": secrets.token_urlsafe(16),
+        },
+        TOKEN_SIGNING_KEYS[0],
+        algorithm=ALGORITHM,
+    )
 
 def _decode_token(token: str) -> str:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload["sub"]
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    for signing_key in TOKEN_SIGNING_KEYS:
+        try:
+            payload = jwt.decode(
+                token,
+                signing_key,
+                algorithms=[ALGORITHM],
+                audience=TOKEN_AUDIENCE,
+                issuer=TOKEN_ISSUER,
+            )
+            return payload["sub"]
+        except JWTError:
+            continue
+    raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 def _current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> str:
-    return _decode_token(creds.credentials)
+    email = _decode_token(creds.credentials)
+    if email not in _load_users():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return email
 
 
 # ── Auth endpoints ───────────────────────────────────────────────
 @app.post("/api/v1/auth/register")
 async def register(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", ip, request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
     pw    = body.get("password", "")
     if not email or not pw or len(pw) < 8:
         raise HTTPException(400, "email and password (>=8 chars) required")
-    users = _load_users()
-    if email in users:
-        raise HTTPException(409, "email already registered")
-    users[email] = {"hash": pwd_ctx.hash(pw), "created": _utcnow().isoformat()}
-    _save_users(users)
+    new_hash = pwd_ctx.hash(pw)
+
+    def _register(users):
+        if email in users:
+            raise HTTPException(409, "email already registered")
+        users[email] = {"hash": new_hash, "created": _utcnow().isoformat()}
+
+    # mutate_document holds the row lock across the existence check and the
+    # write, so a concurrent registration/reset cannot slip in between and be
+    # lost (last-write-wins) -- which the in-process _USER_LOCK could not
+    # prevent across multiple uvicorn workers on PostgreSQL.
+    _STATE_STORE.mutate_document("users", dict, _register)
     return {"token": _create_token(email)}
 
 @app.post("/api/v1/auth/login")
 async def login(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, ip, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", ip, request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {AUTH_RATE_WINDOW_SEC}s")
     body = await request.json()
     email = body.get("email", "").strip().lower()
@@ -198,14 +583,21 @@ async def auth_request_reset(request: Request):
     if not email:
         raise HTTPException(400, "email required")
 
-    users = _load_users()
-    if email in users:
-        # Generate token, store hash, expiry
-        token = secrets.token_urlsafe(32)
-        users[email]["reset_token_hash"] = hashlib.sha256(token.encode()).hexdigest()
-        users[email]["reset_expires"]    = (_utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat()
-        _save_users(users)
+    token = secrets.token_urlsafe(32)
 
+    def _set_reset(users):
+        user = users.get(email)
+        if not user:
+            return False
+        user["reset_token_hash"] = hashlib.sha256(token.encode()).hexdigest()
+        user["reset_expires"] = (_utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat()
+        return True
+
+    # Atomic read-modify-write so a concurrent write to the users document
+    # cannot erase this reset token (or vice versa). Email is sent after the
+    # transaction commits, never while holding the row lock.
+    email_registered = _STATE_STORE.mutate_document("users", dict, _set_reset)
+    if email_registered:
         # Send email if SMTP configured
         if SMTP_HOST and FROM_EMAIL:
             try:
@@ -274,92 +666,702 @@ async def auth_confirm_reset(request: Request):
     if len(new_pw) < 8:
         raise HTTPException(400, "password must be at least 8 chars")
 
-    users = _load_users()
-    user  = users.get(email)
-    if not user or "reset_token_hash" not in user or "reset_expires" not in user:
-        raise HTTPException(401, "Invalid or expired reset token")
-
+    new_hash = pwd_ctx.hash(new_pw)
     expected_hash = hashlib.sha256(token.encode()).hexdigest()
-    if expected_hash != user["reset_token_hash"]:
-        raise HTTPException(401, "Invalid or expired reset token")
 
-    if user["reset_expires"] < _utcnow().isoformat():
-        raise HTTPException(401, "Reset token expired — request a new one")
+    def _apply_reset(users):
+        user = users.get(email)
+        if not user or "reset_token_hash" not in user or "reset_expires" not in user:
+            raise HTTPException(401, "Invalid or expired reset token")
+        if expected_hash != user["reset_token_hash"]:
+            raise HTTPException(401, "Invalid or expired reset token")
+        if user["reset_expires"] < _utcnow().isoformat():
+            raise HTTPException(401, "Reset token expired — request a new one")
+        user["hash"] = new_hash
+        user.pop("reset_token_hash", None)
+        user.pop("reset_expires", None)
 
-    user["hash"] = pwd_ctx.hash(new_pw)
-    user.pop("reset_token_hash", None)
-    user.pop("reset_expires", None)
-    _save_users(users)
+    # Validate and rewrite the password under one row lock: an HTTPException from
+    # the mutator rolls the transaction back with no partial write, and a
+    # concurrent users-document write cannot clobber the new password hash.
+    _STATE_STORE.mutate_document("users", dict, _apply_reset)
     return {"ok": True, "token": _create_token(email)}
 
 
 # ── Vault blob endpoints (zero-knowledge) ────────────────────────
-def _vault_path(email: str) -> Path:
-    safe = hashlib.sha256(email.encode()).hexdigest()
-    return VAULTS_DIR / f"{safe}.enc"
-
 def _etag(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _vault_user_key(email: str) -> str:
+    return hashlib.sha256(email.encode()).hexdigest()
+
+
+def _normalize_database_url(database_url: str) -> str:
+    normalized = database_url.strip()
+    if normalized.startswith("postgres://"):
+        return "postgresql+psycopg://" + normalized[len("postgres://"):]
+    if normalized.startswith("postgresql://"):
+        return "postgresql+psycopg://" + normalized[len("postgresql://"):]
+    return normalized
+
+
+def _vault_database_url(db_path: Path, metadata_url: str | None) -> str:
+    if metadata_url:
+        return _normalize_database_url(metadata_url)
+    return f"sqlite+pysqlite:///{db_path.resolve().as_posix()}"
+
+
+def _vault_advisory_lock_key(user_key: str) -> int:
+    return int(user_key[:16], 16) & 0x7FFFFFFFFFFFFFFF
+
+
+_VAULT_METADATA = MetaData()
+
+_VAULT_CURRENT = Table(
+    "vault_current",
+    _VAULT_METADATA,
+    Column("user_key", String, primary_key=True),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+_VAULT_HISTORY = Table(
+    "vault_history",
+    _VAULT_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_key", String, nullable=False),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("stored_at", String, nullable=False),
+    Column("source_key", String, nullable=False, unique=True),
+)
+
+_VAULT_REVISION_TRANSACTIONS = Table(
+    "vault_revision_transactions",
+    _VAULT_METADATA,
+    Column("id", String, primary_key=True),
+    Column("user_id", String, nullable=False),
+    Column("revision_number", Integer, nullable=False),
+    Column("object_key", String, nullable=False),
+    Column("etag", String, nullable=False),
+    Column("previous_etag", String),
+    Column("object_sha256", String, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("idempotency_key", String),
+    Column("request_id", String),
+    Column("audit_id", String),
+    Column("committed_at", String, nullable=False),
+    UniqueConstraint("user_id", "revision_number", name="uq_vault_revision_transactions_user_revision"),
+    UniqueConstraint("user_id", "idempotency_key", name="uq_vault_revision_transactions_user_idempotency"),
+)
+
+Index("idx_vault_history_user_revision", _VAULT_HISTORY.c.user_key, _VAULT_HISTORY.c.revision_number, unique=True)
+Index("idx_vault_history_user_stored", _VAULT_HISTORY.c.user_key, _VAULT_HISTORY.c.stored_at, _VAULT_HISTORY.c.revision_number)
+Index("idx_vault_revision_transactions_user_commit", _VAULT_REVISION_TRANSACTIONS.c.user_id, _VAULT_REVISION_TRANSACTIONS.c.committed_at)
+
+
+class _VaultConflict(Exception):
+    def __init__(self, current_etag: str):
+        super().__init__("vault revision conflict")
+        self.current_etag = current_etag
+
+
+class _VaultStore:
+    def __init__(
+        self,
+        db_path: Path,
+        legacy_dir: Path,
+        *,
+        metadata_url: str | None = None,
+        engine=None,
+        create_schema: bool = True,
+    ):
+        self.db_path = db_path
+        self.legacy_dir = legacy_dir
+        self.object_dir = VAULT_OBJECTS_DIR
+        self._lock = threading.RLock()
+        self._metadata_url = metadata_url
+        self._engine = engine or self._build_engine()
+        self._dialect_name = self._engine.dialect.name
+        if create_schema:
+            _VAULT_METADATA.create_all(self._engine)
+
+    def _build_engine(self):
+        url = _vault_database_url(self.db_path, self._metadata_url)
+        options = {"poolclass": NullPool, "future": True}
+        if url.startswith("sqlite"):
+            options["connect_args"] = {"check_same_thread": False}
+        return create_engine(url, **options)
+
+    def _connect(self):
+        return self._engine.connect()
+
+    def _dialect_insert(self, table):
+        if self._dialect_name == "postgresql":
+            return pg_insert(table)
+        if self._dialect_name == "sqlite":
+            return sqlite_insert(table)
+        raise RuntimeError(f"Unsupported database dialect: {self._dialect_name}")
+
+    def _object_path(self, object_key: str) -> Path:
+        return self.object_dir / f"{object_key}.blob"
+
+    def _write_object(self, object_key: str, blob: bytes) -> None:
+        self.object_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = self._object_path(object_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+            ) as handle:
+                handle.write(blob)
+                handle.flush()
+                tmp_path = Path(handle.name)
+            os.replace(tmp_path, target)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    def _read_object(self, object_key: str) -> bytes:
+        return self._object_path(object_key).read_bytes()
+
+    def _delete_object(self, object_key: str) -> None:
+        try:
+            self._object_path(object_key).unlink()
+        except OSError:
+            pass
+
+    def _legacy_paths(self, user_key: str) -> tuple[Path, Path]:
+        current = self.legacy_dir / f"{user_key}.enc"
+        history = self.legacy_dir / f"{user_key}.history"
+        return current, history
+
+    def _upsert_current(self, conn, values: dict) -> None:
+        stmt = self._dialect_insert(_VAULT_CURRENT).values(values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[_VAULT_CURRENT.c.user_key],
+            set_={
+                "revision_number": stmt.excluded.revision_number,
+                "object_key": stmt.excluded.object_key,
+                "etag": stmt.excluded.etag,
+                "size_bytes": stmt.excluded.size_bytes,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        conn.execute(stmt)
+
+    @staticmethod
+    def _current_row(conn, user_key: str):
+        return conn.execute(
+            select(
+                _VAULT_CURRENT.c.revision_number,
+                _VAULT_CURRENT.c.object_key,
+                _VAULT_CURRENT.c.etag,
+                _VAULT_CURRENT.c.size_bytes,
+                _VAULT_CURRENT.c.updated_at,
+            ).where(_VAULT_CURRENT.c.user_key == user_key)
+        ).mappings().first()
+
+    @staticmethod
+    def _transaction_row(conn, user_key: str, idempotency_key: str):
+        return conn.execute(
+            select(
+                _VAULT_REVISION_TRANSACTIONS.c.id,
+                _VAULT_REVISION_TRANSACTIONS.c.user_id,
+                _VAULT_REVISION_TRANSACTIONS.c.revision_number,
+                _VAULT_REVISION_TRANSACTIONS.c.object_key,
+                _VAULT_REVISION_TRANSACTIONS.c.etag,
+                _VAULT_REVISION_TRANSACTIONS.c.previous_etag,
+                _VAULT_REVISION_TRANSACTIONS.c.object_sha256,
+                _VAULT_REVISION_TRANSACTIONS.c.size_bytes,
+                _VAULT_REVISION_TRANSACTIONS.c.idempotency_key,
+                _VAULT_REVISION_TRANSACTIONS.c.request_id,
+                _VAULT_REVISION_TRANSACTIONS.c.audit_id,
+                _VAULT_REVISION_TRANSACTIONS.c.committed_at,
+            ).where(
+                _VAULT_REVISION_TRANSACTIONS.c.user_id == user_key,
+                _VAULT_REVISION_TRANSACTIONS.c.idempotency_key == idempotency_key,
+            )
+        ).mappings().first()
+
+    @staticmethod
+    def _transaction_response(row) -> dict:
+        return {
+            "etag": row["etag"],
+            "size": row["size_bytes"],
+            "updated": row["committed_at"],
+        }
+
+    @staticmethod
+    def _cleanup_legacy_files(current_path: Path, history_dir: Path) -> None:
+        try:
+            if current_path.exists():
+                current_path.unlink()
+        except OSError:
+            pass
+        if history_dir.exists():
+            for item in history_dir.glob("*"):
+                try:
+                    if item.is_file() or item.is_symlink():
+                        item.unlink()
+                except OSError:
+                    pass
+            try:
+                history_dir.rmdir()
+            except OSError:
+                pass
+
+    def _advisory_lock(self, conn, user_key: str) -> None:
+        if self._dialect_name != "postgresql":
+            return
+        conn.execute(select(func.pg_advisory_xact_lock(_vault_advisory_lock_key(user_key))))
+
+    def _insert_ignore_row(self, conn, table, values: dict, index_elements: list[str]) -> None:
+        stmt = self._dialect_insert(table).values(values)
+        stmt = stmt.on_conflict_do_nothing(index_elements=index_elements)
+        conn.execute(stmt)
+
+    def _ensure_imported(self, conn, user_key: str) -> None:
+        current = self._current_row(conn, user_key)
+        if current is not None:
+            return
+
+        current_path, history_dir = self._legacy_paths(user_key)
+        if not current_path.exists():
+            return
+
+        history_items = []
+        if history_dir.exists():
+            history_items = [item for item in sorted(history_dir.glob("*.enc")) if item.is_file()]
+
+        current_blob = current_path.read_bytes()
+        now = _utcnow().isoformat()
+        previous_etag = None
+        created_object_keys: list[str] = []
+
+        try:
+            for revision_number, item in enumerate(history_items, start=1):
+                blob = item.read_bytes()
+                etag = _etag(blob)
+                blob_sha = _sha256(blob)
+                object_key = f"legacy_{user_key}_history_{revision_number}_{secrets.token_hex(8)}"
+                self._write_object(object_key, blob)
+                created_object_keys.append(object_key)
+                source_key = f"legacy:{item.name}"
+                self._insert_ignore_row(
+                    conn,
+                    _VAULT_HISTORY,
+                    {
+                        "user_key": user_key,
+                        "revision_number": revision_number,
+                        "object_key": object_key,
+                        "etag": etag,
+                        "size_bytes": len(blob),
+                        "stored_at": now,
+                        "source_key": source_key,
+                    },
+                    ["source_key"],
+                )
+                self._insert_ignore_row(
+                    conn,
+                    _VAULT_REVISION_TRANSACTIONS,
+                    {
+                        "id": hashlib.sha256(f"{source_key}:{blob_sha}".encode()).hexdigest(),
+                        "user_id": user_key,
+                        "revision_number": revision_number,
+                        "object_key": object_key,
+                        "etag": etag,
+                        "previous_etag": previous_etag,
+                        "object_sha256": blob_sha,
+                        "size_bytes": len(blob),
+                        "idempotency_key": source_key,
+                        "request_id": "legacy-import",
+                        "audit_id": None,
+                        "committed_at": now,
+                    },
+                    ["id"],
+                )
+                previous_etag = etag
+
+            current_etag = _etag(current_blob)
+            current_sha = _sha256(current_blob)
+            current_revision = len(history_items) + 1
+            current_object_key = f"legacy_{user_key}_current_{secrets.token_hex(8)}"
+            self._write_object(current_object_key, current_blob)
+            created_object_keys.append(current_object_key)
+
+            self._upsert_current(
+                conn,
+                {
+                    "user_key": user_key,
+                    "revision_number": current_revision,
+                    "object_key": current_object_key,
+                    "etag": current_etag,
+                    "size_bytes": len(current_blob),
+                    "updated_at": now,
+                },
+            )
+            self._insert_ignore_row(
+                conn,
+                _VAULT_REVISION_TRANSACTIONS,
+                {
+                    "id": hashlib.sha256(f"legacy:{current_path.name}:{current_sha}".encode()).hexdigest(),
+                    "user_id": user_key,
+                    "revision_number": current_revision,
+                    "object_key": current_object_key,
+                    "etag": current_etag,
+                    "previous_etag": previous_etag,
+                    "object_sha256": current_sha,
+                    "size_bytes": len(current_blob),
+                    "idempotency_key": f"legacy:{current_path.name}",
+                    "request_id": "legacy-import",
+                    "audit_id": None,
+                    "committed_at": now,
+                },
+                ["id"],
+            )
+        except Exception:
+            for object_key in created_object_keys:
+                self._delete_object(object_key)
+            raise
+
+        self._cleanup_legacy_files(current_path, history_dir)
+
+    def put(
+        self,
+        email: str,
+        blob: bytes,
+        if_match: str = "",
+        *,
+        idempotency_key: str = "",
+        request_id: str = "",
+    ) -> dict:
+        user_key = _vault_user_key(email)
+        idempotency_key = idempotency_key.strip() or None
+        object_key = ""
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    with conn.begin():
+                        self._ensure_imported(conn, user_key)
+                        self._advisory_lock(conn, user_key)
+                        if idempotency_key:
+                            existing = self._transaction_row(conn, user_key, idempotency_key)
+                            if existing is not None:
+                                return self._transaction_response(existing)
+                        current = self._current_row(conn, user_key)
+                        current_etag = current["etag"] if current else ""
+                        if current is not None and if_match and if_match != current_etag:
+                            raise _VaultConflict(current_etag)
+
+                        now = _utcnow().isoformat()
+                        new_etag = _etag(blob)
+                        blob_sha = _sha256(blob)
+                        revision_number = 1
+                        object_key = f"vault_{user_key}_{secrets.token_hex(16)}"
+                        self._write_object(object_key, blob)
+                        if current is not None:
+                            self._insert_ignore_row(
+                                conn,
+                                _VAULT_HISTORY,
+                                {
+                                    "user_key": user_key,
+                                    "revision_number": int(current["revision_number"]),
+                                    "object_key": current["object_key"],
+                                    "etag": current["etag"],
+                                    "size_bytes": int(current["size_bytes"]),
+                                    "stored_at": now,
+                                    "source_key": current["object_key"],
+                                },
+                                ["source_key"],
+                            )
+                            revision_number = int(current["revision_number"]) + 1
+
+                        self._upsert_current(
+                            conn,
+                            {
+                                "user_key": user_key,
+                                "revision_number": revision_number,
+                                "object_key": object_key,
+                                "etag": new_etag,
+                                "size_bytes": len(blob),
+                                "updated_at": now,
+                            },
+                        )
+                        conn.execute(
+                            self._dialect_insert(_VAULT_REVISION_TRANSACTIONS).values(
+                                {
+                                    "id": secrets.token_hex(16),
+                                    "user_id": user_key,
+                                    "revision_number": revision_number,
+                                    "object_key": object_key,
+                                    "etag": new_etag,
+                                    "previous_etag": current_etag or None,
+                                    "object_sha256": blob_sha,
+                                    "size_bytes": len(blob),
+                                    "idempotency_key": idempotency_key,
+                                    "request_id": request_id or None,
+                                    "audit_id": None,
+                                    "committed_at": now,
+                                }
+                            )
+                        )
+                    return {"etag": new_etag, "size": len(blob), "updated": now}
+                except IntegrityError:
+                    if object_key:
+                        self._delete_object(object_key)
+                    if idempotency_key:
+                        existing = self._transaction_row(conn, user_key, idempotency_key)
+                        if existing is not None:
+                            return self._transaction_response(existing)
+                    raise
+                except Exception:
+                    if object_key:
+                        self._delete_object(object_key)
+                    raise
+
+    def get(self, email: str):
+        user_key = _vault_user_key(email)
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    return self._current_row(conn, user_key)
+
+    def history(self, email: str) -> list[dict]:
+        user_key = _vault_user_key(email)
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    rows = conn.execute(
+                        select(
+                            _VAULT_HISTORY.c.revision_number,
+                            _VAULT_HISTORY.c.etag,
+                            _VAULT_HISTORY.c.size_bytes,
+                            _VAULT_HISTORY.c.stored_at,
+                        ).where(_VAULT_HISTORY.c.user_key == user_key).order_by(
+                            _VAULT_HISTORY.c.revision_number.asc(),
+                            _VAULT_HISTORY.c.id.asc(),
+                        )
+                    ).mappings().all()
+        return [
+            {
+                "etag": row["etag"],
+                "size": row["size_bytes"],
+                "stored": row["stored_at"],
+            }
+            for row in rows
+        ]
+
+    def delete(self, email: str) -> None:
+        user_key = _vault_user_key(email)
+        current_path, history_dir = self._legacy_paths(user_key)
+        object_keys: list[str] = []
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    self._ensure_imported(conn, user_key)
+                    object_keys.extend(
+                        conn.execute(
+                            select(_VAULT_HISTORY.c.object_key).where(_VAULT_HISTORY.c.user_key == user_key)
+                        ).scalars().all()
+                    )
+                    current = self._current_row(conn, user_key)
+                    if current is not None:
+                        object_keys.append(current["object_key"])
+                    conn.execute(
+                        delete(_VAULT_REVISION_TRANSACTIONS).where(_VAULT_REVISION_TRANSACTIONS.c.user_id == user_key)
+                    )
+                    conn.execute(delete(_VAULT_HISTORY).where(_VAULT_HISTORY.c.user_key == user_key))
+                    conn.execute(delete(_VAULT_CURRENT).where(_VAULT_CURRENT.c.user_key == user_key))
+        for object_key in dict.fromkeys(object_keys):
+            self._delete_object(object_key)
+        self._cleanup_legacy_files(current_path, history_dir)
+
+
+_vault_store = _VaultStore(VAULT_STORE_DB, LEGACY_VAULTS_DIR, metadata_url=CLOUD_METADATA_URL)
+_STATE_STORE = _CloudStateStore(VAULT_STORE_DB, metadata_url=CLOUD_METADATA_URL)
+
+async def _read_body_within_limit(request: Request, limit: int) -> bytes:
+    """Read the request body, aborting once it exceeds `limit` bytes.
+
+    The `_cloud_security_boundary` middleware rejects oversized bodies by
+    Content-Length, but a chunked `Transfer-Encoding` request carries no
+    Content-Length, so `await request.body()` would buffer the whole stream
+    into memory before any size check. Streaming with an early abort caps peak
+    memory at one chunk over the limit and stops an unauthenticated-cheap
+    (5/min registration) client from exhausting memory or growing the vault
+    store on disk.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "Request body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.put("/api/v1/vault")
-async def put_vault(request: Request, email: str = Depends(_current_user)):
-    blob = await request.body()
+async def put_vault(
+    request: Request,
+    if_match: str = Header(default="", alias="if-match"),
+    idempotency_key: str = Header(default="", alias="x-idempotency-key"),
+    email: str = Depends(_current_user),
+):
+    cache_key = ("PUT", email, idempotency_key)
+    if idempotency_key and cache_key in app.state.idempotency_cache:
+        return app.state.idempotency_cache[cache_key]
+
+    blob = await _read_body_within_limit(request, MAX_REQUEST_BYTES)
     if not blob:
         raise HTTPException(400, "empty body")
-    vpath = _vault_path(email)
-    vpath.write_bytes(blob)
-    tag = _etag(blob)
-    return {"etag": tag, "size": len(blob), "updated": _utcnow().isoformat()}
+    try:
+        result = _vault_store.put(
+            email,
+            blob,
+            if_match,
+            idempotency_key=idempotency_key,
+            request_id=getattr(request.state, "request_id", request.headers.get("X-Request-ID", "")),
+        )
+    except _VaultConflict as exc:
+        return JSONResponse(
+            {
+                "detail": "vault revision conflict",
+                "current_etag": exc.current_etag,
+            },
+            status_code=409,
+        )
+    if idempotency_key:
+        app.state.idempotency_cache[cache_key] = result
+    return result
 
 @app.get("/api/v1/vault")
 async def get_vault(
     if_none_match: str = Header(default="", alias="if-none-match"),
     email: str = Depends(_current_user),
 ):
-    vpath = _vault_path(email)
-    if not vpath.exists():
+    row = _vault_store.get(email)
+    if row is None:
         raise HTTPException(404, "No vault stored")
-    blob = vpath.read_bytes()
-    tag  = _etag(blob)
+    tag = row["etag"]
     if if_none_match and if_none_match == tag:
         return Response(status_code=304)
-    return Response(content=blob, media_type="application/octet-stream",
-                    headers={"ETag": tag, "Content-Length": str(len(blob))})
+    blob = _vault_store._read_object(row["object_key"])
+    return Response(
+        content=blob,
+        media_type="application/octet-stream",
+        headers={"ETag": tag, "Content-Length": str(len(blob))},
+    )
 
 @app.get("/api/v1/vault/meta")
 async def vault_meta(email: str = Depends(_current_user)):
-    vpath = _vault_path(email)
-    if not vpath.exists():
+    row = _vault_store.get(email)
+    if row is None:
         return {"exists": False}
-    blob = vpath.read_bytes()
-    return {"exists": True, "size": len(blob), "etag": _etag(blob),
-            "modified": datetime.fromtimestamp(vpath.stat().st_mtime).isoformat()}
+    return {
+        "exists": True,
+        "size": row["size_bytes"],
+        "etag": row["etag"],
+        "modified": row["updated_at"],
+    }
+
+@app.get("/api/v1/vault/history")
+async def vault_history(email: str = Depends(_current_user)):
+    return {"versions": _vault_store.history(email)}
+
+
+@app.get("/api/v1/account/export")
+async def account_export(email: str = Depends(_current_user)):
+    users = _load_users()
+    user = users.get(email, {})
+    vault = {"exists": False}
+    row = _vault_store.get(email)
+    if row is not None:
+        vault = {
+            "exists": True,
+            "size": row["size_bytes"],
+            "etag": row["etag"],
+            "modified": row["updated_at"],
+        }
+    return {
+        "account": {
+            "email": email,
+            "created": user.get("created"),
+        },
+        "vault": vault,
+    }
+
+
+@app.delete("/api/v1/account")
+async def account_delete(email: str = Depends(_current_user)):
+    _STATE_STORE.mutate_document("users", dict, lambda users: users.pop(email, None))
+    _vault_store.delete(email)
+    return {"ok": True}
 
 @app.get("/api/v1/health")
 async def health():
     return {"status": "ok", "service": "pushkey-cloud"}
 
 
-# ── Event log (append-only JSONL for analytics) ──────────────────
-EVENTS_FILE = DATA_DIR / "events.jsonl"
-AUDIT_FILE  = DATA_DIR / "audit.jsonl"
+@app.get("/api/v1/ops/metrics")
+async def ops_metrics():
+    metrics = app.state.metrics
+    return {
+        "requests_total": metrics["requests_total"],
+        "status_families": dict(metrics["status_families"]),
+        "routes": dict(metrics["routes"]),
+    }
+
+
+# ── Event log (append-only event streams for analytics) ─────────
+_LOG_LOCK = threading.RLock()
+
+def _log_outbox(
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    payload: dict,
+    request_id: str = "",
+) -> dict:
+    entry = {
+        "id": secrets.token_hex(16),
+        "aggregate_type": aggregate_type,
+        "aggregate_id": aggregate_id,
+        "event_type": event_type,
+        "payload": payload,
+        "request_id": request_id,
+        "created_at": _utcnow().isoformat(),
+        "dispatched_at": None,
+    }
+    _STATE_STORE.append_event("outbox", entry)
+    return entry
 
 def _log_event(event_type: str, data: dict) -> None:
     entry = {"ts": _utcnow().isoformat(), "type": event_type, **data}
-    with EVENTS_FILE.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _LOG_LOCK:
+        _STATE_STORE.append_event("events", entry)
+        _log_outbox("event", event_type, event_type, data, data.get("request_id", ""))
 
 def _load_events() -> list[dict]:
-    if not EVENTS_FILE.exists():
-        return []
-    lines = EVENTS_FILE.read_text().splitlines()
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            pass
-    return out
+    return _STATE_STORE.load_events("events")
 
 def _log_audit(
     action: str,
@@ -369,7 +1371,9 @@ def _log_audit(
     request: Request | None = None,
 ) -> None:
     """Record admin action for compliance audit trail."""
+    request_id = request.headers.get("x-request-id", "") if request else ""
     entry = {
+        "id":      secrets.token_hex(16),
         "ts":      _utcnow().isoformat(),
         "action":  action,
         "target":  target,
@@ -377,27 +1381,22 @@ def _log_audit(
         "actor_id": actor.get("id", "system") if actor else "system",
         "actor_email": actor.get("email", "") if actor else "",
         "actor_role": actor.get("role", "") if actor else "",
-        "request_id": request.headers.get("x-request-id", "") if request else "",
+        "request_id": request_id,
         "ip": request.client.host if request and request.client else "",
     }
-    with AUDIT_FILE.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _LOG_LOCK:
+        _STATE_STORE.append_event("audit", entry)
+        _log_outbox("audit", target, action, entry, request_id)
 
 def _load_audit() -> list[dict]:
-    if not AUDIT_FILE.exists():
-        return []
-    lines = AUDIT_FILE.read_text().splitlines()
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            pass
-    return out
+    return _STATE_STORE.load_events("audit")
+
+def _load_outbox() -> list[dict]:
+    return _STATE_STORE.load_events("outbox")
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
-# Simple in-memory token bucket rate limiter
+# Legacy in-memory token bucket helper remains for unit tests.
 RATE_LIMIT_MAX        = int(os.environ.get("HEARTBEAT_RATE_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("HEARTBEAT_RATE_WINDOW", "60"))
 RATE_LIMIT_MAX_ENTRIES = int(os.environ.get("RATE_LIMIT_MAX_ENTRIES", "10000"))
@@ -428,6 +1427,199 @@ _DEACTIVATION_HITS: dict[str, list[float]] = {}
 _AUTH_HITS:      dict[str, list[float]] = {}
 _PORTAL_HITS:    dict[str, list[float]] = {}
 _RATE_LOCK = threading.Lock()
+RATE_LIMIT_BACKEND = os.environ.get("PUSHKEY_RATE_LIMIT_BACKEND", "").strip().lower()
+RATE_LIMIT_REDIS_URL = os.environ.get(
+    "PUSHKEY_RATE_LIMIT_REDIS_URL",
+    os.environ.get("REDIS_URL", ""),
+).strip()
+RATE_LIMIT_KEY_PREFIX = os.environ.get(
+    "PUSHKEY_RATE_LIMIT_KEY_PREFIX",
+    "pushkey:rate-limits",
+).strip() or "pushkey:rate-limits"
+
+
+def _ensure_rate_limit_store(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+            bucket TEXT PRIMARY KEY,
+            hits_json TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_updated_at "
+        "ON rate_limit_buckets(updated_at)"
+    )
+
+
+def _load_rate_limit_hits(
+    conn: sqlite3.Connection, bucket: str, cutoff: float
+) -> list[float]:
+    row = conn.execute(
+        "SELECT hits_json FROM rate_limit_buckets WHERE bucket = ?",
+        (bucket,),
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    try:
+        hits = [float(hit) for hit in json.loads(row[0])]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [hit for hit in hits if hit > cutoff]
+
+
+def _store_rate_limit_hits(
+    conn: sqlite3.Connection, bucket: str, hits: list[float], now: float
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO rate_limit_buckets(bucket, hits_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bucket) DO UPDATE SET
+            hits_json=excluded.hits_json,
+            updated_at=excluded.updated_at
+        """,
+        (bucket, json.dumps(hits), now),
+    )
+
+
+def _rate_identity_key(identity: str) -> str:
+    normalized = identity.strip().casefold()
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _rate_limit_bucket_key(namespace: str, kind: str, identity: str | None = None) -> str:
+    suffix = _rate_identity_key(identity) if identity is not None else "global"
+    return f"{RATE_LIMIT_KEY_PREFIX}:{namespace}:{kind}:{suffix}"
+
+
+class _SQLiteRateLimitStore:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def allow(self, namespace: str, identity: str, max_hits: int, window_sec: int) -> bool:
+        now = time.time()
+        cutoff = now - window_sec
+        identity_bucket = _rate_limit_bucket_key(namespace, "identity", identity)
+        global_bucket = _rate_limit_bucket_key(namespace, "global")
+        global_limit = max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER)
+
+        with _RATE_LOCK:
+            with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                _ensure_rate_limit_store(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM rate_limit_buckets WHERE updated_at <= ?",
+                    (cutoff,),
+                )
+
+                staged: list[tuple[str, list[float]]] = []
+                for bucket, limit in (
+                    (identity_bucket, max_hits),
+                    (global_bucket, global_limit),
+                ):
+                    hits = _load_rate_limit_hits(conn, bucket, cutoff)
+                    if len(hits) >= limit:
+                        conn.rollback()
+                        return False
+                    hits.append(now)
+                    staged.append((bucket, hits))
+
+                for bucket, hits in staged:
+                    _store_rate_limit_hits(conn, bucket, hits, now)
+
+                conn.commit()
+                return True
+
+
+class _RedisRateLimitStore:
+    _SCRIPT = """
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local identity_limit = tonumber(ARGV[3])
+local global_limit = tonumber(ARGV[4])
+local ttl = tonumber(ARGV[5])
+local buckets = {
+  {key = KEYS[1], limit = identity_limit},
+  {key = KEYS[2], limit = global_limit},
+}
+for i = 1, #buckets do
+  redis.call("ZREMRANGEBYSCORE", buckets[i].key, "-inf", now - window)
+  local count = redis.call("ZCARD", buckets[i].key)
+  if count >= buckets[i].limit then
+    return 0
+  end
+end
+for i = 1, #buckets do
+  local seq_key = buckets[i].key .. ":seq"
+  local seq = redis.call("INCR", seq_key)
+  redis.call("ZADD", buckets[i].key, now, tostring(now) .. ":" .. tostring(seq))
+  redis.call("EXPIRE", buckets[i].key, ttl)
+  redis.call("EXPIRE", seq_key, ttl)
+end
+return 1
+"""
+
+    def __init__(self, url: str):
+        if redis_lib is None:
+            raise SystemExit(
+                "Redis rate limiting was requested but the 'redis' package is not installed."
+            )
+        self.url = url
+        self.client = redis_lib.Redis.from_url(url, decode_responses=True)
+        try:
+            self.client.ping()
+        except Exception as exc:  # pragma: no cover - connection failure is environment-specific
+            raise SystemExit(f"Unable to connect to Redis rate-limit backend: {exc}") from exc
+
+    def allow(self, namespace: str, identity: str, max_hits: int, window_sec: int) -> bool:
+        now = time.time()
+        identity_bucket = _rate_limit_bucket_key(namespace, "identity", identity)
+        global_bucket = _rate_limit_bucket_key(namespace, "global")
+        global_limit = max_hits * max(1, RATE_LIMIT_GLOBAL_MULTIPLIER)
+        ttl = max(window_sec * 2, 60)
+        try:
+            allowed = self.client.eval(
+                self._SCRIPT,
+                2,
+                identity_bucket,
+                global_bucket,
+                now,
+                window_sec,
+                max_hits,
+                global_limit,
+                ttl,
+            )
+        except Exception as exc:  # pragma: no cover - backend-specific
+            raise RuntimeError(f"Redis rate-limit check failed: {exc}") from exc
+        return bool(int(allowed))
+
+
+def _build_rate_limit_store():
+    backend = RATE_LIMIT_BACKEND
+    if backend == "sqlite":
+        return _SQLiteRateLimitStore(RATE_LIMIT_DB)
+    if backend == "redis":
+        return _RedisRateLimitStore(RATE_LIMIT_REDIS_URL or "redis://localhost:6379/0")
+    if RATE_LIMIT_REDIS_URL:
+        return _RedisRateLimitStore(RATE_LIMIT_REDIS_URL)
+    if backend == "":
+        return _SQLiteRateLimitStore(RATE_LIMIT_DB)
+    raise RuntimeError(
+        "PUSHKEY_RATE_LIMIT_BACKEND must be 'sqlite' or 'redis' when set"
+    )
+
+
+_RATE_LIMIT_STORE = _build_rate_limit_store()
+
+
+def _rate_check_shared_request(
+    namespace: str, identity: str, request: Request, max_hits: int, window_sec: int
+) -> bool:
+    """Shared limiter backed by the configured durable store."""
+    return _RATE_LIMIT_STORE.allow(namespace, identity, max_hits, window_sec)
 
 
 def _rate_check(bucket: dict, key: str, max_hits: int, window_sec: int) -> bool:
@@ -474,8 +1666,8 @@ def _rate_check_request(
 
 
 def _check_rate_limit(key: str, request: Request) -> bool:
-    return _rate_check_request(
-        _HEARTBEAT_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    return _rate_check_shared_request(
+        "heartbeat", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     )
 
 
@@ -572,8 +1764,8 @@ async def _handle_activate(body: dict, request: Request) -> dict:
         raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
     if not fingerprint:
         raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
-    if not _rate_check_request(
-        _ACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    if not _rate_check_shared_request(
+        "activate", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     ):
         raise HTTPException(429, {"code": "rate_limited", "message": "Too many activation requests"})
 
@@ -617,8 +1809,8 @@ async def _handle_deactivate(body: dict, request: Request) -> dict:
         raise HTTPException(400, {"code": "invalid_request", "message": "license_key required"})
     if not fingerprint:
         raise HTTPException(400, {"code": "invalid_request", "message": "fingerprint required"})
-    if not _rate_check_request(
-        _DEACTIVATION_HITS, key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
+    if not _rate_check_shared_request(
+        "deactivate", key, request, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC
     ):
         raise HTTPException(429, {"code": "rate_limited", "message": "Too many deactivation requests"})
 
@@ -710,55 +1902,122 @@ async def deactivate(request: Request):
 
 # ── Admin helpers ────────────────────────────────────────────────
 def _load_licenses() -> dict:
-    if not LICENSES_FILE.exists():
-        return {}
-    return json.loads(LICENSES_FILE.read_text())
+    with _LICENSE_LOCK:
+        return _STATE_STORE.load_document("licenses", dict)
 
 def _save_licenses(data: dict) -> None:
-    tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    os.replace(tmp, LICENSES_FILE)
+    with _LICENSE_LOCK:
+        _STATE_STORE.save_document("licenses", data)
 
 
 def _mutate_licenses(mutator):
     """Run one synchronous license read-modify-write transaction."""
     with _LICENSE_LOCK:
-        licenses = _load_licenses()
-        result = mutator(licenses)
-        _save_licenses(licenses)
-        return result
+        return _STATE_STORE.mutate_document("licenses", dict, mutator)
 
 def _load_admins() -> dict:
-    if not ADMINS_FILE.exists():
-        admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
-        data = {
-            admin_id: {
-                "id": admin_id,
-                "email": ADMIN_BOOTSTRAP_EMAIL,
-                "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
-                "role": "owner",
-                "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
-                "created": _utcnow().isoformat(),
-                "disabled": False,
-            }
+    admins = _STATE_STORE.load_document("admins", dict)
+    if admins:
+        return admins
+    admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
+    data = {
+        admin_id: {
+            "id": admin_id,
+            "email": ADMIN_BOOTSTRAP_EMAIL,
+            "display_name": ADMIN_BOOTSTRAP_EMAIL.split("@", 1)[0] or "admin",
+            "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
+            "role": "owner",
+            "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
+            "created": _utcnow().isoformat(),
+            "disabled": False,
         }
-        ADMINS_FILE.write_text(json.dumps(data, indent=2))
-        return data
-    return json.loads(ADMINS_FILE.read_text())
+    }
+    _STATE_STORE.insert_document_if_absent("admins", data)
+    return _STATE_STORE.load_document("admins", dict)
 
 
 def _save_admins(data: dict) -> None:
-    ADMINS_FILE.write_text(json.dumps(data, indent=2))
+    _STATE_STORE.save_document("admins", data)
+
+
+def _admin_display_name(admin: dict) -> str:
+    display_name = str(admin.get("display_name", "")).strip()
+    if display_name:
+        return display_name
+    email = str(admin.get("email", "")).strip()
+    if email:
+        return email.split("@", 1)[0]
+    return str(admin.get("id", "admin"))
+
+
+def _admin_public_record(admin: dict) -> dict:
+    sessions = _load_admin_sessions()
+    session_count = sum(
+        1
+        for session in sessions.values()
+        if session.get("admin_id") == admin.get("id") and not session.get("revoked")
+    )
+    return {
+        "id": admin.get("id", ""),
+        "email": admin.get("email", ""),
+        "display_name": _admin_display_name(admin),
+        "role": admin.get("role", "viewer"),
+        "disabled": bool(admin.get("disabled")),
+        "created": admin.get("created", ""),
+        "mfa_enabled": bool(admin.get("mfa_secret")),
+        "session_count": session_count,
+    }
+
+
+def _admin_email_in_use(admins: dict, email: str, *, exclude_id: str | None = None) -> bool:
+    email = email.strip().lower()
+    for admin_id, admin in admins.items():
+        if exclude_id is not None and admin_id == exclude_id:
+            continue
+        if admin.get("email", "").strip().lower() == email:
+            return True
+    return False
+
+
+def _active_owner_count(admins: dict, *, exclude_id: str | None = None) -> int:
+    return sum(
+        1
+        for admin_id, admin in admins.items()
+        if (exclude_id is None or admin_id != exclude_id)
+        and admin.get("role", "viewer") == "owner"
+        and not admin.get("disabled")
+    )
+
+
+def _new_admin_id(admins: dict) -> str:
+    while True:
+        admin_id = secrets.token_hex(8)
+        if admin_id not in admins:
+            return admin_id
 
 
 def _load_admin_sessions() -> dict:
-    if not ADMIN_SESSIONS_FILE.exists():
-        return {}
-    return json.loads(ADMIN_SESSIONS_FILE.read_text())
+    with _ADMIN_SESSION_LOCK:
+        return _STATE_STORE.load_document("admin_sessions", dict)
 
 
 def _save_admin_sessions(data: dict) -> None:
-    ADMIN_SESSIONS_FILE.write_text(json.dumps(data, indent=2))
+    with _ADMIN_SESSION_LOCK:
+        _STATE_STORE.save_document("admin_sessions", data)
+
+
+def _revoke_admin_sessions(admin_id: str, *, except_hash: str | None = None) -> int:
+    sessions = _load_admin_sessions()
+    revoked = 0
+    for token_hash, session in sessions.items():
+        if token_hash == except_hash:
+            continue
+        if session.get("admin_id") == admin_id and not session.get("revoked"):
+            session["revoked"] = True
+            revoked += 1
+    if revoked:
+        _save_admin_sessions(sessions)
+    return revoked
 
 
 def _admin_by_email(email: str) -> dict | None:
@@ -767,6 +2026,40 @@ def _admin_by_email(email: str) -> dict | None:
         if admin.get("email", "").lower() == email:
             return admin
     return None
+
+
+def _admin_is_locked(admin: dict) -> bool:
+    until = admin.get("lockout_until") or ""
+    return bool(until and until > _utcnow().isoformat())
+
+
+def _record_failed_admin_login(admin: dict, request: Request) -> None:
+    admins = _load_admins()
+    current = admins.get(admin["id"])
+    if not current:
+        return
+    failures = int(current.get("failed_login_count", 0)) + 1
+    current["failed_login_count"] = failures
+    if failures >= ADMIN_LOGIN_LOCKOUT_FAILURES:
+        current["lockout_until"] = (_utcnow() + timedelta(minutes=ADMIN_LOGIN_LOCKOUT_MIN)).isoformat()
+        _log_audit(
+            "admin_login_lockout",
+            current["id"],
+            {"failures": failures},
+            actor=current,
+            request=request,
+        )
+    _save_admins(admins)
+
+
+def _reset_admin_login_failures(admin: dict) -> None:
+    admins = _load_admins()
+    current = admins.get(admin["id"])
+    if not current:
+        return
+    current["failed_login_count"] = 0
+    current["lockout_until"] = ""
+    _save_admins(admins)
 
 
 def _totp_code(secret: str, counter: int) -> str:
@@ -787,6 +2080,18 @@ def _verify_totp(secret: str, code: str, now: int | None = None) -> bool:
         return False
     step = int((now or time.time()) // 30)
     return any(hmac.compare_digest(_totp_code(secret, step + drift), code) for drift in (-1, 0, 1))
+
+
+def _new_mfa_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _new_mfa_recovery_codes() -> list[str]:
+    return [f"PK-MFA-{secrets.token_urlsafe(10).replace('-', '').replace('_', '')[:12].upper()}" for _ in range(ADMIN_MFA_RECOVERY_CODE_COUNT)]
+
+
+def _hash_mfa_recovery_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
 
 
 def _issue_admin_session(admin: dict, request: Request) -> tuple[str, str]:
@@ -862,6 +2167,15 @@ def _require_admin(
     _save_admin_sessions(sessions)
     return {"id": admin["id"], "email": admin["email"], "role": admin.get("role", "viewer")}
 
+
+def _require_admin_permission(permission: str):
+    def dependency(actor: dict = Depends(_require_admin)) -> dict:
+        role = actor.get("role", "viewer")
+        if permission not in ADMIN_ROLE_PERMISSIONS.get(role, set()):
+            raise HTTPException(403, "Admin role lacks required permission")
+        return actor
+    return dependency
+
 def _gen_key(tier: str) -> str:
     import secrets as _sec, string as _s
     chars = _s.ascii_uppercase + _s.digits
@@ -875,17 +2189,25 @@ def _gen_key(tier: str) -> str:
 @app.post("/api/admin/auth/login")
 async def admin_login(request: Request):
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_AUTH_HITS, f"admin:{ip}", AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "auth", f"admin:{ip}", request, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, "Too many login attempts")
     body = await request.json()
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
     mfa_code = body.get("mfa_code", "")
     admin = _admin_by_email(email) if email else None
+    if admin and _admin_is_locked(admin):
+        raise HTTPException(423, "Admin account locked")
     if not admin or admin.get("disabled") or not pwd_ctx.verify(password, admin["hash"]):
+        if admin and not admin.get("disabled"):
+            _record_failed_admin_login(admin, request)
         raise HTTPException(401, "Invalid credentials")
     if not _verify_totp(admin.get("mfa_secret", ""), mfa_code):
+        _record_failed_admin_login(admin, request)
         raise HTTPException(401, "Invalid credentials")
+    _reset_admin_login_failures(admin)
     token, csrf = _issue_admin_session(admin, request)
     response = JSONResponse({
         "ok": True,
@@ -915,9 +2237,277 @@ async def admin_logout(
     return {"ok": True}
 
 
+@app.post("/api/admin/auth/refresh")
+async def admin_refresh(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+    pk_admin_session: str = Cookie(default=""),
+):
+    old_hash = hashlib.sha256(pk_admin_session.encode()).hexdigest()
+    sessions = _load_admin_sessions()
+    if old_hash in sessions:
+        sessions[old_hash]["revoked"] = True
+        _save_admin_sessions(sessions)
+    token, csrf = _issue_admin_session(actor, request)
+    response = JSONResponse({"ok": True, "csrf_token": csrf, "admin": actor})
+    _set_admin_cookies(response, token, csrf)
+    _log_audit("admin_session_refresh", actor["id"], actor=actor, request=request)
+    return response
+
+
 @app.get("/api/admin/auth/me")
 async def admin_me(actor: dict = Depends(_require_admin)):
     return {"admin": actor}
+
+
+@app.post("/api/admin/auth/mfa/setup")
+async def admin_mfa_setup(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+):
+    secret = _new_mfa_secret()
+    codes = _new_mfa_recovery_codes()
+    admins = _load_admins()
+    admin = admins.get(actor["id"])
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    admin["mfa_pending_secret"] = secret
+    admin["mfa_pending_recovery_hashes"] = [_hash_mfa_recovery_code(code) for code in codes]
+    _save_admins(admins)
+    _log_audit("admin_mfa_setup", actor["id"], actor=actor, request=request)
+    return {"secret": secret, "recovery_codes": codes}
+
+
+@app.post("/api/admin/auth/mfa/confirm")
+async def admin_mfa_confirm(
+    request: Request,
+    actor: dict = Depends(_require_admin),
+):
+    body = await request.json()
+    code = str(body.get("code", ""))
+    admins = _load_admins()
+    admin = admins.get(actor["id"])
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    secret = admin.get("mfa_pending_secret", "")
+    if not secret or not _verify_totp(secret, code):
+        raise HTTPException(400, "Invalid MFA confirmation code")
+    admin["mfa_secret"] = secret
+    admin["mfa_recovery_hashes"] = admin.get("mfa_pending_recovery_hashes", [])
+    admin.pop("mfa_pending_secret", None)
+    admin.pop("mfa_pending_recovery_hashes", None)
+    _save_admins(admins)
+    _log_audit("admin_mfa_confirm", actor["id"], actor=actor, request=request)
+    return {"enabled": True}
+
+
+@app.get("/api/admin/admins")
+async def admin_list(
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    records = sorted(admins.values(), key=lambda admin: admin.get("email", "").lower())
+    return {"admins": [_admin_public_record(admin) for admin in records], "count": len(records)}
+
+
+@app.post("/api/admin/admins")
+async def admin_create(
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    body = await request.json()
+    email = str(body.get("email", "")).strip().lower()
+    password = str(body.get("password", ""))
+    role = str(body.get("role", "viewer")).strip() or "viewer"
+    display_name = str(body.get("display_name", "")).strip()
+    if not email or "@" not in email:
+        raise HTTPException(400, "Admin email required")
+    if len(password) < 8:
+        raise HTTPException(400, "Admin password too short")
+    if role not in ADMIN_ROLE_PERMISSIONS:
+        raise HTTPException(400, "Invalid admin role")
+
+    admins = _load_admins()
+    if _admin_email_in_use(admins, email):
+        raise HTTPException(409, "Admin already exists")
+
+    admin_id = _new_admin_id(admins)
+    admin = {
+        "id": admin_id,
+        "email": email,
+        "display_name": display_name,
+        "hash": pwd_ctx.hash(password),
+        "role": role,
+        "mfa_secret": "",
+        "mfa_recovery_hashes": [],
+        "created": _utcnow().isoformat(),
+        "disabled": False,
+    }
+    admins[admin_id] = admin
+    _save_admins(admins)
+    _log_audit(
+        "admin_create",
+        admin_id,
+        {"email": email, "role": role, "display_name": _admin_display_name(admin)},
+        actor=actor,
+        request=request,
+    )
+    return _admin_public_record(admin)
+
+
+@app.patch("/api/admin/admins/{admin_id}")
+async def admin_update(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    body = await request.json()
+    if not any(key in body for key in ("email", "password", "role", "display_name")):
+        raise HTTPException(400, "No changes requested")
+
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+
+    changes: dict[str, dict | str] = {}
+
+    if "email" in body:
+        email = str(body.get("email", "")).strip().lower()
+        if not email or "@" not in email:
+            raise HTTPException(400, "Admin email required")
+        if _admin_email_in_use(admins, email, exclude_id=admin_id):
+            raise HTTPException(409, "Admin already exists")
+        if email != admin.get("email", "").strip().lower():
+            changes["email"] = {"from": admin.get("email", ""), "to": email}
+            admin["email"] = email
+
+    if "display_name" in body:
+        display_name = str(body.get("display_name", "")).strip()
+        if display_name != str(admin.get("display_name", "")).strip():
+            changes["display_name"] = {"from": admin.get("display_name", ""), "to": display_name}
+            admin["display_name"] = display_name
+
+    if "password" in body:
+        password = str(body.get("password", ""))
+        if len(password) < 8:
+            raise HTTPException(400, "Admin password too short")
+        admin["hash"] = pwd_ctx.hash(password)
+        changes["password"] = "updated"
+
+    if "role" in body:
+        role = str(body.get("role", "")).strip()
+        if role not in ADMIN_ROLE_PERMISSIONS:
+            raise HTTPException(400, "Invalid admin role")
+        current_role = admin.get("role", "viewer")
+        if current_role == "owner" and role != "owner" and _active_owner_count(admins, exclude_id=admin_id) == 0:
+            raise HTTPException(400, "At least one active owner is required")
+        if role != current_role:
+            changes["role"] = {"from": current_role, "to": role}
+            admin["role"] = role
+
+    _save_admins(admins)
+    _log_audit(
+        "admin_update",
+        admin_id,
+        {
+            "changes": changes,
+            "email": admin.get("email", ""),
+            "role": admin.get("role", ""),
+            "display_name": _admin_display_name(admin),
+        },
+        actor=actor,
+        request=request,
+    )
+    return _admin_public_record(admin)
+
+
+@app.post("/api/admin/admins/{admin_id}/disable")
+async def admin_disable(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+    if admin.get("role", "viewer") == "owner" and not admin.get("disabled") and _active_owner_count(admins, exclude_id=admin_id) == 0:
+        raise HTTPException(400, "At least one active owner is required")
+
+    admin["disabled"] = True
+    revoked = _revoke_admin_sessions(admin_id)
+    _save_admins(admins)
+    _log_audit(
+        "admin_disable",
+        admin_id,
+        {"revoked": revoked, "email": admin.get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin": _admin_public_record(admin), "revoked": revoked}
+
+
+@app.post("/api/admin/admins/{admin_id}/enable")
+async def admin_enable(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    admin = admins.get(admin_id)
+    if not admin:
+        raise HTTPException(404, "Admin not found")
+
+    admin["disabled"] = False
+    _save_admins(admins)
+    _log_audit(
+        "admin_enable",
+        admin_id,
+        {"email": admin.get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin": _admin_public_record(admin)}
+
+
+@app.post("/api/admin/admins/{admin_id}/sessions/revoke")
+async def admin_revoke_sessions(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    if admin_id not in admins:
+        raise HTTPException(404, "Admin not found")
+    revoked = _revoke_admin_sessions(admin_id)
+    _log_audit(
+        "admin_sessions_revoke",
+        admin_id,
+        {"revoked": revoked, "target_email": admins[admin_id].get("email", "")},
+        actor=actor,
+        request=request,
+    )
+    return {"ok": True, "admin_id": admin_id, "revoked": revoked}
+
+
+@app.post("/api/admin/admins/{admin_id}/mfa/reset")
+async def admin_reset_mfa(
+    admin_id: str,
+    request: Request,
+    actor: dict = Depends(_require_admin_permission("admins")),
+):
+    admins = _load_admins()
+    if admin_id not in admins:
+        raise HTTPException(404, "Admin not found")
+    target = admins[admin_id]
+    target["mfa_secret"] = ""
+    target["mfa_recovery_hashes"] = []
+    target.pop("mfa_pending_secret", None)
+    target.pop("mfa_pending_recovery_hashes", None)
+    _save_admins(admins)
+    _log_audit("admin_mfa_reset", admin_id, {"target_email": target.get("email", "")}, actor=actor, request=request)
+    return {"ok": True, "admin_id": admin_id, "reset": True}
 
 
 SMTP_HOST  = os.environ.get("SMTP_HOST", "")
@@ -926,6 +2516,11 @@ SMTP_USER  = os.environ.get("SMTP_USER", "")
 SMTP_PASS  = os.environ.get("SMTP_PASS", "")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 APP_URL    = os.environ.get("APP_URL", "https://pushkey.app")
+SMTP_TIMEOUT_SEC = float(os.environ.get("SMTP_TIMEOUT_SEC", "10"))
+SMTP_RETRY_ATTEMPTS = int(os.environ.get("SMTP_RETRY_ATTEMPTS", "3"))
+SMTP_RETRY_DELAY_SEC = float(os.environ.get("SMTP_RETRY_DELAY_SEC", "0.25"))
+DEAD_LETTER_DIR = DATA_DIR / "dead-letter"
+DEAD_LETTER_DIR.mkdir(exist_ok=True)
 
 
 def _email_html(title: str, preview: str, body_html: str) -> str:
@@ -986,7 +2581,6 @@ def _email_html(title: str, preview: str, body_html: str) -> str:
 def _send_email_html(to: str, subject: str, html: str, plain: str) -> dict:
     if not SMTP_HOST:
         return {"sent": False, "reason": "smtp_not_configured"}
-    import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     msg = MIMEMultipart("alternative")
@@ -995,14 +2589,30 @@ def _send_email_html(to: str, subject: str, html: str, plain: str) -> dict:
     msg["To"]      = to
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html,  "html"))
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(FROM_EMAIL, [to], msg.as_string())
-        return {"sent": True}
-    except Exception as exc:
-        return {"sent": False, "reason": str(exc)}
+    last_error = ""
+    for attempt in range(1, max(1, SMTP_RETRY_ATTEMPTS) + 1):
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SEC) as s:
+                s.starttls()
+                s.login(SMTP_USER, SMTP_PASS)
+                s.sendmail(FROM_EMAIL, [to], msg.as_string())
+            return {"sent": True, "attempts": attempt}
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < max(1, SMTP_RETRY_ATTEMPTS) and SMTP_RETRY_DELAY_SEC > 0:
+                time.sleep(SMTP_RETRY_DELAY_SEC)
+
+    dead_letter = {
+        "ts": _utcnow().isoformat(),
+        "to": to,
+        "subject": subject,
+        "smtp_host": SMTP_HOST,
+        "attempts": max(1, SMTP_RETRY_ATTEMPTS),
+        "error": last_error,
+    }
+    target = DEAD_LETTER_DIR / f"email-{int(time.time() * 1000)}-{secrets.token_hex(4)}.json"
+    target.write_text(json.dumps(dead_letter, indent=2), encoding="utf-8")
+    return {"sent": False, "reason": "dead_lettered", "attempts": max(1, SMTP_RETRY_ATTEMPTS)}
 
 
 def _send_invite_email(to_email: str, name: str, tier: str, key: str, expires_at: str | None) -> dict:
@@ -1296,7 +2906,7 @@ def _auto_expire(lic: dict) -> bool:
 
 # ── Admin endpoints ──────────────────────────────────────────────
 @app.get("/api/admin/stats")
-async def admin_stats(_: None = Depends(_require_admin)):
+async def admin_stats(_: dict = Depends(_require_admin_permission("read"))):
     lic = _load_licenses()
     now = _utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -1319,13 +2929,13 @@ async def admin_stats(_: None = Depends(_require_admin)):
 
 
 @app.get("/api/admin/licenses")
-async def admin_list_licenses(_: None = Depends(_require_admin)):
+async def admin_list_licenses(_: dict = Depends(_require_admin_permission("read"))):
     lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
     return list(lic.values())
 
 
 @app.post("/api/admin/licenses/generate")
-async def admin_generate(request: Request, _: None = Depends(_require_admin)):
+async def admin_generate(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     body = await request.json()
     tier = body.get("tier", "free").lower()
     if tier not in TIER_PREFIXES:
@@ -1345,7 +2955,7 @@ async def admin_generate(request: Request, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(generate)
     key = entry["key"]
     _log_event("activated", {"key": key[:8] + "…", "tier": tier, "email": entry["email"]})
-    _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]})
+    _log_audit("generate_license", key, {"tier": tier, "email": entry["email"]}, actor=actor, request=request)
     return entry
 
 
@@ -1354,7 +2964,7 @@ VALID_TRIAL_DAYS = {7, 14, 30}
 
 
 @app.post("/api/admin/licenses/issue")
-async def admin_issue(request: Request, _: None = Depends(_require_admin)):
+async def admin_issue(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     body       = await request.json()
     tier       = body.get("tier", "free").lower()
     email      = body.get("email", "").strip().lower()
@@ -1419,12 +3029,12 @@ async def admin_issue(request: Request, _: None = Depends(_require_admin)):
     _log_audit("issue_license", key, {
         "tier": tier, "email": email, "trial_days": trial_days,
         "send_email": send_email, "email_sent": email_result.get("sent", False),
-    })
+    }, actor=actor, request=request)
     return {**entry, "email_result": email_result}
 
 
 @app.get("/api/admin/contacts")
-async def admin_contacts(_: None = Depends(_require_admin)):
+async def admin_contacts(_: dict = Depends(_require_admin_permission("read"))):
     lic = _mutate_licenses(lambda licenses: (_auto_expire(licenses), licenses)[1])
 
     by_email: dict[str, dict] = {}
@@ -1477,7 +3087,7 @@ async def admin_contacts(_: None = Depends(_require_admin)):
 
 @app.patch("/api/admin/contacts/{email}")
 async def admin_update_contact(
-    email: str, request: Request, _: None = Depends(_require_admin)
+    email: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))
 ):
     email = email.lower()
     body  = await request.json()
@@ -1493,12 +3103,12 @@ async def admin_update_contact(
                     entry[field] = body[field]
         return len(matched)
     matched_count = _mutate_licenses(update_contact)
-    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count})
+    _log_audit("update_contact", email, {"fields": list(changes.keys()), "updated": matched_count}, actor=actor, request=request)
     return {"ok": True, "updated": matched_count}
 
 
 @app.post("/api/admin/licenses/{key}/send-invite")
-async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
+async def admin_send_invite(key: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     lic = _load_licenses()
     if key not in lic:
         raise HTTPException(404, "License not found")
@@ -1513,12 +3123,12 @@ async def admin_send_invite(key: str, _: None = Depends(_require_admin)):
                 raise HTTPException(404, "License not found")
             licenses[key]["sent_invite"] = True
         _mutate_licenses(mark_invited)
-    _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)})
+    _log_audit("send_invite", key, {"email": entry["email"], "sent": result.get("sent", False)}, actor=actor, request=request)
     return result
 
 
 @app.post("/api/admin/licenses/{key}/expire")
-async def admin_expire(key: str, _: None = Depends(_require_admin)):
+async def admin_expire(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def expire(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1527,12 +3137,12 @@ async def admin_expire(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(expire)
     lic = {key: entry}
     _log_event("expired", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("expire_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("expire_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.post("/api/admin/licenses/{key}/revoke")
-async def admin_revoke(key: str, _: None = Depends(_require_admin)):
+async def admin_revoke(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def revoke(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1542,12 +3152,12 @@ async def admin_revoke(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(revoke)
     lic = {key: entry}
     _log_event("revoked", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("revoke_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("revoke_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.post("/api/admin/licenses/{key}/renew")
-async def admin_renew(key: str, _: None = Depends(_require_admin)):
+async def admin_renew(key: str, request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     def renew(lic):
         if key not in lic:
             raise HTTPException(404, "License not found")
@@ -1556,12 +3166,12 @@ async def admin_renew(key: str, _: None = Depends(_require_admin)):
     entry = _mutate_licenses(renew)
     lic = {key: entry}
     _log_event("renewed", {"key": key[:8] + "…", "tier": lic[key]["tier"]})
-    _log_audit("renew_license", key, {"tier": lic[key]["tier"]})
+    _log_audit("renew_license", key, {"tier": lic[key]["tier"]}, actor=actor, request=request)
     return {"ok": True}
 
 
 @app.get("/api/admin/analytics")
-async def admin_analytics(_: None = Depends(_require_admin)):
+async def admin_analytics(_: dict = Depends(_require_admin_permission("read"))):
     """
     Returns 30-day time-series data for the analytics dashboard:
     - daily_activations: [{date, count}] for last 30 days
@@ -1609,7 +3219,7 @@ async def admin_export(
     tier:   str = "",
     status: str = "",
     search: str = "",
-    _: None = Depends(_require_admin),
+    _: dict = Depends(_require_admin_permission("read")),
 ):
     """Export licenses CSV with optional filters: ?tier=&status=&search="""
     import csv, io
@@ -1647,17 +3257,39 @@ async def admin_export(
 
 
 @app.get("/api/admin/backup")
-async def admin_backup(_: None = Depends(_require_admin)):
+async def admin_backup(request: Request, actor: dict = Depends(_require_admin_permission("backup"))):
     """Returns tar.gz of all data files (licenses, tickets, audit log, events, users — NOT vault blobs)."""
     import tarfile, io
     buf = io.BytesIO()
+    licenses = _load_licenses()
+    tickets = _load_tickets()
+    audit_entries = _load_audit()
+    event_entries = _load_events()
+    outbox_entries = _load_outbox()
+    users = _load_users()
+
+    def _jsonl_bytes(entries: list[dict]) -> bytes:
+        text = "\n".join(json.dumps(entry) for entry in entries)
+        if text:
+            text += "\n"
+        return text.encode("utf-8")
+
+    exports = {
+        "licenses.json": json.dumps(licenses, indent=2).encode("utf-8"),
+        "tickets.json": json.dumps(tickets, indent=2).encode("utf-8"),
+        "audit.jsonl": _jsonl_bytes(audit_entries),
+        "events.jsonl": _jsonl_bytes(event_entries),
+        "outbox.jsonl": _jsonl_bytes(outbox_entries),
+        "users.json": json.dumps(users, indent=2).encode("utf-8"),
+    }
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for fname in ("licenses.json", "tickets.json", "audit.jsonl", "events.jsonl", "users.json"):
-            fpath = DATA_DIR / fname
-            if fpath.exists():
-                tar.add(fpath, arcname=fname)
+        for fname, payload in exports.items():
+            info = tarfile.TarInfo(fname)
+            info.size = len(payload)
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(payload))
     buf.seek(0)
-    _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())})
+    _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())}, actor=actor, request=request)
     timestamp = _utcnow().strftime("%Y-%m-%d-%H%M%S")
     return Response(
         content=buf.getvalue(),
@@ -1667,19 +3299,15 @@ async def admin_backup(_: None = Depends(_require_admin)):
 
 
 # ── Support tickets ──────────────────────────────────────────────
-TICKETS_FILE = DATA_DIR / "tickets.json"
-
 def _load_tickets() -> list[dict]:
-    if not TICKETS_FILE.exists():
-        return []
-    return json.loads(TICKETS_FILE.read_text())
+    return _STATE_STORE.load_document("tickets", list)
 
 def _save_tickets(tickets: list[dict]) -> None:
-    TICKETS_FILE.write_text(json.dumps(tickets, indent=2))
+    _STATE_STORE.save_document("tickets", tickets)
 
 
 @app.post("/api/admin/tickets")
-async def admin_create_ticket(request: Request, _: None = Depends(_require_admin)):
+async def admin_create_ticket(request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     body  = await request.json()
     email = body.get("email", "").strip().lower()
     subj  = body.get("subject", "").strip()
@@ -1704,7 +3332,7 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
     }
     tickets.append(ticket)
     _save_tickets(tickets)
-    _log_audit("create_ticket", ticket["id"], {"email": email, "subject": subj, "priority": pri})
+    _log_audit("create_ticket", ticket["id"], {"email": email, "subject": subj, "priority": pri}, actor=actor, request=request)
 
     # Notify admin via email if SMTP configured
     if SMTP_HOST and FROM_EMAIL:
@@ -1772,12 +3400,12 @@ async def admin_create_ticket(request: Request, _: None = Depends(_require_admin
 
 
 @app.get("/api/admin/tickets")
-async def admin_list_tickets(_: None = Depends(_require_admin)):
+async def admin_list_tickets(_: dict = Depends(_require_admin_permission("support"))):
     return list(reversed(_load_tickets()))
 
 
 @app.patch("/api/admin/tickets/{ticket_id}")
-async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depends(_require_admin)):
+async def admin_update_ticket(ticket_id: str, request: Request, actor: dict = Depends(_require_admin_permission("support"))):
     body    = await request.json()
     tickets = _load_tickets()
     target  = next((t for t in tickets if t["id"] == ticket_id), None)
@@ -1793,7 +3421,7 @@ async def admin_update_ticket(ticket_id: str, request: Request, _: None = Depend
         })
     target["updated_at"] = _utcnow().isoformat()
     _save_tickets(tickets)
-    _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body})
+    _log_audit("update_ticket", ticket_id, {"status": target["status"], "had_reply": "reply" in body}, actor=actor, request=request)
     return target
 
 
@@ -1805,7 +3433,9 @@ async def portal_lookup(request: Request):
     Returns sanitized license info — never exposes other customers' data.
     """
     ip = request.client.host if request.client else "unknown"
-    if not _rate_check(_PORTAL_HITS, ip, PORTAL_RATE_MAX, PORTAL_RATE_WINDOW_SEC):
+    if not _rate_check_shared_request(
+        "portal", ip, request, PORTAL_RATE_MAX, PORTAL_RATE_WINDOW_SEC
+    ):
         raise HTTPException(429, f"Too many requests — try again in {PORTAL_RATE_WINDOW_SEC}s")
     body = await request.json()
     key = body.get("license_key", "").strip().upper()
@@ -1862,13 +3492,13 @@ async def portal_request_renewal(request: Request):
     }
     tickets.append(ticket)
     _save_tickets(tickets)
-    _log_audit("portal_renewal_request", key, {"email": email})
+    _log_audit("portal_renewal_request", key, {"email": email}, request=request)
     return {"ok": True, "ticket_id": ticket["id"]}
 
 
 # ── Audit log endpoint ───────────────────────────────────────────
 @app.get("/api/admin/audit")
-async def admin_audit_log(_: None = Depends(_require_admin)):
+async def admin_audit_log(_: dict = Depends(_require_admin_permission("read"))):
     """Returns last 500 audit entries (newest first)."""
     entries = _load_audit()
     return list(reversed(entries[-500:]))
@@ -1876,7 +3506,7 @@ async def admin_audit_log(_: None = Depends(_require_admin)):
 
 # ── Bulk operations ──────────────────────────────────────────────
 @app.post("/api/admin/licenses/bulk")
-async def admin_bulk_action(request: Request, _: None = Depends(_require_admin)):
+async def admin_bulk_action(request: Request, actor: dict = Depends(_require_admin_permission("billing"))):
     """
     Bulk action across multiple keys.
     Body: {"action": "expire"|"revoke"|"renew", "keys": ["KEY1","KEY2",...]}
@@ -1909,16 +3539,19 @@ async def admin_bulk_action(request: Request, _: None = Depends(_require_admin))
     affected = [key for key, _tier in affected_with_tiers]
     for key, tier in affected_with_tiers:
         _log_event(f"bulk_{action}", {"key": key[:8] + "…", "tier": tier})
-    _log_audit(f"bulk_{action}", f"{len(affected)} licenses", {
-        "affected": [k[:8] + "…" for k in affected],
-        "not_found": len(not_found),
-    })
+    _log_audit(
+        f"bulk_{action}",
+        f"{len(affected)} licenses",
+        {"affected": [k[:8] for k in affected], "not_found": len(not_found)},
+        actor=actor,
+        request=request,
+    )
     return {"ok": True, "affected": len(affected), "not_found": len(not_found)}
 
 
 # ── Settings ─────────────────────────────────────────────────────
 @app.get("/api/admin/settings")
-async def admin_settings(_: None = Depends(_require_admin)):
+async def admin_settings(_: dict = Depends(_require_admin_permission("settings"))):
     """Returns config (no secret values, just presence)."""
     return {
         "smtp": {
@@ -1939,7 +3572,7 @@ async def admin_settings(_: None = Depends(_require_admin)):
 
 
 @app.post("/api/admin/settings/test-email")
-async def admin_test_email(request: Request, _: None = Depends(_require_admin)):
+async def admin_test_email(request: Request, _: dict = Depends(_require_admin_permission("settings"))):
     """Send a test email to verify SMTP config."""
     body = await request.json()
     to_email = body.get("to", "").strip().lower()
@@ -1967,4 +3600,14 @@ async def admin_test_email(request: Request, _: None = Depends(_require_admin)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # Loopback by default. Production does not use this entry point -- the
+    # Dockerfile and railway.toml both invoke uvicorn directly with
+    # --host 0.0.0.0 -- so this block only ever runs on a developer machine,
+    # where binding every interface exposes the API to the local network.
+    # Override with PUSHKEY_BIND_HOST when that is actually wanted.
+    uvicorn.run(
+        app,
+        host=os.environ.get("PUSHKEY_BIND_HOST", "127.0.0.1"),
+        port=int(os.environ.get("PUSHKEY_BIND_PORT", "8000")),
+    )
