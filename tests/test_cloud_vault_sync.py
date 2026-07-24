@@ -356,7 +356,6 @@ def test_vault_snapshot_restore_recovers_metadata_and_blob_together(
     client.close()
     restore_dir = tmp_path / "restore"
     restore_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(app_module.USERS_FILE, restore_dir / "users.json")
     monkeypatch.setenv("PUSHKEY_DATA_DIR", str(restore_dir))
     _restore_sqlite_files(restore_dir / app_module.VAULT_STORE_DB.name, snapshot_dir)
     reloaded = importlib.reload(app_module)

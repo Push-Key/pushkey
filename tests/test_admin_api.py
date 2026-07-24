@@ -778,7 +778,7 @@ def test_email_sender_retries_and_dead_letters_without_body(app_module, monkeypa
 
 
 # ── License-CRM E2E flow ─────────────────────────────────────────
-def test_license_crm_e2e_issue_to_contact_to_invite(client):
+def test_license_crm_e2e_issue_to_contact_to_invite(client, app_module):
     """End-to-end: issue trial → appears in /contacts → update stage → resend invite."""
     # 1. Issue a trial license
     r1 = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
@@ -813,11 +813,8 @@ def test_license_crm_e2e_issue_to_contact_to_invite(client):
     assert r3.status_code == 200
     assert r3.json()["updated"] == 1
 
-    # 4. Confirm stage written to license file
-    import json as _json
-    from pathlib import Path
-    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
-    data = _json.loads(licenses_file.read_text())
+    # 4. Confirm stage persisted in the transactional license store
+    data = app_module._load_licenses()
     assert data[key]["stage"] == "converted"
 
     # 5. Trigger resend invite (no SMTP → sent=False, but endpoint should not 500)
@@ -827,9 +824,9 @@ def test_license_crm_e2e_issue_to_contact_to_invite(client):
     assert "sent" in body  # may be False (no SMTP); just verify shape
 
 
-def test_license_crm_auto_expire_flips_status(client):
+def test_license_crm_auto_expire_flips_status(client, app_module):
     """Issuing with a past expires_at and listing should auto-flip status to expired."""
-    # Issue normally then mutate expires_at to past via direct file (simulating time passing)
+    # Issue normally then mutate expires_at to past via the transactional store
     r = client.post("/api/admin/licenses/issue", headers=ADMIN, json={
         "tier": "pro", "email": "exp@x.com", "trial_days": 7,
     })
@@ -837,19 +834,16 @@ def test_license_crm_auto_expire_flips_status(client):
     key = r.json()["key"]
 
     # Force expires_at into the past
-    import json as _json
-    from pathlib import Path
-    licenses_file = Path(os.environ["PUSHKEY_DATA_DIR"]) / "licenses.json"
-    data = _json.loads(licenses_file.read_text())
+    data = app_module._load_licenses()
     data[key]["expires_at"] = "2000-01-01T00:00:00"
-    licenses_file.write_text(_json.dumps(data))
+    app_module._save_licenses(data)
 
     # Hit /contacts which calls _auto_expire
     r2 = client.get("/api/admin/contacts", headers=ADMIN)
     assert r2.status_code == 200
 
     # Reload — status should now be "expired"
-    data2 = _json.loads(licenses_file.read_text())
+    data2 = app_module._load_licenses()
     assert data2[key]["status"] == "expired"
 
 
@@ -1169,21 +1163,9 @@ def test_heartbeat_rate_limit(client, monkeypatch):
     assert r.status_code == 429
 
 
-def test_license_save_retries_transient_windows_replace_error(app_module, monkeypatch):
-    calls = {"count": 0}
-    real_replace = app_module.os.replace
-
-    def flaky_replace(src, dst):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise PermissionError("transient Windows replace denial")
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(app_module.os, "replace", flaky_replace)
-
+def test_license_save_persists_transactionally(app_module):
     app_module._save_licenses({"retry-key": {"status": "active"}})
 
-    assert calls["count"] == 2
     assert app_module._load_licenses()["retry-key"]["status"] == "active"
 
 
@@ -1209,7 +1191,7 @@ def test_password_reset_full_flow(client, app_module):
     r = client.post("/api/v1/auth/request-reset", json={"email": "u@x.com"})
     assert r.status_code == 200
 
-    # Read token from users.json (simulates clicking email link)
+    # Read token from the transactional user store (simulates clicking email link)
     users = app_module._load_users()
     token_hash = users["u@x.com"]["reset_token_hash"]
     assert token_hash is not None

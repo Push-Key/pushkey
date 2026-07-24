@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import html as _html
 import json
+import logging
 import os
 import secrets
 import smtplib
@@ -94,7 +95,6 @@ if not SECRET_KEY:
         )
 
 DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-USERS_FILE = DATA_DIR / "users.json"
 VAULT_STORE_DB = DATA_DIR / "vaults.sqlite"
 VAULT_OBJECTS_DIR = DATA_DIR / "vault_objects"
 LEGACY_VAULTS_DIR = DATA_DIR / "vaults"
@@ -219,9 +219,6 @@ async def _cloud_security_boundary(request: Request, call_next):
     return response
 
 # ── Admin config ─────────────────────────────────────────────────
-LICENSES_FILE = DATA_DIR / "licenses.json"
-ADMINS_FILE = DATA_DIR / "admins.json"
-ADMIN_SESSIONS_FILE = DATA_DIR / "admin_sessions.json"
 ADMIN_BOOTSTRAP_EMAIL = os.environ.get("PUSHKEY_ADMIN_EMAIL", "").strip().lower()
 ADMIN_BOOTSTRAP_PASSWORD = os.environ.get("PUSHKEY_ADMIN_PASSWORD", "")
 ADMIN_BOOTSTRAP_MFA_SECRET = os.environ.get("PUSHKEY_ADMIN_TOTP_SECRET", "").strip()
@@ -275,23 +272,199 @@ _LICENSE_LOCK = threading.RLock()
 _ADMIN_SESSION_LOCK = threading.RLock()
 _USER_LOCK = threading.RLock()
 
+_OPS_METADATA = MetaData()
 
-# ── User store (flat JSON, fine for <1000 users) ─────────────────
+_OPS_DOCUMENTS = Table(
+    "cloud_documents",
+    _OPS_METADATA,
+    Column("name", String, primary_key=True),
+    Column("payload_json", Text, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+_OPS_EVENTS = Table(
+    "cloud_events",
+    _OPS_METADATA,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("stream_name", String, nullable=False),
+    Column("payload_json", Text, nullable=False),
+    Column("created_at", String, nullable=False),
+)
+
+Index("idx_cloud_events_stream_id", _OPS_EVENTS.c.stream_name, _OPS_EVENTS.c.id)
+
+
+class _CloudStateStore:
+    def __init__(self, db_path: Path, *, metadata_url: str | None = None):
+        self.db_path = db_path
+        self._metadata_url = metadata_url
+        self._lock = threading.RLock()
+        self._engine = self._build_engine()
+        self._dialect_name = self._engine.dialect.name
+        _OPS_METADATA.create_all(self._engine)
+
+    def _build_engine(self):
+        url = _vault_database_url(self.db_path, self._metadata_url)
+        options = {"poolclass": NullPool, "future": True}
+        if url.startswith("sqlite"):
+            options["connect_args"] = {"check_same_thread": False}
+        return create_engine(url, **options)
+
+    def _connect(self):
+        return self._engine.connect()
+
+    def _dialect_insert(self, table):
+        if self._dialect_name == "postgresql":
+            return pg_insert(table)
+        if self._dialect_name == "sqlite":
+            return sqlite_insert(table)
+        raise RuntimeError(f"Unsupported database dialect: {self._dialect_name}")
+
+    def load_document(self, name: str, default_factory) -> dict | list:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    select(_OPS_DOCUMENTS.c.payload_json).where(_OPS_DOCUMENTS.c.name == name)
+                ).mappings().first()
+                if not row:
+                    return default_factory()
+                payload = row["payload_json"]
+                if not payload or not str(payload).strip():
+                    return default_factory()
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    return default_factory()
+
+    def save_document(self, name: str, data: dict | list) -> None:
+        payload = json.dumps(data, indent=2)
+        now = _utcnow().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": payload,
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[_OPS_DOCUMENTS.c.name],
+                        set_={
+                            "payload_json": stmt.excluded.payload_json,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    conn.execute(stmt)
+
+    def insert_document_if_absent(self, name: str, data: dict | list) -> None:
+        payload = json.dumps(data, indent=2)
+        now = _utcnow().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": payload,
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_nothing(
+                        index_elements=[_OPS_DOCUMENTS.c.name]
+                    )
+                    conn.execute(stmt)
+
+    def mutate_document(self, name: str, default_factory, mutator):
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    row = conn.execute(
+                        select(_OPS_DOCUMENTS.c.payload_json)
+                        .where(_OPS_DOCUMENTS.c.name == name)
+                        # Row lock so concurrent multi-worker mutations on
+                        # PostgreSQL serialize instead of last-write-wins;
+                        # SQLite ignores FOR UPDATE (single-writer already).
+                        .with_for_update()
+                    ).mappings().first()
+                    if not row:
+                        data = default_factory()
+                    else:
+                        payload = row["payload_json"]
+                        if not payload or not str(payload).strip():
+                            data = default_factory()
+                        else:
+                            try:
+                                data = json.loads(payload)
+                            except json.JSONDecodeError:
+                                data = default_factory()
+                    result = mutator(data)
+                    now = _utcnow().isoformat()
+                    stmt = self._dialect_insert(_OPS_DOCUMENTS).values(
+                        {
+                            "name": name,
+                            "payload_json": json.dumps(data, indent=2),
+                            "updated_at": now,
+                        }
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[_OPS_DOCUMENTS.c.name],
+                        set_={
+                            "payload_json": stmt.excluded.payload_json,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    conn.execute(stmt)
+                    return result
+
+    def append_event(self, stream_name: str, entry: dict) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                with conn.begin():
+                    conn.execute(
+                        self._dialect_insert(_OPS_EVENTS).values(
+                            {
+                                "stream_name": stream_name,
+                                "payload_json": json.dumps(entry),
+                                "created_at": _utcnow().isoformat(),
+                            }
+                        )
+                    )
+
+    def load_events(self, stream_name: str, limit: int | None = None) -> list[dict]:
+        with self._lock:
+            with self._connect() as conn:
+                stmt = select(_OPS_EVENTS.c.id, _OPS_EVENTS.c.payload_json).where(
+                    _OPS_EVENTS.c.stream_name == stream_name
+                )
+                if limit is not None:
+                    stmt = stmt.order_by(_OPS_EVENTS.c.id.desc()).limit(limit)
+                else:
+                    stmt = stmt.order_by(_OPS_EVENTS.c.id)
+                rows = conn.execute(stmt).mappings().all()
+                if limit is not None:
+                    rows = list(reversed(rows))
+                out: list[dict] = []
+                for row in rows:
+                    try:
+                        out.append(json.loads(row["payload_json"]))
+                    except Exception:
+                        logging.warning(
+                            "Skipping corrupt event row (stream=%s, id=%s)",
+                            stream_name,
+                            row["id"],
+                        )
+                return out
+
+
 def _load_users() -> dict:
     with _USER_LOCK:
-        if not USERS_FILE.exists():
-            return {}
-        raw = USERS_FILE.read_text()
-        if not raw.strip():
-            return {}
-        return json.loads(raw)
+        return _STATE_STORE.load_document("users", dict)
 
 def _save_users(users: dict) -> None:
     with _USER_LOCK:
-        USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = USERS_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
-        tmp.write_text(json.dumps(users, indent=2))
-        os.replace(tmp, USERS_FILE)
+        _STATE_STORE.save_document("users", users)
 
 
 # ── JWT helpers ──────────────────────────────────────────────────
@@ -984,6 +1157,7 @@ class _VaultStore:
 
 
 _vault_store = _VaultStore(VAULT_STORE_DB, LEGACY_VAULTS_DIR, metadata_url=CLOUD_METADATA_URL)
+_STATE_STORE = _CloudStateStore(VAULT_STORE_DB, metadata_url=CLOUD_METADATA_URL)
 
 @app.put("/api/v1/vault")
 async def put_vault(
@@ -1099,16 +1273,8 @@ async def ops_metrics():
     }
 
 
-# ── Event log (append-only JSONL for analytics) ──────────────────
-EVENTS_FILE = DATA_DIR / "events.jsonl"
-AUDIT_FILE  = DATA_DIR / "audit.jsonl"
-OUTBOX_FILE = DATA_DIR / "outbox.jsonl"
+# ── Event log (append-only event streams for analytics) ─────────
 _LOG_LOCK = threading.RLock()
-
-def _append_jsonl(path: Path, entry: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
 
 def _log_outbox(
     aggregate_type: str,
@@ -1127,26 +1293,17 @@ def _log_outbox(
         "created_at": _utcnow().isoformat(),
         "dispatched_at": None,
     }
-    _append_jsonl(OUTBOX_FILE, entry)
+    _STATE_STORE.append_event("outbox", entry)
     return entry
 
 def _log_event(event_type: str, data: dict) -> None:
     entry = {"ts": _utcnow().isoformat(), "type": event_type, **data}
     with _LOG_LOCK:
-        _append_jsonl(EVENTS_FILE, entry)
+        _STATE_STORE.append_event("events", entry)
         _log_outbox("event", event_type, event_type, data, data.get("request_id", ""))
 
 def _load_events() -> list[dict]:
-    if not EVENTS_FILE.exists():
-        return []
-    lines = EVENTS_FILE.read_text().splitlines()
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            pass
-    return out
+    return _STATE_STORE.load_events("events")
 
 def _log_audit(
     action: str,
@@ -1170,32 +1327,14 @@ def _log_audit(
         "ip": request.client.host if request and request.client else "",
     }
     with _LOG_LOCK:
-        _append_jsonl(AUDIT_FILE, entry)
+        _STATE_STORE.append_event("audit", entry)
         _log_outbox("audit", target, action, entry, request_id)
 
 def _load_audit() -> list[dict]:
-    if not AUDIT_FILE.exists():
-        return []
-    lines = AUDIT_FILE.read_text().splitlines()
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            pass
-    return out
+    return _STATE_STORE.load_events("audit")
 
 def _load_outbox() -> list[dict]:
-    if not OUTBOX_FILE.exists():
-        return []
-    lines = OUTBOX_FILE.read_text(encoding="utf-8").splitlines()
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            pass
-    return out
+    return _STATE_STORE.load_events("outbox")
 
 
 # ── Client-facing heartbeat ──────────────────────────────────────
@@ -1706,71 +1845,41 @@ async def deactivate(request: Request):
 # ── Admin helpers ────────────────────────────────────────────────
 def _load_licenses() -> dict:
     with _LICENSE_LOCK:
-        if not LICENSES_FILE.exists():
-            return {}
-        last_error: Exception | None = None
-        for attempt in range(5):
-            try:
-                raw = LICENSES_FILE.read_text()
-                return json.loads(raw) if raw.strip() else {}
-            except (PermissionError, json.JSONDecodeError) as exc:
-                last_error = exc
-                if os.name != "nt" or attempt == 4:
-                    break
-                time.sleep(0.02 * (attempt + 1))
-        raise last_error or RuntimeError(f"could not read {LICENSES_FILE}")
+        return _STATE_STORE.load_document("licenses", dict)
 
 def _save_licenses(data: dict) -> None:
     with _LICENSE_LOCK:
-        tmp = LICENSES_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        _replace_file_with_retry(tmp, LICENSES_FILE)
-
-
-def _replace_file_with_retry(src: Path, dst: Path) -> None:
-    last_error: PermissionError | None = None
-    for attempt in range(5):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            if os.name != "nt" or attempt == 4:
-                break
-            time.sleep(0.02 * (attempt + 1))
-    raise last_error or PermissionError(f"could not replace {dst}")
+        _STATE_STORE.save_document("licenses", data)
 
 
 def _mutate_licenses(mutator):
     """Run one synchronous license read-modify-write transaction."""
     with _LICENSE_LOCK:
-        licenses = _load_licenses()
-        result = mutator(licenses)
-        _save_licenses(licenses)
-        return result
+        return _STATE_STORE.mutate_document("licenses", dict, mutator)
 
 def _load_admins() -> dict:
-    if not ADMINS_FILE.exists():
-        admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
-        data = {
-            admin_id: {
-                "id": admin_id,
-                "email": ADMIN_BOOTSTRAP_EMAIL,
-                "display_name": ADMIN_BOOTSTRAP_EMAIL.split("@", 1)[0] or "admin",
-                "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
-                "role": "owner",
-                "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
-                "created": _utcnow().isoformat(),
-                "disabled": False,
-            }
+    admins = _STATE_STORE.load_document("admins", dict)
+    if admins:
+        return admins
+    admin_id = hashlib.sha256(ADMIN_BOOTSTRAP_EMAIL.encode()).hexdigest()[:16]
+    data = {
+        admin_id: {
+            "id": admin_id,
+            "email": ADMIN_BOOTSTRAP_EMAIL,
+            "display_name": ADMIN_BOOTSTRAP_EMAIL.split("@", 1)[0] or "admin",
+            "hash": pwd_ctx.hash(ADMIN_BOOTSTRAP_PASSWORD),
+            "role": "owner",
+            "mfa_secret": ADMIN_BOOTSTRAP_MFA_SECRET,
+            "created": _utcnow().isoformat(),
+            "disabled": False,
         }
-        ADMINS_FILE.write_text(json.dumps(data, indent=2))
-        return data
-    return json.loads(ADMINS_FILE.read_text())
+    }
+    _STATE_STORE.insert_document_if_absent("admins", data)
+    return _STATE_STORE.load_document("admins", dict)
 
 
 def _save_admins(data: dict) -> None:
-    ADMINS_FILE.write_text(json.dumps(data, indent=2))
+    _STATE_STORE.save_document("admins", data)
 
 
 def _admin_display_name(admin: dict) -> str:
@@ -1831,19 +1940,12 @@ def _new_admin_id(admins: dict) -> str:
 
 def _load_admin_sessions() -> dict:
     with _ADMIN_SESSION_LOCK:
-        if not ADMIN_SESSIONS_FILE.exists():
-            return {}
-        text = ADMIN_SESSIONS_FILE.read_text()
-        if not text.strip():
-            return {}
-        return json.loads(text)
+        return _STATE_STORE.load_document("admin_sessions", dict)
 
 
 def _save_admin_sessions(data: dict) -> None:
     with _ADMIN_SESSION_LOCK:
-        tmp = ADMIN_SESSIONS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        _replace_file_with_retry(tmp, ADMIN_SESSIONS_FILE)
+        _STATE_STORE.save_document("admin_sessions", data)
 
 
 def _revoke_admin_sessions(admin_id: str, *, except_hash: str | None = None) -> int:
@@ -3101,11 +3203,33 @@ async def admin_backup(request: Request, actor: dict = Depends(_require_admin_pe
     """Returns tar.gz of all data files (licenses, tickets, audit log, events, users — NOT vault blobs)."""
     import tarfile, io
     buf = io.BytesIO()
+    licenses = _load_licenses()
+    tickets = _load_tickets()
+    audit_entries = _load_audit()
+    event_entries = _load_events()
+    outbox_entries = _load_outbox()
+    users = _load_users()
+
+    def _jsonl_bytes(entries: list[dict]) -> bytes:
+        text = "\n".join(json.dumps(entry) for entry in entries)
+        if text:
+            text += "\n"
+        return text.encode("utf-8")
+
+    exports = {
+        "licenses.json": json.dumps(licenses, indent=2).encode("utf-8"),
+        "tickets.json": json.dumps(tickets, indent=2).encode("utf-8"),
+        "audit.jsonl": _jsonl_bytes(audit_entries),
+        "events.jsonl": _jsonl_bytes(event_entries),
+        "outbox.jsonl": _jsonl_bytes(outbox_entries),
+        "users.json": json.dumps(users, indent=2).encode("utf-8"),
+    }
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for fname in ("licenses.json", "tickets.json", "audit.jsonl", "events.jsonl", "outbox.jsonl", "users.json"):
-            fpath = DATA_DIR / fname
-            if fpath.exists():
-                tar.add(fpath, arcname=fname)
+        for fname, payload in exports.items():
+            info = tarfile.TarInfo(fname)
+            info.size = len(payload)
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(payload))
     buf.seek(0)
     _log_audit("backup", "data_dir", {"size_bytes": len(buf.getvalue())}, actor=actor, request=request)
     timestamp = _utcnow().strftime("%Y-%m-%d-%H%M%S")
@@ -3117,15 +3241,11 @@ async def admin_backup(request: Request, actor: dict = Depends(_require_admin_pe
 
 
 # ── Support tickets ──────────────────────────────────────────────
-TICKETS_FILE = DATA_DIR / "tickets.json"
-
 def _load_tickets() -> list[dict]:
-    if not TICKETS_FILE.exists():
-        return []
-    return json.loads(TICKETS_FILE.read_text())
+    return _STATE_STORE.load_document("tickets", list)
 
 def _save_tickets(tickets: list[dict]) -> None:
-    TICKETS_FILE.write_text(json.dumps(tickets, indent=2))
+    _STATE_STORE.save_document("tickets", tickets)
 
 
 @app.post("/api/admin/tickets")
