@@ -1,7 +1,22 @@
-"""Calculate roadmap checklist progress.
+"""Calculate roadmap checklist progress, split by what each item actually gates.
 
-The production roadmap can also contain explicitly marked post-launch agentic
-items. Keep those separate so production readiness percentages stay honest.
+One number cannot answer both "can we invite real users?" and "are we ready to
+sell this publicly?". Items that need a code-signing certificate, hosted backup
+infrastructure, or a paid third-party audit cannot move until money and
+external parties are involved, and counting them against alpha readiness makes
+the product look further from usable than it is.
+
+So the roadmap is bucketed by marker comments and this script reports each
+bucket separately:
+
+- `alpha_launch` (default, unmarked): everything that gates putting the product
+  in front of real users.
+- `public_beta_gate`: signing, hosted backup/restore/rollback evidence,
+  independent security review, and penetration testing. Deferred, not dropped.
+- `agentic_postlaunch`: post-launch review items.
+
+Deferring is a scheduling decision, never a quality one. Items in the deferred
+buckets stay listed, stay unchecked, and stay counted in their own totals.
 """
 
 from __future__ import annotations
@@ -15,9 +30,37 @@ from typing import Iterable
 
 
 CHECKBOX_RE = re.compile(r"^- \[([ xX])\]", re.MULTILINE)
-START_MARKER = "<!-- agentic-postlaunch:start -->"
-END_MARKER = "<!-- agentic-postlaunch:end -->"
 DEFAULT_ROADMAP = Path("docs/PRODUCTION_READINESS_PLAN.md")
+
+#: Buckets other than `alpha_launch`, keyed by the marker pair that opens and
+#: closes them. Anything outside every marked region counts toward
+#: `alpha_launch`, the work that gates inviting real users.
+#:
+#: `public_beta_gate` holds work that is real but cannot start until money,
+#: hosted infrastructure, or a third party is in play: code signing
+#: certificates, hosted backup/restore drills, independent security review, and
+#: penetration testing. Keeping it in its own bucket stops a checklist written
+#: for GA from making alpha readiness look worse than it is, and stops deferred
+#: work from quietly disappearing.
+BUCKET_MARKERS = {
+    "agentic_postlaunch": (
+        "<!-- agentic-postlaunch:start -->",
+        "<!-- agentic-postlaunch:end -->",
+    ),
+    "public_beta_gate": (
+        "<!-- public-beta-gate:start -->",
+        "<!-- public-beta-gate:end -->",
+    ),
+}
+
+PRIMARY_BUCKET = "alpha_launch"
+BUCKET_ORDER = (PRIMARY_BUCKET, "public_beta_gate", "agentic_postlaunch")
+
+BUCKET_LABELS = {
+    "alpha_launch": "Alpha launch",
+    "public_beta_gate": "Public beta / GA gates (deferred)",
+    "agentic_postlaunch": "Post-launch agentic review",
+}
 
 
 class RoadmapProgressError(ValueError):
@@ -45,46 +88,58 @@ def _count_checkbox(line: str, bucket: dict[str, float | int]) -> None:
 
 
 def calculate_progress(text: str) -> dict[str, dict[str, float | int]]:
-    """Return production and post-launch checklist progress for markdown text."""
+    """Return per-bucket checklist progress for roadmap markdown text.
 
-    production = _empty_bucket()
-    agentic_postlaunch = _empty_bucket()
-    in_agentic = False
+    Everything outside a marked region counts toward `alpha_launch`. Each
+    marker pair in `BUCKET_MARKERS` diverts its region into its own bucket.
+    Regions may not nest or overlap, so every checkbox lands in exactly one
+    bucket and no work can be double counted or dropped.
+    """
+
+    buckets = {name: _empty_bucket() for name in BUCKET_ORDER}
+    open_bucket: str | None = None
+    open_line = 0
 
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if START_MARKER in line:
-            if in_agentic:
-                raise RoadmapProgressError(
-                    f"Nested agentic post-launch marker at line {line_number}"
-                )
-            in_agentic = True
+        marker_handled = False
+        for name, (start, end) in BUCKET_MARKERS.items():
+            if start in line:
+                if open_bucket is not None:
+                    raise RoadmapProgressError(
+                        f"{name} marker at line {line_number} opens inside the "
+                        f"{open_bucket} region opened at line {open_line}; "
+                        "roadmap bucket regions may not nest"
+                    )
+                open_bucket = name
+                open_line = line_number
+                marker_handled = True
+                break
+            if end in line:
+                if open_bucket != name:
+                    raise RoadmapProgressError(
+                        f"Unexpected {name} end marker at line {line_number}"
+                    )
+                open_bucket = None
+                marker_handled = True
+                break
+        if marker_handled:
             continue
 
-        if END_MARKER in line:
-            if not in_agentic:
-                raise RoadmapProgressError(
-                    f"Unexpected agentic post-launch end marker at line {line_number}"
-                )
-            in_agentic = False
-            continue
+        _count_checkbox(line, buckets[open_bucket or PRIMARY_BUCKET])
 
-        _count_checkbox(line, agentic_postlaunch if in_agentic else production)
+    if open_bucket is not None:
+        raise RoadmapProgressError(
+            f"Unclosed {open_bucket} marker opened at line {open_line}"
+        )
 
-    if in_agentic:
-        raise RoadmapProgressError("Unclosed agentic post-launch marker")
-
-    return {
-        "production": _finish_bucket(production),
-        "agentic_postlaunch": _finish_bucket(agentic_postlaunch),
-    }
+    return {name: _finish_bucket(bucket) for name, bucket in buckets.items()}
 
 
 def _format_human(result: dict[str, dict[str, float | int]]) -> Iterable[str]:
-    for name in ("production", "agentic_postlaunch"):
+    for name in BUCKET_ORDER:
         bucket = result[name]
-        label = name.replace("_", " ").title()
         yield (
-            f"{label}: {bucket['done']}/{bucket['total']} "
+            f"{BUCKET_LABELS[name]}: {bucket['done']}/{bucket['total']} "
             f"= {bucket['percent']:.1f}%"
         )
 

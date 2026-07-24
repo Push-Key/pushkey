@@ -8,7 +8,9 @@ Measured production-readiness progress:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 317/337 production items complete, 94.1%.
+Current result: 320/327 alpha-launch items complete, 97.9%. The 18 deferred
+public-beta / GA gates and 3 post-launch review items are counted separately;
+see "How This Plan Is Scored" in `docs/PRODUCTION_READINESS_PLAN.md`.
 
 ## Completed in this execution pass
 

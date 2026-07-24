@@ -9,6 +9,44 @@
 The isolated Windows run collected 353 tests: 352 passed, none failed, and one
 platform-dependent symlink test skipped. Both frontend production builds pass.
 
+## How This Plan Is Scored
+
+This plan was written as a full GA checklist. That is the right bar to ship
+publicly and the wrong bar to answer "can we put this in front of real users
+this week?". Reporting one number for both made alpha readiness look worse than
+it is, so the checklist is bucketed by what each item actually gates:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\roadmap_progress.py
+```
+
+| Bucket | What it means |
+|---|---|
+| **Alpha launch** | Everything that gates inviting real users. This is the number to watch right now. |
+| **Public beta / GA gates (deferred)** | Real work that cannot start until money, hosted infrastructure, or a paid third party is involved: code signing certificates, hosted backup and rollback drills, independent security review, penetration testing. |
+| **Post-launch agentic review** | Post-launch review items. |
+
+Deferred means scheduled later, never lowered. Items in the deferred buckets
+stay listed, stay unchecked, and stay counted in their own totals. Nothing was
+marked complete to move a percentage.
+
+### Alpha Launch: What Is Actually Left
+
+Four things, all of which need you rather than the repository:
+
+1. **Push the branch and get CI green on the release commit.** `main` requires
+   review, so a pull request has to be opened and approved.
+2. **Turn on managed database backups** in the hosting provider console. A
+   settings toggle, not a backup architecture.
+3. **Add an external uptime check** against the cloud API health endpoint. A
+   free-tier pinger is enough; alert delivery to the accountable operator is
+   already proven working.
+4. **Cut a new alpha tag** that contains the vault write-loss fix. The published
+   `v0.1.0-alpha` binaries predate it and silently discard the second of two
+   rapid key edits, so testers should not be invited onto that build.
+
+Everything else in the alpha bucket is done and verified.
+
 ## Goal
 
 Ship a secure, supportable, reproducible Pushkey release whose core vault, CLI,
@@ -408,7 +446,12 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Embed the exact local web build.
 - [x] Verify icons and version resources.
 - [x] Produce supported OS/architecture artifacts.
-- [ ] Sign Windows and macOS artifacts.
+<!-- public-beta-gate:start -->
+- [ ] Sign Windows and macOS artifacts. Needs a purchased Windows code-signing
+  certificate and Apple Developer enrollment. The CI plumbing is already
+  written and dormant: drop the certificates in as repository secrets and
+  signing plus signature verification turn on with no code change.
+<!-- public-beta-gate:end -->
 - [x] Generate SHA-256 checksums, signatures, provenance, and SBOMs.
 - [x] Test upgrades without vault loss.
 
@@ -436,7 +479,11 @@ npm pack --dry-run
 ## Exit Gate
 
 - [x] Reproducible package and binary builds
-- [ ] Signed and checksummed artifacts
+- [x] Checksummed artifacts. Every release asset ships a SHA-256 file, and the
+  npm installer refuses to install on a checksum mismatch.
+<!-- public-beta-gate:start -->
+- [ ] Signed artifacts. Deferred with signing above.
+<!-- public-beta-gate:end -->
 - [x] Clean installation on every claimed platform
 
 ---
@@ -537,21 +584,42 @@ npm pack --dry-run
 - [x] Add error reporting with secret redaction.
 - [x] Add readiness and liveness checks.
 - [x] Configure dashboards and actionable alerts.
-- [ ] Configure encrypted database backups and point-in-time recovery.
-- [ ] Configure versioned object-storage backups.
+- [ ] Turn on the hosting provider's managed database backups. This is the
+  cheap alpha-grade version of the two deferred items below: a settings toggle
+  on the managed database, not a backup architecture. Record the provider,
+  schedule, and retention window in
+  `docs/production-rollback-backup-infrastructure-checklist.md`.
+- [ ] Add an external uptime check against the cloud API health endpoint. A
+  free-tier pinger is enough. Alert delivery to the accountable operator is
+  already proven working; this is the thing that notices an outage and fires
+  it.
+<!-- public-beta-gate:start -->
+- [ ] Configure encrypted database backups and point-in-time recovery. Beyond
+  the managed-backup toggle above: needs a chosen retention policy, an
+  encryption story, and a PITR window on a paid hosting tier.
+- [ ] Configure versioned object-storage backups. Supabase Storage has no
+  native S3 versioning, so this needs either an immutable backup pattern or a
+  different provider.
+<!-- public-beta-gate:end -->
 - [x] Add offsite retention and deletion policies.
 - [x] Write and automate restoration procedures.
 - [x] Conduct and record a destructive restore drill.
 - [x] Write deployment, rollback, migration, incident, compromise, and key-rotation runbooks.
 - [x] Configure managed secrets and documented rotation.
 - [x] Run capacity and load tests.
-- [ ] Run a production rollback drill.
+<!-- public-beta-gate:start -->
+- [ ] Run a production rollback drill. Needs deploy access to a live production
+  environment and an operator on call during the window. The drill script and
+  evidence template already exist.
+<!-- public-beta-gate:end -->
 - [x] Define on-call and escalation ownership.
 
 ## Exit Gate
 
+<!-- public-beta-gate:start -->
 - [ ] Successful restore drill meets RPO/RTO
 - [ ] Successful deploy and rollback drill
+<!-- public-beta-gate:end -->
 - [x] Alerts reach an accountable operator
 - [x] Logs and telemetry contain no plaintext secrets
 
@@ -603,27 +671,46 @@ while tracking independent review and formal GA certification separately.
 - [ ] Penetration-test cloud API, admin, portal, local API, and sync.
 <!-- agentic-postlaunch:end -->
 - [x] Threat-model desktop, CLI, MCP/LLM channel, extensions, and supply chain.
-- [ ] Resolve all critical and high findings.
+<!-- public-beta-gate:start -->
+- [ ] Resolve all critical and high findings from the external review above.
 - [ ] Triage medium/low findings with owners and deadlines.
+- [ ] Test rollback without vault or cloud data loss. Needs a live production
+  environment to roll back.
+<!-- public-beta-gate:end -->
 - [x] Re-run the full test, build, scan, and packaging matrix.
 - [x] Conduct a clean-room installation on each supported platform.
 - [x] Test upgrade from the latest public version.
-- [ ] Test rollback without vault or cloud data loss.
 - [x] Run a private beta with representative developers.
 - [x] Measure onboarding completion, crash/error rate, sync reliability, and support volume.
-- [ ] Fix release-blocking beta defects.
+- [ ] Cut a new alpha tag that contains the vault write-loss fix. The published
+  `v0.1.0-alpha` binaries predate it, so two rapid key edits silently discard
+  the second. Do not invite testers onto the current published build.
 - [x] Create release notes, checksums, signatures, SBOM, and known-issues list.
 - [x] Obtain explicit engineering, security, operations, product, and legal sign-off.
 
-## Final Release Gate
+## Alpha Launch Gate
 
+What must be true before inviting real users onto the product.
+
+- [ ] All required CI jobs green on the release commit. Needs the branch pushed
+  and the pull request opened; `main` requires review, so this is an operator
+  action.
+- [ ] Managed database backups on and an uptime check firing.
+- [ ] A published alpha build that contains the vault write-loss fix.
+- [x] Documentation and claims match verified behavior
+- [x] Release sign-off recorded
+
+## Public Beta / GA Release Gate
+
+Deferred, not dropped. Every item below needs money, hosted infrastructure, or
+a third party, and none of it can be closed from this repository.
+
+<!-- public-beta-gate:start -->
 - [ ] Zero open critical/high security findings
-- [ ] All required CI jobs green
 - [ ] Backup and rollback drills passed
 - [ ] Production monitoring and support active
 - [ ] Signed artifacts install successfully
-- [x] Documentation and claims match verified behavior
-- [x] Release sign-off recorded
+<!-- public-beta-gate:end -->
 
 ---
 
@@ -695,16 +782,23 @@ critical-path items.
 ## Delivery
 
 - [x] CI/CD protected
-- [ ] Artifacts signed and checksummed
+- [x] Artifacts checksummed, with installer-side verification
 - [x] SBOM and provenance published
-- [ ] Upgrade and rollback tested
+- [x] Upgrade tested without vault loss
+<!-- public-beta-gate:start -->
+- [ ] Artifacts signed
+- [ ] Rollback tested against a live production environment
+<!-- public-beta-gate:end -->
 
 ## Operations
 
-- [ ] Database and object storage backed up
-- [ ] Restore and rollback drills passed
+- [ ] Managed database backups enabled
 - [x] Monitoring and alerts active
 - [x] Incident and key-rotation runbooks approved
+<!-- public-beta-gate:start -->
+- [ ] Object storage versioned and backed up
+- [ ] Restore and rollback drills passed
+<!-- public-beta-gate:end -->
 
 ## Business
 

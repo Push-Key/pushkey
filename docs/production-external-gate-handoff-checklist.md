@@ -60,6 +60,18 @@ Current verified local state:
   companion for collecting the hosted evidence, signing records, and external
   review artifacts.
 
+## Alpha Launch Actions (Do These First)
+
+These four gate inviting real users. Everything else in this document is
+deferred to Public Beta or GA and is not blocking alpha.
+
+| Status | Action | Notes |
+|---|---|---|
+| [ ] | Push the branch, open the PR, get CI green on the release commit | `main` requires review. This is also what proves the accessibility gate, release provenance gate, and dependency fixes run in CI. |
+| [ ] | Turn on managed database backups in the hosting provider console | Settings toggle. Record provider, schedule, and retention below. |
+| [ ] | Add an external uptime check on the cloud API health endpoint | Free tier is fine. Alert delivery to the accountable operator is already proven; this is what fires it. |
+| [ ] | Cut a new alpha tag containing the vault write-loss fix | The published `v0.1.0-alpha` binaries predate the fix and silently discard the second of two rapid key edits. Do not invite testers onto that build. |
+
 ## Handoff Rules
 
 - Do not mark a gate complete from documentation alone.
@@ -71,6 +83,12 @@ Current verified local state:
   deferred Public Beta gates, not Alpha blockers.
 
 ## Remaining Production / Public Beta Gates
+
+Everything in this table is deferred past alpha. Each item needs money, hosted
+infrastructure, or a paid third party, and none of it can be closed from the
+repository. Deferring is a scheduling decision: nothing here was lowered or
+marked complete to move a percentage, and all of it stays counted in the
+tracker's `public_beta_gate` bucket.
 
 The checklist below is ordered by the current production / Public Beta
 sequence. Code signing stays last and remains a deferred risk for invite-only

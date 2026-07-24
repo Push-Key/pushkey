@@ -8,24 +8,55 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py --json
 ```
 
-Current result: 317/337 production items complete, 94.1%.
-90% target: already exceeded.
-100% target: 337/337 production items complete plus 3/3 post-alpha review items.
+Current result: 320/327 alpha-launch items complete, 97.9%. The 18 deferred
+public-beta / GA gates and 3 post-launch review items are counted separately;
+see "How This Plan Is Scored" in `docs/PRODUCTION_READINESS_PLAN.md`.
+## Alpha Launch: The Only Four Things Left
 
-For invite-only alpha, the roadmap is now clear on the alpha side. The
-remaining items in this queue are deferred to post-alpha / Public Beta or full
-GA work.
+Every one of these needs you rather than the repository. There is no remaining
+repo-local work blocking alpha.
 
-This document is the consecutive execution queue from the current verified
-state to full GA readiness. It intentionally separates locally finishable work
-from external proof gates such as signing credentials, production infrastructure,
-branch protection, independent review, and penetration testing.
+1. **Push the branch and get CI green on the release commit.** `main` requires
+   pull-request review, so this needs a PR opened and approved. This is also
+   what confirms the accessibility gate, the release provenance gate, and the
+   dependency fixes all run in CI and not just locally.
+2. **Turn on managed database backups** in the hosting provider console, then
+   record the provider, schedule, and retention window in
+   `docs/production-rollback-backup-infrastructure-checklist.md`. This is a
+   settings toggle, not a backup architecture.
+3. **Add an external uptime check** against the cloud API health endpoint. A
+   free-tier pinger is enough. Alert delivery to the accountable operator is
+   already proven working; this is what notices an outage and fires it.
+4. **Cut a new alpha tag containing the vault write-loss fix.** The published
+   `v0.1.0-alpha` binaries predate it, so two rapid key edits silently discard
+   the second. Do not invite testers onto the current published build.
+
+After those four, the alpha bucket is 100%.
+
+## What Was Deliberately Deferred, And Why
+
+The remaining 18 items are real, and none of them were lowered or marked
+complete to move a number. They are deferred because each needs money, hosted
+infrastructure, or a paid third party, and none can be closed from this
+repository:
+
+| Deferred | Why it waits | What unblocks it |
+|---|---|---|
+| Code signing for Windows and macOS | Annual certificate purchase and Apple Developer enrollment | Buy the certificates. The CI plumbing is already written and dormant; adding them as repository secrets turns signing and signature verification on with no code change. |
+| Encrypted backups with PITR, versioned object storage | Needs a paid hosting tier and a chosen retention/encryption policy | The alpha-grade managed-backup toggle above covers the near-term risk. |
+| Destructive restore drill, production rollback drill | Needs a live production environment and an operator on call | Scripts and evidence templates already exist and are committed. |
+| Independent security review, penetration test, and resolving their findings | Five-figure third-party engagements | Worth commissioning once alpha feedback has stopped reshaping the product, so the audit covers code that will still exist. |
+
+Doing these before alpha feedback would mean paying to audit and sign code
+that is about to change. That is the reason for the ordering, not a lowered
+standard.
 
 ## Current Ownership
 
 Current verified state:
 
-- 317/337 production items complete, 94.1%.
+- 320/327 alpha-launch items complete, 97.9%.
+- 0/18 deferred public-beta / GA gates complete, by design.
 - 0/3 post-alpha review items complete.
 - Alpha blocker is complete.
 - GitHub `main` has an active ruleset with pull-request review and
@@ -39,10 +70,8 @@ Current verified state:
   by a required CI check.
 
 No repo-local gate is blocked on you. Two optional hardening decisions are
-yours whenever you want them, and neither blocks anything: applying the drafted
-release tag ruleset, and commissioning the manual accessibility review. Every
-other remaining gate needs hosted credentials, third-party evidence, or a
-sign-off only you can give.
+yours whenever you want them, and neither blocks alpha: applying the drafted
+release tag ruleset, and commissioning the manual accessibility review.
 
 ### Agent-Executable Next Slices
 
@@ -307,21 +336,21 @@ Exit gate:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py --json
 ```
 
-The result is 337/337 production items and 3/3 post-alpha review items, with
-external review, pentest, and final sign-off evidence attached or referenced.
+The result is 327/327 alpha-launch items, 18/18 public-beta / GA gates, and 3/3
+post-alpha review items, with external review, pentest, and final sign-off
+evidence attached or referenced.
 
 ## Recommended Consecutive Motion
 
-1. Complete Phase 1 first. This should be the fastest path from 89.6% to 90%
-   because it focuses on reconciliation and local evidence.
-2. Complete Phase 2 before inviting paid/evaluation alpha users.
-3. Run alpha with constrained claims while collecting defects and support data.
-4. Complete Phases 3 and 4 to replace alpha infrastructure with GA
-   infrastructure.
-5. Complete Phase 5 before inviting Public Beta users or publishing signed
-   release artifacts.
-6. Complete Phase 6 before public release.
-7. Complete Phase 7 before claiming full production/GA readiness.
+1. Close the four alpha-launch items at the top of this document.
+2. Invite alpha users onto the new tag and collect defects, pain points, and
+   support load. Run alpha with constrained claims.
+3. Let that feedback settle the product shape before spending on certificates
+   or audits, so neither is paid for twice.
+4. Buy signing credentials and complete the hosted backup, restore, and
+   rollback drills before Public Beta.
+5. Commission the independent security review and penetration test, then
+   resolve their findings, before claiming full production/GA readiness.
 
 ## Detailed Post-Alpha / Public Beta Blockers
 

@@ -42,8 +42,13 @@ Do not claim the following for alpha:
   repository settings.
 - Production backups, rollback, signing, and external review remain post-alpha
   / GA work.
-- The current completion tracker shows 317/337 production items complete
-  (94.1%) and 0/3 post-alpha review items complete.
+- The current completion tracker shows 320/327 alpha-launch items complete
+  (97.9%). The remaining four are operator actions: CI green on the release
+  commit, managed database backups, an uptime check, and a new alpha tag
+  carrying the vault write-loss fix.
+- 18 public-beta / GA gates (signing, hosted backup and rollback drills,
+  independent review, penetration test) and 3 post-launch review items are
+  deferred and counted in separate buckets, not against alpha readiness.
 
 ## Recent Verification
 
