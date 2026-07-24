@@ -43,6 +43,9 @@ build/
 dist/
 *.egg-info/
 *.spec
+# setuptools stages the sdist into <name>-<version>/ at the repo root. Files
+# committed from there make `python -m build` fail on the staging cleanup.
+/pushkey-[0-9]*/
 
 # Tooling scratch
 .git-rewrite/

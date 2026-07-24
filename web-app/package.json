@@ -26,6 +26,7 @@
     "tailwind-merge": "^2.5.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.57.0",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22",
@@ -37,6 +38,7 @@
     "typescript": "^5"
   },
   "overrides": {
-    "postcss": "^8.5.14"
+    "postcss": "^8.5.14",
+    "sharp": "^0.35.3"
   }
 }
