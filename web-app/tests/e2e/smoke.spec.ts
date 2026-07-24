@@ -28,7 +28,7 @@ async function installShellRoutes(page: Page, state: RouteState) {
     }),
   );
 
-  await page.route("**/api/health", (route) =>
+  await page.route("**/api/health**", (route) =>
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -47,7 +47,7 @@ async function installShellRoutes(page: Page, state: RouteState) {
     }),
   );
 
-  await page.route("**/api/forecast", (route) =>
+  await page.route("**/api/forecast**", (route) =>
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -133,7 +133,7 @@ test("loads the unlocked shell and responds to lock actions", async ({ page }) =
   const state = { locked: false };
   await installShellRoutes(page, state);
 
-  await page.goto("/#t=launch-token");
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
 
   await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Dashboard" })).toBeVisible();
@@ -141,7 +141,7 @@ test("loads the unlocked shell and responds to lock actions", async ({ page }) =
   await expect(
     page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Open Settings" }),
   ).toBeVisible();
-  await expect(page.getByText("Dashboard")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   await page.getByRole("button", { name: "Lock vault" }).click();
 
@@ -155,7 +155,7 @@ test("shows the locked session controls with accessible labels", async ({ page }
   const state = { locked: true };
   await installShellRoutes(page, state);
 
-  await page.goto("/#t=launch-token");
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
 
   await expect(page.getByText("Offline or locked: unlock locally to load vault data and write changes.")).toBeVisible();
   await expect(page.getByLabel("Master password")).toBeVisible();

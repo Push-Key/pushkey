@@ -130,8 +130,9 @@ export function LoginScreen({ hasVault, onUnlocked }: Props) {
                   value={recovery}
                   onChange={(e) => setRecovery(formatRecovery(e.target.value))}
                   disabled={busy}
+                  aria-describedby="rec-hint"
                 />
-                <p className="flex items-center gap-1.5 text-[11px] text-orange-400">
+                <p id="rec-hint" className="flex items-center gap-1.5 text-[11px] text-orange-400">
                   <ShieldAlert className="h-3 w-3" /> Recovery unlock is read-only
                 </p>
               </div>

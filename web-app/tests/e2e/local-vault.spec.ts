@@ -108,6 +108,9 @@ test("local vault browser journey unlocks, mutates, injects, and locks", async (
       method: "POST",
       body: JSON.stringify({ password: "test-password" }),
     });
+    // The unlock happens out-of-band, so refresh once to sync the shell
+    // instead of waiting for the 30s status poll.
+    await page.reload({ waitUntil: "commit" });
     const before = await api<{ keys: { name: string }[] }>(page, "/api/keys");
     expect(before.keys.map((key) => key.name)).toContain("EXISTING_KEY");
 

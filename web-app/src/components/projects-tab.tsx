@@ -432,8 +432,12 @@ export function ProjectsTab() {
 
   const handleAdded = (p: Project) => setProjects((prev) => [p, ...prev]);
 
-  const handleDelete = (path: string) =>
+  const handleDelete = (path: string) => {
     setProjects((prev) => prev.filter((p) => p.path !== path));
+    // WCAG: the deleted card unmounts with focus inside it — restore focus to a
+    // stable element (the Add project path input) instead of letting it drop to <body>.
+    document.getElementById("proj-path")?.focus();
+  };
 
   const handleUpdate = (updated: Project) =>
     setProjects((prev) => prev.map((p) => (p.path === updated.path ? updated : p)));
