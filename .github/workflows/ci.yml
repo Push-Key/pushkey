@@ -177,30 +177,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # public_export.py refuses to write inside the source checkout, so that a
-      # recursive copy can never swallow its own output. That invariant is
-      # asserted by tests/test_public_export.py. This step used to pass a
-      # relative `public-export`, which resolves inside the checkout, so it
-      # failed before scanning anything. Export outside the checkout, then stage
-      # a copy inside the workspace because the gitleaks action runs in a
-      # container that only sees the workspace.
+      # public_export.py refuses to write inside the source checkout so a
+      # recursive copy cannot swallow its own output; tests/test_public_export.py
+      # asserts that. This step used to pass a relative `public-export`, which
+      # resolves inside the checkout, so it failed before scanning anything.
       - name: Export public repository boundary
-        run: |
-          python scripts/public_export.py "$RUNNER_TEMP/public-export"
-          cp -r "$RUNNER_TEMP/public-export" public-export
+        run: python scripts/public_export.py "$RUNNER_TEMP/public-export"
 
+      # Deliberately the gitleaks CLI, not a second use of gitleaks-action. The
+      # action ignores `args` and always scans the repository's git history, so
+      # it never looked at the export; and it always uploads a fixed-name
+      # results artifact, so a second use in the same run died with
+      # "409 Conflict: an artifact with this name already exists".
       - name: Secret scan public export
-        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
-        with:
-          args: detect --source public-export --no-git --redact
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Drop the staged copy so the later filesystem scan does not walk a
-      # duplicate of the tree it is already scanning.
-      - name: Remove staged public export
-        if: always()
-        run: rm -rf public-export
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect \
+            --source "$RUNNER_TEMP/public-export" \
+            --no-git \
+            --redact \
+            --exit-code 1
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
