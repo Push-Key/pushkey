@@ -645,7 +645,8 @@ def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_pa
             ),
             projects,
         ))
-    assert [response.status_code for response in responses] == [201, 201]
+    assert [response.status_code for response in responses] == [201, 201], \
+        [(response.status_code, response.text) for response in responses]
     stored = load_config()["projects"]
     assert all(str(project.resolve()) in stored for project in projects)
 
@@ -784,10 +785,13 @@ def test_inject_skips_existing_env_keys(unlocked, auth, tmp_path):
     p = str(tmp_path / "proj")
     (tmp_path / "proj").mkdir()
     (tmp_path / "proj" / ".env").write_text("OPENAI_API_KEY=preexisting\n", encoding="utf-8")
-    unlocked.post("/api/projects", headers=auth, json={"path": p})
-    unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
-                  json={"keys": ["OPENAI_API_KEY"]})
+    r_register = unlocked.post("/api/projects", headers=auth, json={"path": p})
+    assert r_register.status_code == 201, r_register.text
+    r_assign = unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
+                             json={"keys": ["OPENAI_API_KEY"]})
+    assert r_assign.status_code == 200, r_assign.text
     r = unlocked.post("/api/projects/inject", headers=auth, params={"path": p}, json={})
+    assert r.status_code == 200, r.text
     body = r.json()
     assert body["injected"] == []
     assert "OPENAI_API_KEY" in body["skipped_existing"]
