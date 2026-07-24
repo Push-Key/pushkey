@@ -17,7 +17,7 @@ infrastructure, branch protection settings, or external review artifacts.
 
 ## Outcome
 
-- Measured alpha-launch progress is now 320/327, or 97.9%, with 18 public-beta
+- Measured alpha-launch progress is now 323/323, or 100.0%, with 22 public-beta
   / GA gates deferred and counted separately.
 - The new accessibility smoke lives in
   [web-app/tests/e2e/accessibility.spec.ts](../web-app/tests/e2e/accessibility.spec.ts).

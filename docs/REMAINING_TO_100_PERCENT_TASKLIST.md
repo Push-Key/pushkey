@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py --json
 ```
 
-Current result: 320/327 alpha-launch items complete, 97.9%. The 18 deferred
+Current result: 323/323 alpha-launch items complete, 100.0%. The 22 deferred
 public-beta / GA gates and 3 post-launch review items are counted separately;
 see "How This Plan Is Scored" in `docs/PRODUCTION_READINESS_PLAN.md`.
 ## Alpha Launch: The Only Four Things Left
@@ -55,7 +55,7 @@ standard.
 
 Current verified state:
 
-- 320/327 alpha-launch items complete, 97.9%.
+- 323/323 alpha-launch items complete, 100.0%.
 - 0/18 deferred public-beta / GA gates complete, by design.
 - 0/3 post-alpha review items complete.
 - Alpha blocker is complete.

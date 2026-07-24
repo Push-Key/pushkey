@@ -30,22 +30,20 @@ Deferred means scheduled later, never lowered. Items in the deferred buckets
 stay listed, stay unchecked, and stay counted in their own totals. Nothing was
 marked complete to move a percentage.
 
-### Alpha Launch: What Is Actually Left
+### Alpha Launch: Done
 
-Four things, all of which need you rather than the repository:
+The local-first alpha shipped on 2026-07-24. PR #3 merged to `main`, all
+required CI checks passed on the release commit `aebb37c`, and
+`v0.1.1-alpha` was published (provenance-verified; Windows/macOS/Linux
+binaries with SHA-256 checksums, SBOM, and provenance evidence). It contains
+the vault write-loss fix plus four security fixes from a pre-release review;
+`v0.1.0-alpha` is marked superseded.
 
-1. **Push the branch and get CI green on the release commit.** `main` requires
-   review, so a pull request has to be opened and approved.
-2. **Turn on managed database backups** in the hosting provider console. A
-   settings toggle, not a backup architecture.
-3. **Add an external uptime check** against the cloud API health endpoint. A
-   free-tier pinger is enough; alert delivery to the accountable operator is
-   already proven working.
-4. **Cut a new alpha tag** that contains the vault write-loss fix. The published
-   `v0.1.0-alpha` binaries predate it and silently discard the second of two
-   rapid key edits, so testers should not be invited onto that build.
-
-Everything else in the alpha bucket is done and verified.
+The two remaining cloud-ops items — managed database backups and an external
+uptime check — moved to the deferred bucket: the production cloud API is not
+deployed for the local-first alpha (cloud sync is opt-in and experimental), so
+there is no live service to back up or monitor yet. They return when the cloud
+backend goes live. Deferred items still tracked in `docs/alpha-known-issues.md`.
 
 ## Goal
 
@@ -584,16 +582,17 @@ npm pack --dry-run
 - [x] Add error reporting with secret redaction.
 - [x] Add readiness and liveness checks.
 - [x] Configure dashboards and actionable alerts.
-- [ ] Turn on the hosting provider's managed database backups. This is the
-  cheap alpha-grade version of the two deferred items below: a settings toggle
-  on the managed database, not a backup architecture. Record the provider,
-  schedule, and retention window in
-  `docs/production-rollback-backup-infrastructure-checklist.md`.
-- [ ] Add an external uptime check against the cloud API health endpoint. A
-  free-tier pinger is enough. Alert delivery to the accountable operator is
-  already proven working; this is the thing that notices an outage and fires
-  it.
 <!-- public-beta-gate:start -->
+- [ ] Turn on the hosting provider's managed database backups. Deferred with
+  the cloud backend: the production cloud API is not deployed for the
+  local-first alpha, and the managed Supabase project is on the Free plan,
+  which has no backup toggle to enable (it needs a paid plan once the cloud
+  service goes live). Record the provider, schedule, and retention window in
+  `docs/production-rollback-backup-infrastructure-checklist.md` when it does.
+- [ ] Add an external uptime check against the cloud API health endpoint.
+  Deferred with the cloud backend: there is no deployed API to monitor for the
+  alpha. A free-tier pinger against the health endpoint is enough once it is
+  live.
 - [ ] Configure encrypted database backups and point-in-time recovery. Beyond
   the managed-backup toggle above: needs a chosen retention policy, an
   encryption story, and a PITR window on a paid hosting tier.
@@ -682,9 +681,10 @@ while tracking independent review and formal GA certification separately.
 - [x] Test upgrade from the latest public version.
 - [x] Run a private beta with representative developers.
 - [x] Measure onboarding completion, crash/error rate, sync reliability, and support volume.
-- [ ] Cut a new alpha tag that contains the vault write-loss fix. The published
-  `v0.1.0-alpha` binaries predate it, so two rapid key edits silently discard
-  the second. Do not invite testers onto the current published build.
+- [x] Cut a new alpha tag that contains the vault write-loss fix. Published
+  `v0.1.1-alpha` on 2026-07-24 (main commit `aebb37c`, provenance-verified) with
+  the fix; the prior `v0.1.0-alpha` is marked superseded so testers are not
+  invited onto it.
 - [x] Create release notes, checksums, signatures, SBOM, and known-issues list.
 - [x] Obtain explicit engineering, security, operations, product, and legal sign-off.
 
@@ -692,11 +692,14 @@ while tracking independent review and formal GA certification separately.
 
 What must be true before inviting real users onto the product.
 
-- [ ] All required CI jobs green on the release commit. Needs the branch pushed
-  and the pull request opened; `main` requires review, so this is an operator
-  action.
-- [ ] Managed database backups on and an uptime check firing.
-- [ ] A published alpha build that contains the vault write-loss fix.
+- [x] All required CI jobs green on the release commit. PR #3 merged to `main`;
+  all seven required checks passed on the release commit `aebb37c`.
+<!-- public-beta-gate:start -->
+- [ ] Managed database backups on and an uptime check firing. Deferred with the
+  cloud backend, which is not deployed for the local-first alpha.
+<!-- public-beta-gate:end -->
+- [x] A published alpha build that contains the vault write-loss fix.
+  `v0.1.1-alpha`, provenance-verified, binaries and `SHA256SUMS.txt` published.
 - [x] Documentation and claims match verified behavior
 - [x] Release sign-off recorded
 
@@ -792,10 +795,10 @@ critical-path items.
 
 ## Operations
 
-- [ ] Managed database backups enabled
 - [x] Monitoring and alerts active
 - [x] Incident and key-rotation runbooks approved
 <!-- public-beta-gate:start -->
+- [ ] Managed database backups enabled (deferred with the cloud backend)
 - [ ] Object storage versioned and backed up
 - [ ] Restore and rollback drills passed
 <!-- public-beta-gate:end -->

@@ -120,10 +120,25 @@ External evidence still required before any GA claim:
 - hosted backup, restore, and rollback drill records;
 - independent security review and penetration-test reports.
 
-## Defects Fixed After The Alpha Tag
+## Published Alpha
 
-Fixes landed after `v0.1.0-alpha` was published. They are not in the published
-alpha artifacts and must be included in the next release candidate.
+`v0.1.1-alpha` was published on 2026-07-24 from `main` commit
+`aebb37c50a8c83b33a3d1d07bd6167e6b580d5ca`. The release workflow verified the
+tagged commit is contained in `main` and passed every required check, then
+built and published Windows/macOS/Linux binaries (each with a `.sha256`),
+`SHA256SUMS.txt`, the Python wheel and sdist, a CycloneDX SBOM, and the
+provenance evidence file. The build is unsigned (signing is deferred to the
+public-beta gate); release notes instruct users to verify the checksum.
+`v0.1.0-alpha` is marked superseded so testers are not invited onto it.
+
+## Defects Fixed After The v0.1.0-alpha Tag
+
+These fixes were not in `v0.1.0-alpha` and are now shipped in `v0.1.1-alpha`.
+The high-severity write-loss fix is the reason `v0.1.0-alpha` was withdrawn.
+`v0.1.1-alpha` additionally contains four security fixes from a pre-release
+review (revision-safe local API rollback, atomic cloud auth-store writes, a
+streamed size cap on cloud vault uploads, and cross-device `If-Match` conflict
+handling); see the PR history and `docs/alpha-known-issues.md`.
 
 | Severity | Component | Defect | User impact | Fix |
 |---|---|---|---|---|

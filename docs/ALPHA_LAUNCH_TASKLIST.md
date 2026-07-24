@@ -2,8 +2,15 @@
 
 Status date: 2026-07-24
 
-Four tasks stand between here and alpha users. Each needs you, not the
-repository. Work them top to bottom: task 4 depends on task 1 landing first.
+> **DONE — the local-first alpha shipped on 2026-07-24.** PR #3 merged to
+> `main`, all required CI checks passed on the release commit `aebb37c`, and
+> `v0.1.1-alpha` was published (provenance-verified; Windows/macOS/Linux
+> binaries with SHA-256 checksums, SBOM, and provenance evidence).
+> `v0.1.0-alpha` is marked superseded. The two cloud-ops tasks below (managed
+> database backups, uptime check) moved to the deferred bucket because the
+> production cloud API is not deployed for this local-first alpha — there is no
+> live service to back up or monitor yet. The historical task write-ups are
+> retained below for when the cloud backend goes live.
 
 Current state:
 
@@ -12,9 +19,9 @@ Current state:
 ```
 
 ```
-Alpha launch:                       320/327 = 97.9%
-Public beta / GA gates (deferred):    0/18  =  0.0%
-Post-launch agentic review:           0/3   =  0.0%
+Alpha launch:                       323/323 = 100.0%
+Public beta / GA gates (deferred):    0/22  =   0.0%
+Post-launch agentic review:           0/3   =   0.0%
 ```
 
 Everything in the deferred buckets is scheduled after alpha on purpose. See
@@ -161,8 +168,8 @@ Signing steps skip themselves cleanly while no certificates are configured.
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-reports `Alpha launch: 327/327 = 100.0%`, and there is a published build that
-testers can safely install.
+reports `Alpha launch: 323/323 = 100.0%`, and there is a published build that
+testers can safely install. Both are now true: `v0.1.1-alpha` is published.
 
 ## Explicitly not in scope
 

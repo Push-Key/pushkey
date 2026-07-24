@@ -42,7 +42,7 @@ Do not claim the following for alpha:
   repository settings.
 - Production backups, rollback, signing, and external review remain post-alpha
   / GA work.
-- The current completion tracker shows 320/327 alpha-launch items complete
+- The current completion tracker shows 323/323 alpha-launch items complete
   (97.9%). The remaining four are operator actions: CI green on the release
   commit, managed database backups, an uptime check, and a new alpha tag
   carrying the vault write-loss fix.
