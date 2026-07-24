@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import base64
 import hashlib
@@ -501,6 +502,80 @@ def test_normal_saves_retain_exactly_three_rolling_backups():
         vault["K"]["value"] = str(index)
         save_vault(vault, "pw", vault_key=vault_key)
     assert len(list(_s.VAULT_DIR.glob("vault_backup_*.enc"))) == 3
+
+
+def test_backups_in_the_same_clock_tick_do_not_collide(monkeypatch):
+    # datetime.now() has ~16ms granularity on Windows, so two vault writes in
+    # the same tick previously produced the same backup filename. Exclusive
+    # creation then raised FileExistsError, which the local API surfaced as a
+    # rolled-back 500 for the second of any two rapid vault mutations.
+    import pushkey_shared as _s
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    pushkey_vault._create_rolling_backup(b"first")
+    pushkey_vault._create_rolling_backup(b"second")
+    pushkey_vault._create_rolling_backup(b"third")
+
+    backups = sorted(_s.VAULT_DIR.glob("vault_backup_*.enc"))
+    assert len(backups) == 3
+    assert {path.read_bytes() for path in backups} == {b"first", b"second", b"third"}
+
+
+def test_migration_backups_in_the_same_clock_tick_do_not_collide(monkeypatch):
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    first = pushkey_vault._create_migration_backup(b"first")
+    second = pushkey_vault._create_migration_backup(b"second")
+
+    assert first != second
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+
+
+def test_pruning_is_deterministic_when_backup_timestamps_tie(monkeypatch):
+    # Same-tick backups can also share an mtime. Sorting by mtime alone leaves
+    # the survivors up to dict/glob order, so prune ties break by name.
+    import pushkey_shared as _s
+    import pushkey_vault
+
+    frozen = datetime(2026, 7, 23, 20, 45, 54, 356705)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(pushkey_vault, "datetime", _FrozenDatetime)
+
+    for index in range(5):
+        pushkey_vault._create_rolling_backup(str(index).encode())
+    for path in _s.VAULT_DIR.glob("vault_backup_*.enc"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    pushkey_vault._prune_rolling_backups()
+    survivors = sorted(p.name for p in _s.VAULT_DIR.glob("vault_backup_*.enc"))
+
+    assert len(survivors) == 3
+    pushkey_vault._prune_rolling_backups()
+    assert sorted(p.name for p in _s.VAULT_DIR.glob("vault_backup_*.enc")) == survivors
 
 
 def test_failed_normal_replace_does_not_prune_existing_history(monkeypatch):

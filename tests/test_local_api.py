@@ -504,9 +504,10 @@ def test_create_and_list_project(unlocked, auth, tmp_path):
 def test_create_project_duplicate(unlocked, auth, tmp_path):
     p = str(tmp_path / "p")
     (tmp_path / "p").mkdir()
-    unlocked.post("/api/projects", headers=auth, json={"path": p})
+    first = unlocked.post("/api/projects", headers=auth, json={"path": p})
+    assert first.status_code == 201, first.text
     r = unlocked.post("/api/projects", headers=auth, json={"path": p})
-    assert r.status_code == 409
+    assert r.status_code == 409, r.text
 
 
 def test_create_project_rejects_relative_path(unlocked, auth):
