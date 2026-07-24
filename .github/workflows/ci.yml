@@ -225,7 +225,10 @@ jobs:
           # go green gets ignored or removed; this one blocks the severities
           # that actually warrant blocking a merge.
           bandit -q -r pushkey*.py -ll
-          cyclonedx-py requirements requirements.txt requirements-api.txt requirements-dev.txt -o python-sbom.json
+          # cyclonedx-py takes exactly one requirements file, so concatenate
+          # all three requirement sets into the SBOM input.
+          cat requirements.txt requirements-api.txt requirements-dev.txt > sbom-requirements.txt
+          cyclonedx-py requirements sbom-requirements.txt -o python-sbom.json
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020

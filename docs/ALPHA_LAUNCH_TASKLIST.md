@@ -63,7 +63,7 @@ not a code problem.
 
 **Then merge the PR.** Squash or merge commit, your preference.
 
-- [ ] Branch pushed, PR opened
+- [x] Branch pushed, PR opened (PR #3, 2026-07-24)
 - [ ] All seven required checks green
 - [ ] PR merged to `main`
 
