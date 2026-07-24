@@ -549,11 +549,16 @@ def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
 def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch, fresh_app):
     project = tmp_path / "project"
     project.mkdir()
-    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
-    unlocked.post(
+    # Assert the setup calls. Ignoring them turns any setup failure into a
+    # confusing "DID NOT RAISE" on the assertion below instead of pointing at
+    # the step that actually broke.
+    created = unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    assert created.status_code == 201, created.text
+    assigned = unlocked.post(
         "/api/projects/assign", headers=auth, params={"path": str(project)},
         json={"keys": ["OPENAI_API_KEY"]},
     )
+    assert assigned.status_code < 400, assigned.text
     original = fresh_app._atomic_project_write
 
     def fail_ignore(registered, filename, data, expected_identity=None):

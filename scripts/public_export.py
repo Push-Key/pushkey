@@ -43,22 +43,55 @@ DEFAULT_ALLOWLIST = (
     "web-app",
 )
 
+#: Directory and file names never copied into the public export, matched against
+#: any path component.
+#:
+#: `.next` matters as much as `.env` here. A built `web/` tree contains
+#: `.next/prerender-manifest.json` and `.next/cache/.previewinfo`, which hold
+#: real `previewModeSigningKey` and `previewModeEncryptionKey` values for that
+#: deployment. Because `web` and `web-app` are on the allowlist, running this
+#: export on any machine that had built the frontends would have copied those
+#: keys straight into the public boundary.
 DENY_NAMES = {
     ".env",
     ".git",
     ".mypy_cache",
+    ".next",
+    ".playwright-mcp",
     ".pytest_cache",
     ".ruff_cache",
+    ".turbo",
     ".venv",
+    ".vercel",
     "__pycache__",
     "build",
+    "coverage",
     "dist",
     "node_modules",
+    "out",
+    "test-results",
 }
 
 
+#: Dotenv files safe to publish. Everything else matching `.env*` is denied.
+ENV_ALLOWED_NAMES = {".env.example", ".env.sample", ".env.template"}
+
+
+def _is_denied_name(name: str) -> bool:
+    if name in DENY_NAMES:
+        return True
+    # Exact-name matching on ".env" missed every real-world variant:
+    # .env.local, .env.production, .env.vercel.local, .env.production.fetched.
+    # Those hold live credentials and sit right next to the tracked
+    # .env.example, so the export happily copied them into the public
+    # boundary. Deny the whole family and allow back only the templates.
+    if name.startswith(".env") and name not in ENV_ALLOWED_NAMES:
+        return True
+    return False
+
+
 def _is_denied(path: Path) -> bool:
-    return any(part in DENY_NAMES for part in path.parts)
+    return any(_is_denied_name(part) for part in path.parts)
 
 
 def export_public_repo(source: Path, destination: Path) -> list[Path]:
