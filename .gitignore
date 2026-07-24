@@ -49,9 +49,13 @@ dist/
 
 # Test and tooling scratch output
 web-app/test-results/
+web/test-results/
 web-app/.next-start.log
 web-app/.static-server.log
 .playwright-mcp/
+
+# Supabase CLI local link state (internal project identifiers, not for git)
+supabase/.temp/
 
 # Tooling scratch
 .git-rewrite/

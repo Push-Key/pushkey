@@ -32,7 +32,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary",
-    title: "PushKey â€” Encrypted API Key Vault",
+    title: "PushKey — Encrypted API Key Vault",
     description: "Local-first API key vault with encrypted backup, rotation health, and safe .env injection.",
     images: ["/icon-512.png"],
   },
