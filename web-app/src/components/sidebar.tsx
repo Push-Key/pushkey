@@ -75,15 +75,17 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
   const renderBadge = (id: Tab) => {
     if (id === "health" && staleCount > 0) {
       return (
-        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-destructive)] px-1.5 text-[10px] font-semibold text-white">
+        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-destructive-strong)] px-1.5 text-[10px] font-semibold text-white">
           {staleCount}
+          <span className="sr-only"> stale keys</span>
         </span>
       );
     }
     if (id === "forecast" && overdueCount > 0) {
       return (
-        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-orange-500 px-1.5 text-[10px] font-semibold text-white">
+        <span className="ml-auto inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-[var(--color-warning-strong)] px-1.5 text-[10px] font-semibold text-white">
           {overdueCount}
+          <span className="sr-only"> overdue rotations</span>
         </span>
       );
     }
@@ -132,7 +134,7 @@ export function Sidebar({ active, onSelect, onLock, keyCount }: SidebarProps) {
         >
           <Lock className="h-4 w-4" /> Lock vault
         </button>
-        <div className="flex items-center justify-between px-3 text-[10px] text-[var(--color-muted-foreground)]/70">
+        <div className="flex items-center justify-between px-3 text-[10px] text-[var(--color-muted-foreground)]">
           <span>v0.1.0</span>
           <button
             type="button"

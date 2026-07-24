@@ -98,6 +98,24 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # Enforces the WCAG 2.2 AA conformance recorded in
+      # docs/accessibility-conformance.md. Without this the axe scans and the
+      # accessible-name assertions only ever run on a developer machine, so an
+      # accessibility regression could reach the protected branch.
+      - name: Accessibility and WCAG 2.2 AA scans
+        run: npm run test:e2e -- accessibility.spec.ts wcag.spec.ts --project=chromium
+
+      - name: Upload accessibility failure traces
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: web-app-accessibility-traces
+          path: web-app/test-results
+          if-no-files-found: ignore
+
   package-smoke:
     name: Package smoke
     strategy:

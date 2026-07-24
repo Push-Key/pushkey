@@ -1,90 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-
-async function installRoutes(page: Page, locked: boolean) {
-  await page.route("**/api/bootstrap", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ token: "session-token" }),
-    }),
-  );
-
-  await page.route("**/api/status", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        locked,
-        has_vault: true,
-        vault_schema: 3,
-        key_count: 2,
-        autolock_seconds: 30,
-        idle_seconds: 0,
-        auth_method: "cookie_session",
-        can_write: !locked,
-      }),
-    }),
-  );
-
-  await page.route("**/api/health", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        total: 0,
-        healthy: [],
-        stale: [],
-        unknown_provider: [],
-        backup_missing: [],
-        score: 100,
-        threshold_days: 90,
-      }),
-    }),
-  );
-
-  await page.route("**/api/forecast", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        upcoming: [],
-        count: 0,
-        window_days: 30,
-      }),
-    }),
-  );
-
-  await page.route("**/api/keys", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ keys: [], count: 0 }),
-    }),
-  );
-
-  await page.route("**/api/projects", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ projects: [], count: 0 }),
-    }),
-  );
-
-  await page.route("**/api/agents", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ tokens: [] }),
-    }),
-  );
-
-  await page.route("**/api/audit", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ events: [], count: 0 }),
-    }),
-  );
-
-  await page.route("**/api/lock", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({ locked: true }),
-    }),
-  );
-}
+import { installRoutes } from "./support/mock-local-api";
 
 async function collectUnnamedInteractiveControls(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -161,20 +76,61 @@ async function collectUnnamedInteractiveControls(page: Page): Promise<string[]> 
 test("unlocked shell keeps critical controls named in the accessibility tree", async ({ page }) => {
   await installRoutes(page, false);
 
-  await page.goto("/#t=launch-token");
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
 
   await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
   await expect(page.getByRole("main")).toBeVisible();
   await expect(page.getByRole("button", { name: "Lock vault" })).toBeVisible();
 
+  const skipLink = page.getByRole("link", { name: "Skip to main content" });
+  await expect(skipLink).toBeAttached();
+  await expect(skipLink).toHaveAttribute("href", "#main-content");
+  await expect(page.locator("main#main-content")).toBeAttached();
+
   const unnamedControls = await collectUnnamedInteractiveControls(page);
   expect(unnamedControls).toEqual([]);
+});
+
+test("vault tab exposes labeled search and disclosure state", async ({ page }) => {
+  await installRoutes(page, false);
+
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Vault" }).click();
+
+  await expect(page.getByLabel("Search keys or providers")).toBeVisible();
+  await expect(page.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Group by provider" })).toHaveAttribute("aria-pressed", "false");
+
+  const addKey = page.getByRole("button", { name: "Add key" });
+  await expect(addKey).toHaveAttribute("aria-expanded", "false");
+  await addKey.click();
+  await expect(page.getByRole("button", { name: "Cancel" })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText("New key")).toBeVisible();
+
+  const unnamedControls = await collectUnnamedInteractiveControls(page);
+  expect(unnamedControls).toEqual([]);
+});
+
+test("health tab exposes labeled filters and disclosure state", async ({ page }) => {
+  await installRoutes(page, false);
+
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Health" }).click();
+
+  await expect(page.getByLabel(/Staleness threshold/i)).toBeVisible();
+
+  const disclosure = page.getByRole("button", { name: "Healthy keys (0)" });
+  await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  await disclosure.click();
+  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("region", { name: "Healthy keys (0)" })).toBeVisible();
+  await expect(page.getByText("No healthy keys.")).toBeVisible();
 });
 
 test("locked shell keeps login controls named in the accessibility tree", async ({ page }) => {
   await installRoutes(page, true);
 
-  await page.goto("/#t=launch-token");
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
 
   await expect(page.getByLabel("Master password")).toBeVisible();
   await expect(page.getByRole("button", { name: "Master Password" })).toHaveAttribute("aria-pressed", "true");
