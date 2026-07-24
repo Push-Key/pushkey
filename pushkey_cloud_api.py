@@ -5,7 +5,7 @@ Zero-knowledge: server stores only the encrypted vault blob.
 It never sees plaintext keys. Auth is email + password (hashed).
 
 Requirements:
-    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt python-jose[cryptography]
+    pip install fastapi uvicorn[standard] passlib[argon2] bcrypt PyJWT
 
 Run:
     uvicorn pushkey_cloud_api:app --host 0.0.0.0 --port 8000
@@ -55,6 +55,21 @@ def _utcnow() -> datetime:
     """Replacement for deprecated datetime.utcnow() — returns naive UTC datetime."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
+def _epoch(moment: datetime) -> int:
+    """Convert a naive-UTC datetime from _utcnow() to a correct Unix timestamp.
+
+    datetime.timestamp() interprets a naive datetime as *local* time, so calling
+    it directly on a _utcnow() result shifts the value by the machine's UTC
+    offset. JWT `iat` and `exp` were being stamped that far off: hours into the
+    future west of UTC, into the past east of it. python-jose never validated
+    `iat`, so it went unnoticed; a token minted on a UTC+X host would simply
+    have expired X hours early.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
+
 try:
     from fastapi import FastAPI, HTTPException, Depends, Request, Header, Cookie
     from fastapi.responses import JSONResponse, Response
@@ -62,10 +77,17 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.middleware.trustedhost import TrustedHostMiddleware
     from passlib.context import CryptContext
-    from jose import jwt, JWTError
+    # PyJWT, not python-jose. python-jose depends on `ecdsa`, which carries
+    # PYSEC-2026-1325 with no fix version available, so pip-audit can never go
+    # green while it is installed. PyJWT depends only on `cryptography`, which
+    # is already a direct dependency. Tokens are unaffected: same HS256, same
+    # registered claims, so tokens issued by either library validate under the
+    # other.
+    import jwt
+    from jwt import PyJWTError as JWTError
 except ImportError:
     raise SystemExit(
-        "Missing deps — run:\n  pip install fastapi uvicorn[standard] passlib[bcrypt] python-jose[cryptography]"
+        "Missing deps — run:\n  pip install fastapi uvicorn[standard] passlib[argon2] bcrypt PyJWT"
     )
 
 # ── Config ──────────────────────────────────────────────────────
@@ -476,8 +498,8 @@ def _create_token(email: str) -> str:
             "iss": TOKEN_ISSUER,
             "aud": TOKEN_AUDIENCE,
             "sub": email,
-            "iat": int(now.timestamp()),
-            "exp": int(exp.timestamp()),
+            "iat": _epoch(now),
+            "exp": _epoch(exp),
             "jti": secrets.token_urlsafe(16),
         },
         TOKEN_SIGNING_KEYS[0],

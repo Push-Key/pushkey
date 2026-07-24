@@ -438,6 +438,32 @@ def test_sync_cors_allows_conflict_and_idempotency_headers(app_module):
     assert "x-idempotency-key" in allowed
 
 
+def test_token_iat_and_exp_are_real_utc_and_not_shifted_by_local_timezone(app_module):
+    """`iat`/`exp` must be true Unix timestamps regardless of the host timezone.
+
+    _utcnow() returns a *naive* UTC datetime, and datetime.timestamp() reads a
+    naive value as local time. Calling it directly shifted both claims by the
+    machine's UTC offset -- hours into the future west of UTC, into the past
+    east of it, so a token minted on a UTC+X host expired X hours early.
+    python-jose never validated `iat`, which is why it went unnoticed.
+    """
+    import time
+
+    before = int(time.time())
+    token = app_module._create_token("clock@example.com")
+    after = int(time.time())
+
+    claims = app_module.jwt.decode(token, options={"verify_signature": False})
+
+    assert before - 5 <= claims["iat"] <= after + 5, (
+        f"iat {claims['iat']} is not within a few seconds of now "
+        f"({before}..{after}); it is off by roughly "
+        f"{(claims['iat'] - before) / 3600:.1f} hours"
+    )
+    expected_exp = claims["iat"] + app_module.TOKEN_TTL_HOURS * 3600
+    assert abs(claims["exp"] - expected_exp) <= 5
+
+
 def test_user_tokens_include_standard_claims_and_unique_ids(app_module):
     token_a = app_module._create_token("user@example.com")
     token_b = app_module._create_token("user@example.com")
@@ -455,7 +481,8 @@ def test_user_tokens_include_standard_claims_and_unique_ids(app_module):
     assert payload["iss"] == app_module.TOKEN_ISSUER
     assert payload["iat"] <= payload["exp"]
     assert payload["jti"]
-    assert payload["jti"] != app_module.jwt.get_unverified_claims(token_b)["jti"]
+    other = app_module.jwt.decode(token_b, options={"verify_signature": False})
+    assert payload["jti"] != other["jti"]
     assert app_module.TOKEN_TTL_HOURS <= 1
 
 
