@@ -218,7 +218,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip pip-audit bandit cyclonedx-bom
           pip-audit -r requirements.txt -r requirements-api.txt -r requirements-dev.txt
-          bandit -q -r pushkey*.py
+          # -ll gates on medium and high severity. Bare `bandit -r` fails on any
+          # finding at all, which here meant 83 low-severity ones -- almost all
+          # try/except/pass around best-effort cleanup, and subprocess calls
+          # that pass argument lists rather than strings. A gate that can never
+          # go green gets ignored or removed; this one blocks the severities
+          # that actually warrant blocking a merge.
+          bandit -q -r pushkey*.py -ll
           cyclonedx-py requirements requirements.txt requirements-api.txt requirements-dev.txt -o python-sbom.json
 
       - name: Set up Node

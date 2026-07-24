@@ -3564,4 +3564,14 @@ async def admin_test_email(request: Request, _: dict = Depends(_require_admin_pe
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # Loopback by default. Production does not use this entry point -- the
+    # Dockerfile and railway.toml both invoke uvicorn directly with
+    # --host 0.0.0.0 -- so this block only ever runs on a developer machine,
+    # where binding every interface exposes the API to the local network.
+    # Override with PUSHKEY_BIND_HOST when that is actually wanted.
+    uvicorn.run(
+        app,
+        host=os.environ.get("PUSHKEY_BIND_HOST", "127.0.0.1"),
+        port=int(os.environ.get("PUSHKEY_BIND_PORT", "8000")),
+    )

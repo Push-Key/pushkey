@@ -554,7 +554,7 @@ def _cmd_app(blocking=False):
     ready = False
     for _ in range(20):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
+            _s.urlopen_checked(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
             ready = True
             break
         except Exception:
@@ -755,7 +755,9 @@ def _copy_to_clipboard(text):
         pass
     if sys.platform.startswith("win"):
         try:
-            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE, shell=True)
+            # No shell=True: the command is a fixed list, so the shell added
+            # nothing but an injection surface if this ever became dynamic.
+            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
             p.communicate(input=text.encode("utf-16le"))
             return True
         except Exception:

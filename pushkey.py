@@ -78,7 +78,7 @@ from pushkey_shared import (
     LICENSE_FILE, TOKEN_FILE, FIDO2_FILE, SSO_FILE, LEASES_FILE, HEALTH_PORT,
     ACTIVATION_SERVER, _TOKEN_GRACE_DAYS,
     TIERS, UPGRADE_MESSAGES, VAULT_SCHEMA_VERSION, ENV_LEVELS, ENV_COLORS,
-    ensure_vault_dir,
+    ensure_vault_dir, urlopen_checked,
 )
 from pushkey_crypto import (
     AESGCM, Fernet, InvalidToken,
@@ -397,7 +397,7 @@ def sso_device_flow_start(client_id: str, device_auth_url: str,
     req = urllib.request.Request(device_auth_url, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen_checked(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 def sso_device_flow_poll(client_id: str, token_url: str, device_code: str) -> dict | None:
@@ -413,7 +413,7 @@ def sso_device_flow_poll(client_id: str, token_url: str, device_code: str) -> di
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_checked(req, timeout=15) as resp:
             result = json.loads(resp.read())
             if "access_token" in result:
                 return result
@@ -499,7 +499,7 @@ def cloud_push(endpoint: str, token: str, vault_bytes: bytes) -> str:
         f"{endpoint.rstrip('/')}/api/v1/vault", data=vault_bytes, method="PUT")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/octet-stream")
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urlopen_checked(req, timeout=20) as resp:
         return json.loads(resp.read()).get("etag", "")
 
 def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
@@ -511,7 +511,7 @@ def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
     if current_etag:
         req.add_header("If-None-Match", current_etag)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urlopen_checked(req, timeout=20) as resp:
             etag = resp.headers.get("ETag", "")
             return resp.read(), etag
     except Exception as exc:
@@ -526,7 +526,7 @@ def cloud_login(endpoint: str, email: str, pw: str) -> str:
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/v1/auth/login", data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen_checked(req, timeout=15) as resp:
         return json.loads(resp.read()).get("token", "")
 
 
@@ -595,7 +595,7 @@ def sync_github_actions(owner: str, repo: str, token: str,
         f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/public-key",
         headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urlopen_checked(req, timeout=10) as r:
             pk_data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         return 0, [f"GitHub: failed to fetch public key: {e.code} {e.read().decode()[:200]}"]
@@ -613,7 +613,7 @@ def sync_github_actions(owner: str, repo: str, token: str,
             put_req = urllib.request.Request(
                 f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/{key_name}",
                 data=body, headers=headers, method="PUT")
-            with urllib.request.urlopen(put_req, timeout=10) as r:
+            with urlopen_checked(put_req, timeout=10) as r:
                 if r.status in (201, 204):
                     success += 1
                 else:
@@ -647,7 +647,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                 f"https://api.vercel.com/v10/projects/{project_id}/env",
                 data=body, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=10):
+                with urlopen_checked(req, timeout=10):
                     success += 1
             except urllib.error.HTTPError as e:
                 body_txt = e.read().decode()
@@ -656,7 +656,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                     list_req = urllib.request.Request(
                         f"https://api.vercel.com/v10/projects/{project_id}/env",
                         headers=headers)
-                    with urllib.request.urlopen(list_req, timeout=10) as r:
+                    with urlopen_checked(list_req, timeout=10) as r:
                         envs = json.loads(r.read()).get("envs", [])
                     existing = next((e for e in envs if e["key"] == key_name), None)
                     if existing:
@@ -665,7 +665,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                         patch_req = urllib.request.Request(
                             f"https://api.vercel.com/v10/projects/{project_id}/env/{existing['id']}",
                             data=patch_body, headers=headers, method="PATCH")
-                        with urllib.request.urlopen(patch_req, timeout=10):
+                        with urlopen_checked(patch_req, timeout=10):
                             success += 1
                     else:
                         errors.append(f"{key_name}: 409 conflict")
@@ -704,7 +704,7 @@ def sync_railway(token: str, project_id: str, environment_id: str,
     try:
         req = urllib.request.Request("https://backboard.railway.app/graphql/v2",
                                      data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urlopen_checked(req, timeout=15) as r:
             result = json.loads(r.read())
         if result.get("errors"):
             errs = [e.get("message", str(e)) for e in result["errors"]]
@@ -735,7 +735,7 @@ def _rotate_openai(old_key_id, admin_key):
     req = urllib.request.Request("https://api.openai.com/v1/organization/admin_api_keys",
                                   data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urlopen_checked(req, timeout=15) as r:
             new_key_data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         return RotationResult(error=f"OpenAI create failed: {e.code} {e.read().decode()[:200]}")
@@ -753,7 +753,7 @@ def _rotate_openai(old_key_id, admin_key):
             f"https://api.openai.com/v1/organization/admin_api_keys/{old_key_id}",
             headers=headers, method="DELETE")
         try:
-            urllib.request.urlopen(del_req, timeout=15)
+            urlopen_checked(del_req, timeout=15)
         except Exception:
             return RotationResult(new_value=new_value, new_id=new_id, partial=True)
 
@@ -775,7 +775,7 @@ def _deactivate_anthropic(key_id, admin_key):
         f"https://api.anthropic.com/v1/organizations/api_keys/{key_id}",
         data=body, headers=headers, method="POST")
     try:
-        urllib.request.urlopen(req, timeout=15)
+        urlopen_checked(req, timeout=15)
         return RotationResult(partial=True,
                               error="Old key deactivated. Create new key in Anthropic console, then paste it here.")
     except urllib.error.HTTPError as e:

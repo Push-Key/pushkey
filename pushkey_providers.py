@@ -57,7 +57,7 @@ def update_providers_from_web():
     """Fetch latest providers.json from GitHub. Returns (new_count, updated_count, error_str)."""
     import urllib.request, urllib.error
     try:
-        with urllib.request.urlopen(_s.PROVIDERS_REGISTRY_URL, timeout=10) as r:
+        with _s.urlopen_checked(_s.PROVIDERS_REGISTRY_URL, timeout=10) as r:
             raw = r.read().decode("utf-8")
         data = json.loads(raw)
         remote = data.get("providers", {})
