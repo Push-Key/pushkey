@@ -1,6 +1,6 @@
 # Pushkey Launch Execution Tasklist
 
-Status date: 2026-07-21
+Status date: 2026-07-24
 
 Measured production-readiness progress:
 
@@ -8,7 +8,7 @@ Measured production-readiness progress:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 252/340 production items complete, 74.1%.
+Current result: 317/337 production items complete, 94.1%.
 
 ## Completed in this execution pass
 
@@ -80,8 +80,9 @@ The alpha-to-GA completion path lives in
 - [x] Add `web-app` lint modernization so CI can run lint there.
 - [x] Add package metadata cleanup and supported Python/Node version decision.
 - [x] Add npm installer failure/unsupported-platform tests.
-- [ ] Update `DEPLOY.md` to emphasize one worker/one machine until Phase 4 storage migration.
-- [ ] Inventory extension launch claims and decide defer/remove/ship.
+- [x] Update `DEPLOY.md` to emphasize one worker/one machine until Phase 4 storage migration.
+- [x] Inventory extension launch claims and decide defer/remove/ship.
+  - Decision: defer browser and VS Code extensions until their package/store gates pass.
 
 ## Sub-agent assignment rules
 

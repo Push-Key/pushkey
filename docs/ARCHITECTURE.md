@@ -51,9 +51,8 @@ The license record in the canonical service is authoritative for:
 
 The client may send legacy `tier`, `email`, or `max_devices` fields during
 activation, but the service ignores them when deciding entitlement. Device
-state is currently stored under the license record in `licenses.json`; Phase 4
-will migrate this state to transactional storage without changing the v1
-contract.
+state is stored transactionally in the cloud state database; legacy JSON
+exports remain for backup compatibility without changing the v1 contract.
 
 The supported lifecycle is:
 

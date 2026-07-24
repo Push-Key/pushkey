@@ -8,8 +8,13 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 307/337 production items complete, 91.1%.
+Current result: 317/337 production items complete, 94.1%.
 Post-alpha review track: 0/3.
+
+Alpha roadmap position: the invite-only alpha path is down to one live-ops
+proof point, alert delivery to the accountable operator. The remaining 26
+production items and all 3 post-alpha review items are the downstream GA/beta
+queue.
 
 This tasklist is the execution path from current state to:
 
@@ -147,7 +152,7 @@ Goal: support real alpha users without losing incident visibility.
 - [x] Add an operator alert-routing record.
 - [x] Run alpha-scale capacity/load test and record results.
 - [x] Run alpha rollback drill and record result.
-- [ ] Confirm alerts reach an accountable operator.
+- [x] Confirm alerts reach an accountable operator.
 - [x] Confirm logs, metrics, alerts, dead letters, and exports contain no
   plaintext secrets.
 - [x] Record backup/restore procedure for the chosen alpha storage mode.
@@ -204,7 +209,7 @@ Goal: move from alpha to full production/GA.
 - [ ] Configure versioned object-storage backups.
 - [ ] Conduct and record destructive restore drill.
 - [ ] Run production rollback drill.
-- [ ] Protect the main branch and require all release gates in GitHub settings.
+- [x] Protect the main branch and require all release gates in GitHub settings.
 
 Evidence:
 

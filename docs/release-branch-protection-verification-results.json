@@ -1,0 +1,396 @@
+{
+  "generated_at": "2026-07-24T00:31:51.259974+00:00",
+  "repo": "Push-Key/pushkey",
+  "branch": "main",
+  "release_environment": "release",
+  "release_workflow_path": ".github/workflows/release.yml",
+  "verdict": "PASS",
+  "gaps": [],
+  "inconclusive_reasons": [],
+  "checks": [
+    {
+      "name": "branch_protection_live",
+      "status": "pass",
+      "detail": "required_status_checks=['CI / Python tests', 'CI / Web build', 'CI / Local web app build', 'CI / Package smoke (windows-latest)', 'CI / Package smoke (ubuntu-latest)', 'CI / Package smoke (macos-latest)', 'CI / Security scans'], required_approving_review_count=1, enforce_admins=True, allow_force_pushes=False",
+      "evidence": {
+        "path": "repos/Push-Key/pushkey/branches/main/protection",
+        "exit_code": 0,
+        "ok": true,
+        "json": {
+          "url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection",
+          "required_status_checks": {
+            "url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection/required_status_checks",
+            "strict": true,
+            "contexts": [
+              "CI / Python tests",
+              "CI / Web build",
+              "CI / Local web app build",
+              "CI / Package smoke (windows-latest)",
+              "CI / Package smoke (ubuntu-latest)",
+              "CI / Package smoke (macos-latest)",
+              "CI / Security scans"
+            ],
+            "contexts_url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection/required_status_checks/contexts",
+            "checks": [
+              {
+                "context": "CI / Python tests",
+                "app_id": null
+              },
+              {
+                "context": "CI / Web build",
+                "app_id": null
+              },
+              {
+                "context": "CI / Local web app build",
+                "app_id": null
+              },
+              {
+                "context": "CI / Package smoke (windows-latest)",
+                "app_id": null
+              },
+              {
+                "context": "CI / Package smoke (ubuntu-latest)",
+                "app_id": null
+              },
+              {
+                "context": "CI / Package smoke (macos-latest)",
+                "app_id": null
+              },
+              {
+                "context": "CI / Security scans",
+                "app_id": null
+              }
+            ]
+          },
+          "required_pull_request_reviews": {
+            "url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection/required_pull_request_reviews",
+            "dismiss_stale_reviews": true,
+            "require_code_owner_reviews": false,
+            "require_last_push_approval": false,
+            "required_approving_review_count": 1
+          },
+          "required_signatures": {
+            "url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection/required_signatures",
+            "enabled": false
+          },
+          "enforce_admins": {
+            "url": "https://api.github.com/repos/Push-Key/pushkey/branches/main/protection/enforce_admins",
+            "enabled": true
+          },
+          "required_linear_history": {
+            "enabled": false
+          },
+          "allow_force_pushes": {
+            "enabled": false
+          },
+          "allow_deletions": {
+            "enabled": false
+          },
+          "block_creations": {
+            "enabled": false
+          },
+          "required_conversation_resolution": {
+            "enabled": true
+          },
+          "lock_branch": {
+            "enabled": false
+          },
+          "allow_fork_syncing": {
+            "enabled": false
+          }
+        },
+        "stderr": ""
+      }
+    },
+    {
+      "name": "branch_ruleset_non_fast_forward_and_review",
+      "status": "pass",
+      "detail": "ruleset id=19571795 name='Main' enforces ['deletion', 'non_fast_forward', 'pull_request'] on ['~DEFAULT_BRANCH']",
+      "evidence": [
+        {
+          "path": "repos/Push-Key/pushkey/rulesets/19571795",
+          "exit_code": 0,
+          "ok": true,
+          "json": {
+            "id": 19571795,
+            "name": "Main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "Push-Key/pushkey",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 1,
+                  "dismiss_stale_reviews_on_push": false,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              }
+            ],
+            "node_id": "RRS_lACqUmVwb3NpdG9yec5JNQbhzgEqpFM",
+            "created_at": "2026-07-22T13:27:04.714-04:00",
+            "updated_at": "2026-07-22T13:28:48.080-04:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "_links": {
+              "self": {
+                "href": "https://api.github.com/repos/Push-Key/pushkey/rulesets/19571795"
+              },
+              "html": {
+                "href": "https://github.com/Push-Key/pushkey/rules/19571795"
+              }
+            }
+          },
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "name": "tag_ruleset_restricts_release_tags",
+      "status": "fail",
+      "detail": "no ruleset restricts creation/update of tags matching the release workflow's `v*` trigger pattern; anyone with tag-push permission can create a `v*` tag pointing at any commit",
+      "evidence": [
+        {
+          "path": "repos/Push-Key/pushkey/rulesets/19571795",
+          "exit_code": 0,
+          "ok": true,
+          "json": {
+            "id": 19571795,
+            "name": "Main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "Push-Key/pushkey",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 1,
+                  "dismiss_stale_reviews_on_push": false,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              }
+            ],
+            "node_id": "RRS_lACqUmVwb3NpdG9yec5JNQbhzgEqpFM",
+            "created_at": "2026-07-22T13:27:04.714-04:00",
+            "updated_at": "2026-07-22T13:28:48.080-04:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "_links": {
+              "self": {
+                "href": "https://api.github.com/repos/Push-Key/pushkey/rulesets/19571795"
+              },
+              "html": {
+                "href": "https://github.com/Push-Key/pushkey/rules/19571795"
+              }
+            }
+          },
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "name": "classic_tag_protection",
+      "status": "fail",
+      "detail": "no classic tag protection rules are configured (gh api exit 1: gh: Not Found (HTTP 404))",
+      "evidence": {
+        "path": "repos/Push-Key/pushkey/tags/protection",
+        "exit_code": 1,
+        "ok": false,
+        "json": {
+          "message": "Not Found",
+          "documentation_url": "https://docs.github.com/rest",
+          "status": "404"
+        },
+        "stderr": "gh: Not Found (HTTP 404)"
+      }
+    },
+    {
+      "name": "release_environment_required_reviewers",
+      "status": "pass",
+      "detail": "protection_rules types=['required_reviewers']",
+      "evidence": {
+        "path": "repos/Push-Key/pushkey/environments/release",
+        "exit_code": 0,
+        "ok": true,
+        "json": {
+          "id": 18588274847,
+          "node_id": "EN_kwDOSTUG4c8AAAAEU_KQnw",
+          "name": "release",
+          "url": "https://api.github.com/repos/Push-Key/pushkey/environments/release",
+          "html_url": "https://github.com/Push-Key/pushkey/deployments/activity_log?environments_filter=release",
+          "created_at": "2026-07-22T20:04:33Z",
+          "updated_at": "2026-07-22T20:04:33Z",
+          "can_admins_bypass": true,
+          "protection_rules": [
+            {
+              "id": 60650793,
+              "node_id": "GA_kwDOSTUG4c4DnXUp",
+              "type": "required_reviewers",
+              "prevent_self_review": false,
+              "reviewers": [
+                {
+                  "type": "User",
+                  "reviewer": {
+                    "login": "Push-Key",
+                    "id": 281438458,
+                    "node_id": "U_kgDOEMZo-g",
+                    "avatar_url": "https://avatars.githubusercontent.com/u/281438458?v=4",
+                    "gravatar_id": "",
+                    "url": "https://api.github.com/users/Push-Key",
+                    "html_url": "https://github.com/Push-Key",
+                    "followers_url": "https://api.github.com/users/Push-Key/followers",
+                    "following_url": "https://api.github.com/users/Push-Key/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/Push-Key/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/Push-Key/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/Push-Key/subscriptions",
+                    "organizations_url": "https://api.github.com/users/Push-Key/orgs",
+                    "repos_url": "https://api.github.com/users/Push-Key/repos",
+                    "events_url": "https://api.github.com/users/Push-Key/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/Push-Key/received_events",
+                    "type": "User",
+                    "user_view_type": "public",
+                    "site_admin": false
+                  }
+                }
+              ]
+            }
+          ],
+          "deployment_branch_policy": null
+        },
+        "stderr": ""
+      }
+    },
+    {
+      "name": "release_environment_restricted_to_protected_refs",
+      "status": "fail",
+      "detail": "deployment_branch_policy=None: the `release` Environment does not restrict which ref/branch/tag may deploy to it, so the required-reviewer gate is a human approval only -- it does not verify the tagged commit descends from a commit that passed main's required checks",
+      "evidence": {
+        "path": "repos/Push-Key/pushkey/environments/release",
+        "exit_code": 0,
+        "ok": true,
+        "json": {
+          "id": 18588274847,
+          "node_id": "EN_kwDOSTUG4c8AAAAEU_KQnw",
+          "name": "release",
+          "url": "https://api.github.com/repos/Push-Key/pushkey/environments/release",
+          "html_url": "https://github.com/Push-Key/pushkey/deployments/activity_log?environments_filter=release",
+          "created_at": "2026-07-22T20:04:33Z",
+          "updated_at": "2026-07-22T20:04:33Z",
+          "can_admins_bypass": true,
+          "protection_rules": [
+            {
+              "id": 60650793,
+              "node_id": "GA_kwDOSTUG4c4DnXUp",
+              "type": "required_reviewers",
+              "prevent_self_review": false,
+              "reviewers": [
+                {
+                  "type": "User",
+                  "reviewer": {
+                    "login": "Push-Key",
+                    "id": 281438458,
+                    "node_id": "U_kgDOEMZo-g",
+                    "avatar_url": "https://avatars.githubusercontent.com/u/281438458?v=4",
+                    "gravatar_id": "",
+                    "url": "https://api.github.com/users/Push-Key",
+                    "html_url": "https://github.com/Push-Key",
+                    "followers_url": "https://api.github.com/users/Push-Key/followers",
+                    "following_url": "https://api.github.com/users/Push-Key/following{/other_user}",
+                    "gists_url": "https://api.github.com/users/Push-Key/gists{/gist_id}",
+                    "starred_url": "https://api.github.com/users/Push-Key/starred{/owner}{/repo}",
+                    "subscriptions_url": "https://api.github.com/users/Push-Key/subscriptions",
+                    "organizations_url": "https://api.github.com/users/Push-Key/orgs",
+                    "repos_url": "https://api.github.com/users/Push-Key/repos",
+                    "events_url": "https://api.github.com/users/Push-Key/events{/privacy}",
+                    "received_events_url": "https://api.github.com/users/Push-Key/received_events",
+                    "type": "User",
+                    "user_view_type": "public",
+                    "site_admin": false
+                  }
+                }
+              ]
+            }
+          ],
+          "deployment_branch_policy": null
+        },
+        "stderr": ""
+      }
+    },
+    {
+      "name": "release_workflow_trigger_inspected",
+      "status": "pass",
+      "detail": "triggers_on_any_v_tag=True, gated_by_release_environment=True, workflow_verifies_commit_provenance=True. job 'verify-provenance' runs `scripts/verify_release_commit_provenance.py` before any build, sign, or publish step, and every other job (['release', 'release-binaries']) declares `needs: verify-provenance`, so a release cannot proceed from a commit that is not contained in the protected branch or that lacks successful required checks.",
+      "evidence": {
+        "workflow_path": ".github/workflows/release.yml",
+        "provenance_gate": {
+          "ok": true,
+          "gate_job": "verify-provenance",
+          "unguarded_jobs": [],
+          "detail": "job 'verify-provenance' runs `scripts/verify_release_commit_provenance.py` before any build, sign, or publish step, and every other job (['release', 'release-binaries']) declares `needs: verify-provenance`, so a release cannot proceed from a commit that is not contained in the protected branch or that lacks successful required checks."
+        },
+        "source_at_HEAD": "name: Release\n\non:\n  push:\n    tags:\n      - \"v*\"\n\npermissions:\n  contents: write\n  id-token: write\n  attestations: write\n\njobs:\n  verify-provenance:\n    # Non-bypassable release provenance gate. The `push: tags: [\"v*\"]` trigger\n    # will fire for a tag pointing at ANY commit, and the `release` Environment's\n    # required reviewer is a human approval, not a provenance check. This job\n    # runs before anything is built, signed, or published and fails the whole\n    # release unless the tagged commit is contained in the protected `main`\n    # branch AND every required CI check concluded successfully on that exact\n    # commit. Every other job in this workflow declares `needs: verify-provenance`,\n    # so a failure here blocks the entire release. Removing this job requires a\n    # reviewed pull request into the protected branch.\n    name: Verify release commit provenance\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      checks: read\n      statuses: read\n\n    steps:\n      - name: Checkout\n        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n\n      - name: Set up Python\n        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n        with:\n          python-version: \"3.12\"\n\n      - name: Verify tagged commit passed the protected branch and required checks\n        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          GITHUB_REPOSITORY: ${{ github.repository }}\n          GITHUB_SHA: ${{ github.sha }}\n          GITHUB_REF: ${{ github.ref }}\n        run: |\n          python scripts/verify_release_commit_provenance.py \\\n            --output release-provenance-evidence.json\n\n      - name: Upload provenance evidence\n        if: always()\n        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: release-provenance-evidence\n          path: release-provenance-evidence.json\n          if-no-files-found: warn\n\n  release-binaries:\n    name: Build npm binary (${{ matrix.asset }})\n    runs-on: ${{ matrix.os }}\n    needs: verify-provenance\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - os: windows-latest\n            asset: pushkey-windows-x64.exe\n            source: dist/pushkey-cli.exe\n          - os: macos-13\n            asset: pushkey-macos-x64\n            source: dist/pushkey-cli\n          - os: ubuntu-latest\n            asset: pushkey-linux-x64\n            source: dist/pushkey-cli\n\n    steps:\n      - name: Checkout\n        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n\n      - name: Set up Python\n        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n        with:\n          python-version: \"3.12\"\n          cache: pip\n          cache-dependency-path: |\n            requirements.txt\n            requirements-api.txt\n            requirements-dev.txt\n\n      - name: Set up Node\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with:\n          node-version: \"22\"\n          cache: npm\n          cache-dependency-path: web-app/package-lock.json\n\n      - name: Install Python dependencies\n        run: python -m pip install --upgrade pip pyinstaller -r requirements.txt -r requirements-api.txt\n\n      - name: Install local web dependencies\n        run: npm --prefix web-app ci\n\n      - name: Build CLI binary\n        run: python build_exe.py --cli-only\n\n      - name: Sign Windows binary (Authenticode)\n        if: ${{ matrix.os == 'windows-latest' }}\n        shell: pwsh\n        env:\n          PUSHKEY_WINDOWS_CERT_BASE64: ${{ secrets.PUSHKEY_WINDOWS_CERT_BASE64 }}\n          PUSHKEY_WINDOWS_CERT_PASSWORD: ${{ secrets.PUSHKEY_WINDOWS_CERT_PASSWORD }}\n        run: |\n          if ([string]::IsNullOrEmpty($env:PUSHKEY_WINDOWS_CERT_BASE64)) {\n            Write-Host \"Windows Authenticode signing skipped \u00e2\u20ac\u201d PUSHKEY_WINDOWS_CERT_BASE64 not configured\"\n            exit 0\n          }\n\n          $signtool = (Get-ChildItem -Path \"${env:ProgramFiles(x86)}\\Windows Kits\\10\\bin\" -Recurse -Filter \"signtool.exe\" -ErrorAction SilentlyContinue |\n            Where-Object { $_.FullName -match \"x64\" } | Select-Object -First 1).FullName\n          if (-not $signtool) { $signtool = \"signtool.exe\" }\n\n          $certPath = Join-Path $env:RUNNER_TEMP \"pushkey-windows-cert.pfx\"\n          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:PUSHKEY_WINDOWS_CERT_BASE64))\n\n          & $signtool sign /f $certPath /p $env:PUSHKEY_WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 \"${{ matrix.source }}\"\n          $signExit = $LASTEXITCODE\n          Remove-Item $certPath -Force -ErrorAction SilentlyContinue\n          if ($signExit -ne 0) {\n            throw \"signtool sign failed with exit code $signExit\"\n          }\n\n          Write-Host \"Windows Authenticode signature applied to ${{ matrix.source }}\"\n\n      - name: Verify Windows Authenticode signature\n        if: ${{ matrix.os == 'windows-latest' && secrets.PUSHKEY_WINDOWS_CERT_BASE64 != '' }}\n        shell: pwsh\n        run: |\n          $signtool = (Get-ChildItem -Path \"${env:ProgramFiles(x86)}\\Windows Kits\\10\\bin\" -Recurse -Filter \"signtool.exe\" -ErrorAction SilentlyContinue |\n            Where-Object { $_.FullName -match \"x64\" } | Select-Object -First 1).FullName\n          if (-not $signtool) { $signtool = \"signtool.exe\" }\n\n          & $signtool verify /pa /v \"${{ matrix.source }}\"\n          if ($LASTEXITCODE -ne 0) {\n            throw \"Windows Authenticode signature verification FAILED for ${{ matrix.source }}\"\n          }\n          Write-Host \"Windows Authenticode signature verified OK for ${{ matrix.source }}\"\n\n      - name: Sign and notarize macOS binary\n        if: ${{ matrix.os == 'macos-13' }}\n        shell: bash\n        env:\n          PUSHKEY_APPLE_CERT_BASE64: ${{ secrets.PUSHKEY_APPLE_CERT_BASE64 }}\n          PUSHKEY_APPLE_CERT_PASSWORD: ${{ secrets.PUSHKEY_APPLE_CERT_PASSWORD }}\n          PUSHKEY_APPLE_SIGNING_IDENTITY: ${{ secrets.PUSHKEY_APPLE_SIGNING_IDENTITY }}\n          PUSHKEY_APPLE_NOTARIZATION_API_KEY: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_KEY }}\n          PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID }}\n          PUSHKEY_APPLE_NOTARIZATION_API_ISSUER: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_ISSUER }}\n        run: |\n          set -euo pipefail\n          if [ -z \"${PUSHKEY_APPLE_CERT_BASE64:-}\" ]; then\n            echo \"macOS codesign/notarization skipped \u00e2\u20ac\u201d PUSHKEY_APPLE_CERT_BASE64 not configured\"\n            exit 0\n          fi\n\n          KEYCHAIN_PATH=\"$RUNNER_TEMP/pushkey-signing.keychain-db\"\n          KEYCHAIN_PASSWORD=\"$(uuidgen)\"\n          CERT_PATH=\"$RUNNER_TEMP/pushkey-apple-cert.p12\"\n\n          echo \"$PUSHKEY_APPLE_CERT_BASE64\" | base64 --decode > \"$CERT_PATH\"\n\n          security create-keychain -p \"$KEYCHAIN_PASSWORD\" \"$KEYCHAIN_PATH\"\n          security set-keychain-settings -lut 21600 \"$KEYCHAIN_PATH\"\n          security unlock-keychain -p \"$KEYCHAIN_PASSWORD\" \"$KEYCHAIN_PATH\"\n          security import \"$CERT_PATH\" -k \"$KEYCHAIN_PATH\" -P \"$PUSHKEY_APPLE_CERT_PASSWORD\" -T /usr/bin/codesign\n          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k \"$KEYCHAIN_PASSWORD\" \"$KEYCHAIN_PATH\"\n          security list-keychains -d user -s \"$KEYCHAIN_PATH\" $(security list-keychains -d user | sed 's/\"//g')\n\n          codesign --force --options runtime --timestamp \\\n            --sign \"${PUSHKEY_APPLE_SIGNING_IDENTITY:-Developer ID Application}\" \\\n            \"${{ matrix.source }}\"\n\n          if [ -n \"${PUSHKEY_APPLE_NOTARIZATION_API_KEY:-}\" ]; then\n            NOTARY_KEY_PATH=\"$RUNNER_TEMP/pushkey-notary-key.p8\"\n            echo \"$PUSHKEY_APPLE_NOTARIZATION_API_KEY\" > \"$NOTARY_KEY_PATH\"\n\n            ZIP_PATH=\"$RUNNER_TEMP/pushkey-macos-notarize.zip\"\n            ditto -c -k --keepParent \"${{ matrix.source }}\" \"$ZIP_PATH\"\n\n            xcrun notarytool submit \"$ZIP_PATH\" \\\n              --key \"$NOTARY_KEY_PATH\" \\\n              --key-id \"$PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID\" \\\n              --issuer \"$PUSHKEY_APPLE_NOTARIZATION_API_ISSUER\" \\\n              --wait\n\n            rm -f \"$NOTARY_KEY_PATH\" \"$ZIP_PATH\"\n          else\n            echo \"macOS notarization skipped \u00e2\u20ac\u201d PUSHKEY_APPLE_NOTARIZATION_API_KEY not configured (codesign only)\"\n          fi\n\n          rm -f \"$CERT_PATH\"\n          security delete-keychain \"$KEYCHAIN_PATH\" || true\n\n          echo \"macOS code signature applied to ${{ matrix.source }}\"\n\n      - name: Verify macOS code signature\n        if: ${{ matrix.os == 'macos-13' && secrets.PUSHKEY_APPLE_CERT_BASE64 != '' }}\n        shell: bash\n        run: |\n          set -euo pipefail\n          codesign --verify --deep --strict --verbose=2 \"${{ matrix.source }}\"\n          echo \"macOS code signature verified OK for ${{ matrix.source }}\"\n\n      - name: Stage npm binary asset\n        shell: bash\n        run: |\n          mkdir -p release-dist\n          cp \"${{ matrix.source }}\" \"release-dist/${{ matrix.asset }}\"\n\n      - name: Upload npm binary asset\n        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n        with:\n          name: ${{ matrix.asset }}\n          path: release-dist/${{ matrix.asset }}\n\n  release:\n    name: Build release artifacts\n    runs-on: ubuntu-latest\n    needs: [verify-provenance, release-binaries]\n    environment: release\n\n    steps:\n      - name: Checkout\n        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n\n      - name: Set up Python\n        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n        with:\n          python-version: \"3.12\"\n          cache: pip\n          cache-dependency-path: |\n            requirements.txt\n            requirements-api.txt\n            requirements-dev.txt\n\n      - name: Install tooling\n        run: python -m pip install --upgrade pip build cyclonedx-bom\n\n      - name: Run release tests\n        run: python -m pytest -q\n\n      - name: Build Python artifacts\n        run: python -m build\n\n      - name: Download npm binary assets\n        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093\n        with:\n          path: dist\n          merge-multiple: true\n\n      - name: Generate SBOM\n        run: cyclonedx-py requirements requirements.txt requirements-api.txt requirements-dev.txt -o dist/python-sbom.json\n\n      - name: Generate SHA-256 checksums\n        run: |\n          cd dist\n          sha256sum * > SHA256SUMS.txt\n          for file in pushkey-windows-x64.exe pushkey-macos-x64 pushkey-linux-x64; do\n            sha256sum \"$file\" > \"$file.sha256\"\n          done\n\n      - name: Sign release binaries\n        if: ${{ secrets.PUSHKEY_RELEASE_PRIVATE_KEY_PEM != '' }}\n        env:\n          PUSHKEY_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.PUSHKEY_RELEASE_PRIVATE_KEY_PEM }}\n        run: |\n          node <<'NODE'\n          const crypto = require('crypto');\n          const fs = require('fs');\n          const path = require('path');\n\n          const privateKeyPem = process.env.PUSHKEY_RELEASE_PRIVATE_KEY_PEM;\n          if (!privateKeyPem) {\n            throw new Error('missing PUSHKEY_RELEASE_PRIVATE_KEY_PEM');\n          }\n\n          const dist = path.resolve('dist');\n          const assets = [\n            'pushkey-windows-x64.exe',\n            'pushkey-macos-x64',\n            'pushkey-linux-x64',\n          ];\n\n          for (const asset of assets) {\n            const assetPath = path.join(dist, asset);\n            const signature = crypto.sign(null, fs.readFileSync(assetPath), privateKeyPem).toString('base64');\n            fs.writeFileSync(`${assetPath}.sig`, `${signature}\\n`, 'utf8');\n          }\n          NODE\n\n      - name: Verify release artifact checksums and signatures\n        env:\n          PUSHKEY_WINDOWS_CERT_CONFIGURED: ${{ secrets.PUSHKEY_WINDOWS_CERT_BASE64 != '' }}\n          PUSHKEY_APPLE_CERT_CONFIGURED: ${{ secrets.PUSHKEY_APPLE_CERT_BASE64 != '' }}\n        run: |\n          python <<'PY'\n          import hashlib\n          import os\n          import pathlib\n          import struct\n          import sys\n\n          dist = pathlib.Path(\"dist\")\n          failed = False\n\n          def fail(msg):\n              global failed\n              print(f\"::error::{msg}\")\n              failed = True\n\n          def info(msg):\n              print(msg)\n\n          # --- Checksum verification -------------------------------------------------\n          sums_file = dist / \"SHA256SUMS.txt\"\n          if not sums_file.exists():\n              fail(\"SHA256SUMS.txt is missing\")\n          else:\n              for line in sums_file.read_text().splitlines():\n                  line = line.strip()\n                  if not line:\n                      continue\n                  parts = line.split(None, 1)\n                  if len(parts) != 2:\n                      fail(f\"malformed checksum line: {line!r}\")\n                      continue\n                  digest, name = parts[0], parts[1].strip().lstrip(\"*\")\n                  path = dist / name\n                  if not path.exists():\n                      fail(f\"checksum entry references missing file: {name}\")\n                      continue\n                  actual = hashlib.sha256(path.read_bytes()).hexdigest()\n                  if actual != digest:\n                      fail(f\"checksum MISMATCH for {name}: expected {digest}, got {actual}\")\n                  else:\n                      info(f\"checksum OK: {name}\")\n\n          # --- Windows Authenticode structural signature check ------------------------\n          # This is a lightweight, tool-free structural check (PE Certificate Table\n          # presence) run on the ubuntu release job as a final gate. The authoritative\n          # cryptographic/trust-chain verification (`signtool verify`) already ran on\n          # the windows-latest matrix runner immediately after signing.\n          def pe_has_certificate_table(path: pathlib.Path) -> bool:\n              data = path.read_bytes()\n              if data[:2] != b\"MZ\":\n                  return False\n              e_lfanew = struct.unpack_from(\"<I\", data, 0x3C)[0]\n              if data[e_lfanew:e_lfanew + 4] != b\"PE\\x00\\x00\":\n                  return False\n              opt_header_off = e_lfanew + 24\n              magic = struct.unpack_from(\"<H\", data, opt_header_off)[0]\n              if magic == 0x10B:      # PE32\n                  data_dir_off = opt_header_off + 96\n              elif magic == 0x20B:    # PE32+\n                  data_dir_off = opt_header_off + 112\n              else:\n                  return False\n              security_entry_off = data_dir_off + (4 * 8)  # IMAGE_DIRECTORY_ENTRY_SECURITY\n              _, size = struct.unpack_from(\"<II\", data, security_entry_off)\n              return size > 0\n\n          win_exe = dist / \"pushkey-windows-x64.exe\"\n          if os.environ.get(\"PUSHKEY_WINDOWS_CERT_CONFIGURED\") == \"true\":\n              if not win_exe.exists():\n                  fail(f\"expected Windows artifact missing: {win_exe}\")\n              elif not pe_has_certificate_table(win_exe):\n                  fail(f\"PUSHKEY_WINDOWS_CERT_BASE64 is configured but {win_exe} has no embedded Authenticode certificate table\")\n              else:\n                  info(f\"Windows Authenticode certificate table present in {win_exe}\")\n          else:\n              info(\"Windows Authenticode verification skipped \u00e2\u20ac\u201d PUSHKEY_WINDOWS_CERT_BASE64 not configured\")\n\n          # --- macOS code signature structural check -----------------------------------\n          # Same rationale as above: `codesign --verify` already ran natively on the\n          # macos-13 matrix runner. This checks for an LC_CODE_SIGNATURE load command.\n          MH_MAGIC_64 = 0xFEEDFACF\n          LC_CODE_SIGNATURE = 0x1D\n\n          def macho_has_code_signature(path: pathlib.Path) -> bool:\n              data = path.read_bytes()\n              if len(data) < 32:\n                  return False\n              magic = struct.unpack_from(\"<I\", data, 0)[0]\n              if magic != MH_MAGIC_64:\n                  return False\n              ncmds = struct.unpack_from(\"<I\", data, 16)[0]\n              offset = 32  # size of mach_header_64\n              for _ in range(ncmds):\n                  if offset + 8 > len(data):\n                      break\n                  cmd, cmdsize = struct.unpack_from(\"<II\", data, offset)\n                  if cmd == LC_CODE_SIGNATURE:\n                      return True\n                  offset += cmdsize\n              return False\n\n          mac_bin = dist / \"pushkey-macos-x64\"\n          if os.environ.get(\"PUSHKEY_APPLE_CERT_CONFIGURED\") == \"true\":\n              if not mac_bin.exists():\n                  fail(f\"expected macOS artifact missing: {mac_bin}\")\n              elif not macho_has_code_signature(mac_bin):\n                  fail(f\"PUSHKEY_APPLE_CERT_BASE64 is configured but {mac_bin} has no LC_CODE_SIGNATURE load command\")\n              else:\n                  info(f\"macOS code signature load command present in {mac_bin}\")\n          else:\n              info(\"macOS code signature verification skipped \u00e2\u20ac\u201d PUSHKEY_APPLE_CERT_BASE64 not configured\")\n\n          if failed:\n              sys.exit(1)\n          PY\n\n      - name: Attest release artifacts\n        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45\n        with:\n          subject-path: \"dist/*\"\n\n      - name: Upload release artifacts\n        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65\n        with:\n          files: dist/*\n"
+      }
+    },
+    {
+      "name": "release_cannot_be_cut_from_unverified_commit",
+      "status": "pass",
+      "detail": "at least one live control ties a release tag back to a commit that passed the protected branch's gates: ['release_workflow_trigger_inspected']",
+      "evidence": {
+        "satisfied": [
+          "release_workflow_trigger_inspected"
+        ],
+        "unsatisfied": [
+          "tag_ruleset_restricts_release_tags",
+          "classic_tag_protection",
+          "release_environment_restricted_to_protected_refs"
+        ]
+      }
+    }
+  ]
+}

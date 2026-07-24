@@ -13,15 +13,16 @@ The full alpha-to-GA execution path lives in
 
 ## Current Assessment
 
-Pushkey is close to the constrained alpha/sellable bar, but alert-delivery
-proof is still missing.
+Pushkey now meets the constrained alpha/sellable bar. The core local
+product, CLI, MCP flow, admin auth, license/admin backend, web app,
+admin/portal coverage, packaging smoke checks, and roadmap measurement are
+materially advanced.
 
-The core local product, CLI, MCP flow, admin auth, license/admin backend, web
-app, admin/portal coverage, packaging smoke checks, and roadmap measurement are
-materially advanced. The remaining Alpha blocker is confirming alerts reach the
-accountable operator. PostgreSQL/object-storage sync migration, artifact
-signing, independent review, penetration testing, and distributed production
-controls remain post-Alpha / Public Beta work.
+Alpha-to-market progress: 31/31 alpha blockers complete (100.0%).
+
+PostgreSQL/object-storage sync migration, artifact signing, independent
+review, penetration testing, and distributed production controls remain
+post-Alpha / Public Beta work.
 
 The dated launch boundary note lives in
 [alpha-launch-boundary-note.md](alpha-launch-boundary-note.md).
@@ -48,6 +49,8 @@ Do not claim for alpha:
 - Signed Windows/macOS artifacts unless signing has actually happened.
 - Extension marketplace readiness unless store/package gates are complete.
 - Full accessibility certification unless the audit passes.
+- Production monitoring, backup, rollback, and drill evidence for full
+  production/GA readiness.
 
 ## Alpha Blockers To Finish
 
@@ -97,7 +100,9 @@ Do not claim for alpha:
 
 ### Alpha Blocker
 
-- [ ] Confirm alerts reach the accountable operator.
+- [x] Confirm alerts reach the accountable operator.
+  Delivery proof was captured in the accountable operator inbox via SMTP
+  acceptance and IMAP receipt.
 
 ### Sync And Storage Scope
 
@@ -115,14 +120,21 @@ with the constrained claims above.
 - [ ] Resolve critical/high external-review findings.
 - [ ] Triage medium/low external-review findings with owners and deadlines.
 - [x] Add distributed Redis/API-gateway rate limiting.
-- [ ] Complete PostgreSQL/object-storage migration and remove flat-file
-  production write paths.
+- [x] Complete the PostgreSQL/object-storage migration code and remove
+  flat-file production write paths. Reconciled 2026-07-24 against Phase 4 of
+  `docs/PRODUCTION_READINESS_PLAN.md`, which is fully checked with coverage in
+  `tests/test_cloud_vault_sync.py` and `tests/test_cloud_migrations.py`. This
+  covers the code path only.
+- [ ] Provision and cut over the hosted PostgreSQL and object storage. This is
+  the external half of the item above and needs hosted credentials, so it stays
+  open. Alpha claims remain constrained to opt-in encrypted-blob sync per
+  `docs/release-readiness.md`.
 - [ ] Sign Windows and macOS artifacts.
-- [ ] Configure branch protection and required release gates in GitHub settings.
+- [x] Configure branch protection and required release gates in GitHub settings.
 - [ ] Complete production monitoring, backup, restore, and rollback drills.
 
 ## Alpha Go / No-Go
 
-Alpha can start only when the Alpha Blocker above is checked or explicitly
-removed from the alpha product scope. The post-Alpha / Public Beta blockers
-must be presented as future work, not as completed production readiness.
+Alpha can start now because the Alpha Blocker above is checked. The post-Alpha
+/ Public Beta blockers must be presented as future work, not as completed
+production readiness.

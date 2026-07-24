@@ -77,21 +77,21 @@ Exit gate:
 Goal: remove flat-file production limits and make the cloud service safe on
 public infrastructure.
 
-- [ ] Choose PostgreSQL provider.
-- [ ] Choose object-storage provider.
-- [ ] Design schemas and migrations.
+- [x] Choose PostgreSQL provider.
+- [x] Choose object-storage provider.
+- [x] Design schemas and migrations.
 - [x] Migrate encrypted vault blobs to object storage.
 - [x] Add revision/`If-Match` conflict-safe sync.
-- [ ] Add importer from existing JSON/JSONL/blob storage.
-- [ ] Remove production flat-file write paths.
+- [x] Add importer from existing JSON/JSONL/blob storage.
+- [x] Remove production flat-file write paths.
 - [x] Add distributed rate limiting.
 - [x] Add trusted proxy/host/CORS/security-header policy.
-- [ ] Add idempotency keys, SMTP retry, and abuse alerts.
+- [x] Add idempotency keys, SMTP retry, and abuse alerts.
 - [x] Add request limits.
 
 Exit gate:
 
-- [ ] Transactional operational data.
+- [x] Transactional operational data.
 - [ ] Conflict-safe vault sync.
 - [x] Distributed controls survive restart/horizontal scaling.
 
@@ -100,16 +100,17 @@ Exit gate:
 Goal: package, verify, operate, review, and launch.
 
 - [ ] Complete frontend states, accessibility, and Playwright coverage.
-- [ ] Decide extension scope: ship, beta, or defer.
+- [x] Decide extension scope: ship, beta, or defer.
+  - Decision: defer browser and VS Code extensions until their package/store gates pass.
 - [x] Build and install-test sdist/wheel.
 - [x] Reproduce PyInstaller builds from clean checkout.
-- [ ] Align npm wrapper asset names and checksum/signature verification.
+- [x] Align npm wrapper asset names and checksum/signature verification.
 - [x] Add CI matrices, security scans, SBOM, and provenance.
 - [ ] Configure monitoring, backups, restore drill, and rollback drill.
 - [x] Complete legal/privacy/support docs.
 - [ ] Commission independent security review.
 - [ ] Resolve critical/high findings.
-- [ ] Run private beta.
+- [x] Run private beta.
 - [ ] Produce signed artifacts, checksums, SBOM, release notes, and final sign-off.
 
 Exit gate:

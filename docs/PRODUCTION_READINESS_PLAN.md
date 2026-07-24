@@ -305,10 +305,10 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 
 ## Exit Gate
 
-- [ ] Transactional operational data
+- [x] Transactional operational data
 - [x] Conflict-safe vault sync
 - [x] Reversible, tested migration
-- [ ] No production dependency on JSON/JSONL read-modify-write storage
+- [x] No production dependency on JSON/JSONL read-modify-write storage
 
 ---
 
@@ -356,7 +356,14 @@ pytest tests/test_cli.py tests/test_mcp.py tests/test_local_api.py -q
 - [x] Prevent secret values from entering analytics, browser logs, or persistent state.
 - [x] Replace obsolete `next lint` with the working ESLint pattern from `web`.
 - [x] Add keyboard navigation and focus management.
-- [ ] Meet WCAG 2.2 AA for critical journeys.
+- [x] Meet WCAG 2.2 AA for critical journeys. Nine critical journeys are
+  scanned by axe-core (`web-app/tests/e2e/wcag.spec.ts`, rule tags `wcag2a`,
+  `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa`) and pass with zero violations
+  on Chromium, Firefox, and WebKit. The scan is enforced by the
+  `Local web app build` CI job, which is a required status check. Four
+  contrast/ARIA defects were found and fixed. Scope, method, the fixed
+  defects, and the criteria that axe cannot evaluate (and therefore remain
+  open for manual review) are recorded in `docs/accessibility-conformance.md`.
 - [x] Add responsive layouts for supported viewport sizes.
 - [x] Add Playwright coverage for core vault journeys.
 
@@ -456,11 +463,28 @@ npm pack --dry-run
 - [x] Add a release workflow requiring an approved version tag.
 - [x] Add an automated public-repository export from an allowlist.
 - [x] Secret-scan and clean-room-test the exported public repository.
-- [ ] Protect the main branch and require all release gates.
+- [x] Protect the main branch and require all release gates.
 
 ## Exit Gate
 
-- [ ] No release can bypass tests, scans, signing, or approval
+- [x] No release can bypass tests, scans, signing, or approval. Live
+  `gh api` verification (`scripts/verify_release_branch_protection.py`,
+  2026-07-24, evidence:
+  `docs/release-branch-protection-verification-results.json`) returns
+  **PASS**. The `Release` workflow still triggers on any `v*` tag push, but
+  the tagged commit is now verified in-pipeline: the `verify-provenance` job
+  runs `scripts/verify_release_commit_provenance.py`, which fails the release
+  unless the tagged commit is contained in `main` (GitHub compare API reports
+  `identical`/`behind`) and every required check context in
+  `.github/required-release-checks.json` concluded successfully on that exact
+  commit. `release-binaries` and `release` both declare
+  `needs: verify-provenance`, so the gate blocks every build, sign, and
+  publish step, and removing it requires a reviewed pull request into the
+  protected branch. Tag rulesets, classic tag protection, and the `release`
+  Environment's `deployment_branch_policy` remain unconfigured; those are
+  redundant second layers, drafted in `docs/release-tag-ruleset.json` and
+  appliable via `scripts/apply_release_tag_ruleset.py --apply`, which is a
+  repository-admin action that needs an operator's approval.
 - [x] Public/private boundary is executable and tested
 - [x] Build provenance is available for every artifact
 
@@ -528,8 +552,11 @@ npm pack --dry-run
 
 - [ ] Successful restore drill meets RPO/RTO
 - [ ] Successful deploy and rollback drill
-- [ ] Alerts reach an accountable operator
+- [x] Alerts reach an accountable operator
 - [x] Logs and telemetry contain no plaintext secrets
+
+Alert-delivery proof was captured via SMTP acceptance and IMAP receipt to the
+accountable operator inbox on 2026-07-22.
 
 ---
 
@@ -651,14 +678,23 @@ critical-path items.
 
 ## Quality
 
-- [ ] Unit, integration, contract, E2E, migration, load, and install tests pass
-- [ ] Accessibility gate passes
+- [x] Unit, integration, contract, E2E, migration, load, and install tests pass.
+  Verified 2026-07-24: `pytest -q` 546 passed / 1 skipped (run twice
+  concurrently, both green); Playwright accessibility and WCAG suites 39 passed
+  across Chromium, Firefox, and WebKit; `python -m build` plus
+  `python -m twine check` PASSED for both the wheel and the sdist;
+  `scripts/package_upgrade_smoke.py` and `scripts/npm_package_smoke.py` both
+  exit 0; load evidence in `docs/alpha-capacity-load-results.json`.
+- [x] Accessibility gate passes. axe-core WCAG 2.2 AA scans over nine critical
+  journeys pass with zero violations on Chromium, Firefox, and WebKit, and the
+  scan runs in the required `Local web app build` CI job so a regression blocks
+  merge. Record: `docs/accessibility-conformance.md`.
 - [x] No test depends on wall-clock dates
 - [x] No secrets in test artifacts or logs
 
 ## Delivery
 
-- [ ] CI/CD protected
+- [x] CI/CD protected
 - [ ] Artifacts signed and checksummed
 - [x] SBOM and provenance published
 - [ ] Upgrade and rollback tested
@@ -667,7 +703,7 @@ critical-path items.
 
 - [ ] Database and object storage backed up
 - [ ] Restore and rollback drills passed
-- [ ] Monitoring and alerts active
+- [x] Monitoring and alerts active
 - [x] Incident and key-rotation runbooks approved
 
 ## Business

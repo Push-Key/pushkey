@@ -1,0 +1,126 @@
+# Pushkey Production Monitoring Alert-Rule Spec
+#
+# Status: prep-only, provider-agnostic. This file is READY TO APPLY the
+# moment a hosted monitoring backend (Grafana/Prometheus, Datadog, or
+# equivalent) is provisioned. It is NOT deployed to a live monitoring
+# backend today, and it does not by itself close the production monitoring
+# evidence gate tracked in docs/REMAINING_TO_100_PERCENT_TASKLIST.md.
+#
+# `condition` is written in plain language, not a provider query language,
+# because the eventual hosted provider is not yet chosen. `notify` values
+# match the accountable-operator channels already documented as verified in
+# docs/ops-readiness.md and docs/ALPHA_SELLABLE_READINESS_CHECKLIST.md.
+# `evidence_required` lists what must be captured, once this spec is applied
+# to a live backend, to close that signal's gate in
+# docs/production-external-gate-handoff-checklist.md.
+
+version: 1
+status: ready-to-apply-not-deployed
+source_of_truth: docs/ops-readiness.md
+
+rules:
+  - name: health-endpoint-failure
+    signal: health
+    condition: >
+      Cloud API 5xx response rate at or above 5 in a 10 minute window, or
+      GET /api/v1/ops/metrics unreachable/non-200 for 2 consecutive checks.
+    severity: critical
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - dashboard screenshot or export showing the health panel
+      - observation window
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: auth-admin-lockout-spike
+    signal: auth
+    condition: >
+      Combined auth/admin login failure, MFA failure, or lockout events at or
+      above 5 in a 15 minute window.
+    severity: high
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - metric names for registration/login/reset/admin-login/MFA-failure/lockout/session-refresh counts
+      - observation window and threshold crossing timestamp
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: sync-write-failure
+    signal: sync
+    condition: >
+      Encrypted vault upload/download write failure, or stale If-Match
+      conflict rate anomaly, at or above 1 in a 10 minute window.
+    severity: critical
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - metric names for upload/download count, stale If-Match conflicts, idempotent retries, 404 no-vault count, blob size distribution
+      - observation window
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: activation-outcome-anomaly
+    signal: activation
+    condition: >
+      Elevated rate of expired-license, revoked-license, or device-limit
+      activation/heartbeat/deactivation outcomes relative to the alpha
+      baseline observation window.
+    severity: high
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - metric names for activation, heartbeat, deactivation, expired-license, revoked-license, device-limit counts
+      - observation window and baseline comparison
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: email-dead-letter
+    signal: email
+    condition: >
+      Invite, reset, or support email dead-letter queue has 1 or more queued
+      items.
+    severity: high
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - dead-letter count and queue name
+      - SMTP acceptance and IMAP receipt for the delivery-proof send
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: storage-write-or-backup-age
+    signal: storage
+    condition: >
+      JSON/JSONL write failure, encrypted vault blob write failure, or
+      history write failure of any count, OR backup age older than 26 hours.
+    severity: critical
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - backup age snapshot and platform volume-backup status
+      - restore verification age
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner
+
+  - name: rate-limit-spike
+    signal: rate-limits
+    condition: >
+      Combined auth, sync, portal, support, activation, and admin rate-limit
+      events at or above 25 in a 15 minute window.
+    severity: medium
+    notify:
+      primary: live accountable-operator mailbox
+      secondary: backup accountable-operator mailbox
+    evidence_required:
+      - metric names for auth/sync/portal/support/activation/admin limit events
+      - observation window and threshold crossing timestamp
+      - alert message ID and delivery timestamp
+      - acknowledgement timestamp and operator owner

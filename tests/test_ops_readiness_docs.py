@@ -22,8 +22,8 @@ def test_ops_readiness_documents_alpha_dashboard_targets_and_alert_routes():
     for route in (
         "primary operator",
         "secondary operator",
-        "ops-primary@push-key.com",
-        "ops-secondary@push-key.com",
+        "live accountable-operator mailbox",
+        "backup accountable-operator mailbox",
     ):
         assert route in text
 

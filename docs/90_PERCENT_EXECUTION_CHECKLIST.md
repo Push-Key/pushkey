@@ -1,6 +1,6 @@
 # Pushkey 90 Percent Execution Checklist
 
-Status date: 2026-07-22
+Status date: 2026-07-24
 
 Current measured readiness:
 
@@ -8,7 +8,7 @@ Current measured readiness:
 .\.venv\Scripts\python.exe scripts\roadmap_progress.py
 ```
 
-Current result: 307/337 production items complete, 91.1%.
+Current result: 317/337 production items complete, 94.1%.
 90% target: already exceeded.
 Remaining needed for 90%: 0 additional verified items.
 The remaining open items are external Track D gates. The last local Track A
@@ -115,7 +115,7 @@ They are not blockers for a constrained alpha with accurate claims.
 - [x] Remove production flat-file write paths after migration.
 - [x] Add distributed rate limiting through Redis or the API gateway.
 - [x] Prove distributed controls cannot be bypassed by restart or horizontal scaling.
-- [ ] Protect the main branch and require all release gates.
+- [x] Protect the main branch and require all release gates.
 - [ ] Configure encrypted database backups and point-in-time recovery.
 - [ ] Configure versioned object-storage backups.
 - [ ] Conduct and record a destructive restore drill.
@@ -151,10 +151,10 @@ Use this as the working queue for the remaining local-only work.
   current limitations, and what is still deferred to GA.
 - [x] Verify artifact signature handling is documented separately from checksum
   handling so unsigned alpha builds are not overstated.
-- [x] Confirm alert routing is currently an external blocker until placeholder
-  operator destinations are replaced with live accountable operator targets.
+- [x] Confirm alert routing reaches the accountable operator and record the
+  delivery proof.
 - [x] Re-run the roadmap tracker after each completed slice and log the new
-  completion number in the checklist (307/337).
+  completion number in the checklist (317/337).
 
 Evidence captured:
 
@@ -167,9 +167,8 @@ Evidence captured:
 
 ### Immediate Execution Order
 
-1. Keep alert routing as an external blocker until live operator targets exist.
-2. Use `docs/production-external-gate-handoff-checklist.md` for the remaining
+1. Use `docs/production-external-gate-handoff-checklist.md` for the remaining
    external evidence fields.
-3. Re-run `scripts/roadmap_progress.py` and record whether the total moved.
-4. If the tracker still sits below the next verified slice, stop and list the
+2. Re-run `scripts/roadmap_progress.py` and record whether the total moved.
+3. If the tracker still sits below the next verified slice, stop and list the
    remaining blockers rather than widening scope.

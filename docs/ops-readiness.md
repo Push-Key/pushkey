@@ -45,22 +45,37 @@ platform volume-backup status.
 
 | Alert | Initial threshold | Primary operator | Secondary operator |
 |---|---:|---|---|
-| Cloud API 5xx rate | 5 in 10 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
-| Auth/admin lockout spike | 5 in 15 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
-| Rate-limit spike | 25 in 15 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
-| Sync write failure | 1 in 10 minutes | ops-primary@push-key.com | ops-secondary@push-key.com |
-| Email dead letter | 1 queued item | ops-primary@push-key.com | ops-secondary@push-key.com |
-| Backup age | older than 26 hours | ops-primary@push-key.com | ops-secondary@push-key.com |
+| Cloud API 5xx rate | 5 in 10 minutes | live accountable-operator mailbox | backup accountable-operator mailbox |
+| Auth/admin lockout spike | 5 in 15 minutes | live accountable-operator mailbox | backup accountable-operator mailbox |
+| Rate-limit spike | 25 in 15 minutes | live accountable-operator mailbox | backup accountable-operator mailbox |
+| Sync write failure | 1 in 10 minutes | live accountable-operator mailbox | backup accountable-operator mailbox |
+| Email dead letter | 1 queued item | live accountable-operator mailbox | backup accountable-operator mailbox |
+| Backup age | older than 26 hours | live accountable-operator mailbox | backup accountable-operator mailbox |
 
-The placeholder `@push-key.com` operator aliases must be replaced with live
-mailbox or incident-tool destinations before claiming that alerts reach an
-accountable operator.
+The live accountable-operator mailbox destinations above are verified. Alert
+delivery proof is recorded in
+[ALPHA_SELLABLE_READINESS_CHECKLIST.md](ALPHA_SELLABLE_READINESS_CHECKLIST.md).
 
 The remaining external production gates and their evidence fields are tracked
 in
 [production-external-gate-handoff-checklist.md](production-external-gate-handoff-checklist.md).
 Use that checklist to record the live operator destination, alert proof, and
 the production monitoring evidence that supports release readiness.
+
+## Provider-Agnostic Alert-Rule Spec (Ready To Apply, Not Yet Deployed)
+
+[production-monitoring-alert-rules.yaml](production-monitoring-alert-rules.yaml)
+defines a versioned, provider-agnostic alert-rule spec covering all seven
+alpha dashboard signals (health, auth, sync, activation, email, storage, and
+rate limits). Each rule records a plain-language condition, severity, the
+accountable-operator notify channel, and the evidence required to close that
+signal's gate.
+
+This spec is prep work only. It is ready to apply the moment a hosted
+monitoring backend (Grafana/Prometheus, Datadog, or similar) is provisioned,
+but it is not yet deployed to a live monitoring backend and does not by
+itself close the production monitoring evidence gate tracked in
+[REMAINING_TO_100_PERCENT_TASKLIST.md](REMAINING_TO_100_PERCENT_TASKLIST.md).
 
 ## Telemetry Redaction
 
@@ -70,6 +85,11 @@ cookies, master passwords, recovery codes, MFA recovery codes, license tokens,
 agent tokens, backup key values, and encrypted vault blob contents. Allowed
 telemetry is limited to route names, status codes, request IDs, coarse result
 types, counts, sizes, hashes/ETags, timestamps, and redacted identifiers.
+
+## Retention Note
+
+Audit/event streams in the cloud state store are append-only with no retention
+policy yet; retention/pruning is a pre-GA follow-up.
 
 ## Backup And Restore
 

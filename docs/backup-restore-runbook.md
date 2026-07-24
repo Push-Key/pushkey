@@ -19,10 +19,8 @@ Recorded on 2026-07-21:
   [alpha-capacity-load-results.json](alpha-capacity-load-results.json)
 - Local cloud storage migration smoke:
   [cloud-storage-migration-results.json](cloud-storage-migration-results.json)
-- Alert delivery proof: not available locally. Blocker:
-  `docs/ops-readiness.md` still points `ops-primary@push-key.com` and
-  `ops-secondary@push-key.com` at placeholder aliases instead of live mailbox
-  or incident-tool destinations.
+- Alert delivery proof: captured in the accountable operator inbox via SMTP
+  acceptance and IMAP receipt.
 
 ## Promoted Production Storage Mode
 
@@ -45,6 +43,8 @@ Every production backup record must include:
 For hosted production drills, record the same categories in
 `docs/production-rollback-drill-results.template.json` and attach the live
 backup/PITR, rollback, restore, and alert-delivery proof to the release record.
+Operator-narrative evidence templates for backup/PITR, destructive restore,
+and rollback drills live in `docs/evidence-templates/`.
 
 ## Local Alpha Storage Mode
 
@@ -88,6 +88,25 @@ Every alpha backup record must include:
    hosted PITR or versioned object-storage proof.
 6. Record RPO/RTO, operator, backup ID, restored commit, and residual risk.
 
+### Production Destructive Restore Drill Tooling
+
+`scripts/production_restore_drill.py` implements the destructive-restore
+drill for the promoted production storage mode: it seeds vault/license/ticket
+data, deletes and corrupts the vault metadata rows and encrypted blob for a
+seeded account, restores them from a captured backup, and verifies health,
+vault/blob access, activation, support tickets, and admin login. It defaults
+to an isolated local/test fixture and accepts `--target-db-url` (PostgreSQL
+metadata store) and `--target-object-store-url` (recorded for forward
+compatibility; blob storage is still local-disk only in
+`pushkey_cloud_api.py`) to point at a hosted staging/production target once
+access exists. It writes evidence to
+`docs/production-restore-drill-results.json` in the same shape as
+`alpha-rollback-drill-results.json`. This script is execution-ready but has
+**not** been run against real hosted production infrastructure — the
+destructive restore drill item in the roadmap remains open pending hosted
+PostgreSQL/object-storage access. See
+`docs/production-rollback-backup-infrastructure-checklist.md`.
+
 ## Rollback Procedure
 
 1. Stop new deployments.
@@ -96,6 +115,24 @@ Every alpha backup record must include:
    states otherwise.
 4. Verify health, admin login, activation, heartbeat, and support endpoints.
 5. Record rollback reason, affected users, and follow-up owner.
+
+### Production Rollback Drill Tooling
+
+`scripts/production_rollback_drill.py` implements the deployment rollback
+drill for the promoted production storage mode: it seeds vault/license/ticket
+data under a good release configuration, simulates a bad deploy that breaks
+active sessions via a signing-key misconfiguration, rolls the application
+configuration back to the last known good release, and verifies health, the
+previously broken session, login, activation/heartbeat, support tickets, and
+admin login all recover with no data loss. It defaults to an isolated
+local/test fixture and accepts the same `--target-db-url` and
+`--target-object-store-url` flags as the restore drill to point at a hosted
+staging/production target once access exists. It writes evidence to
+`docs/production-rollback-drill-results.json`. This script is
+execution-ready but has **not** been run against real hosted production
+infrastructure — the production rollback drill item in the roadmap remains
+open pending hosted PostgreSQL/object-storage access. See
+`docs/production-rollback-backup-infrastructure-checklist.md`.
 
 ## Incident Procedure
 

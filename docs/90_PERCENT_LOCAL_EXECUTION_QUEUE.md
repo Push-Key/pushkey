@@ -1,6 +1,6 @@
 # Pushkey 90 Percent Local Execution Queue
 
-Status date: 2026-07-22
+Status date: 2026-07-24
 
 This queue is the small local slice that can still move the roadmap toward the
 90 percent mark without relying on signing credentials, production
@@ -17,7 +17,7 @@ infrastructure, branch protection settings, or external review artifacts.
 
 ## Outcome
 
-- Measured production progress is now 307/337, or 91.1%.
+- Measured production progress is now 317/337, or 94.1%.
 - The new accessibility smoke lives in
   [web-app/tests/e2e/accessibility.spec.ts](../web-app/tests/e2e/accessibility.spec.ts).
 - The local Track A load-test evidence lives in
@@ -29,9 +29,9 @@ infrastructure, branch protection settings, or external review artifacts.
 
 - [ ] Signing artifacts.
 - [ ] Production backup or rollback drills.
-- [ ] Branch protection / release-gate enforcement in GitHub.
+- [x] Branch protection / release-gate enforcement in GitHub.
 - [ ] Independent security review or penetration testing.
-- [ ] Production monitoring evidence and accountable-operator alert proof.
+- [ ] Production monitoring evidence, backup or rollback drills.
 
 See
 [production-external-gate-handoff-checklist.md](./production-external-gate-handoff-checklist.md)

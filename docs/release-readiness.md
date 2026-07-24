@@ -86,7 +86,8 @@ The concrete infrastructure checklist for production backup/rollback evidence
 lives in
 [production-rollback-backup-infrastructure-checklist.md](production-rollback-backup-infrastructure-checklist.md).
 That checklist does not establish branch protection or release-gate
-enforcement.
+enforcement. Those settings are captured separately in the external-gate
+handoff checklist and the repository settings API output.
 
 The operator handoff for the remaining external production gates lives in
 [production-external-gate-handoff-checklist.md](production-external-gate-handoff-checklist.md).
@@ -98,26 +99,41 @@ and the deferred Public Beta signing and signed-install verification gates.
 
 Current in-repo evidence:
 
-- `docs/PRODUCTION_READINESS_PLAN.md` still leaves "Protect the main branch and
-  require all release gates" unchecked.
+- `docs/PRODUCTION_READINESS_PLAN.md` still leaves the backup, restore,
+  rollback, signing, and review items unchecked.
+- `docs/production-external-gate-handoff-checklist.md` captures the GitHub
+  branch-protection and release-gate API evidence.
 - `docs/100_PERCENT_COMPLETION_TASKLIST.md` and
-  `docs/REMAINING_TO_100_PERCENT_TASKLIST.md` still require GitHub
-  branch-protection settings evidence.
-- No GitHub branch-protection screenshot/export, repository settings export, or
-  GitHub Settings API output is committed in this repo.
+  `docs/REMAINING_TO_100_PERCENT_TASKLIST.md` now reflect the configured
+  branch-protection state.
+
+- `docs/release-branch-protection-verification-results.json` records the
+  2026-07-24 live `gh api` verdict, **PASS**: the `verify-provenance` job gates
+  the entire release workflow, so a release cannot be cut from a commit that is
+  not contained in `main` or that lacks successful required checks.
+- `docs/accessibility-conformance.md` records WCAG 2.2 AA conformance for the
+  local web app's critical journeys, enforced by a required CI check.
 
 External evidence still required before any GA claim:
 
-- the default branch is protected;
-- the release process requires the documented gates before merge or
-  publication;
-- there is proof that a release cannot bypass tests, scans, signing, or
-  approval;
-- the configured settings are captured in a screenshot, settings export, or
-  API response.
+- signing credentials and signed-artifact install proof;
+- hosted backup, restore, and rollback drill records;
+- independent security review and penetration-test reports.
+
+## Defects Fixed After The Alpha Tag
+
+Fixes landed after `v0.1.0-alpha` was published. They are not in the published
+alpha artifacts and must be included in the next release candidate.
+
+| Severity | Component | Defect | User impact | Fix |
+|---|---|---|---|---|
+| High | Local vault (`pushkey_vault.py`) | Rolling and migration backup filenames were built from `datetime.now()` and created exclusively (`"xb"`). `datetime.now()` has ~16ms granularity on Windows, so two vault writes inside one clock tick produced the same filename and raised `FileExistsError`. | The second of any two rapid vault mutations failed. Through the local API this surfaced as a rolled-back HTTP 500, so the write was silently discarded. Reproduced deterministically; 200 rapid backups previously collided on the second one. | Same-tick names now disambiguate with a counter suffix, still exclusively created so no backup can be clobbered. Backup pruning breaks mtime ties by name so survivors are deterministic. Regression tests in `tests/test_vault_crypto.py`. |
+| Medium | Local web app | Four WCAG 2.2 AA defects: `aria-label` on a roleless toast container, and three foreground/background pairs below the 4.5:1 contrast minimum. | Screen-reader users got no name for the notification region; low-vision users could not reliably read the sidebar footer, destructive buttons, or count badges. | See `docs/accessibility-conformance.md`. |
+| Medium | Build/CI | `web-app/package-lock.json` was out of sync with `package.json`, and both frontends failed `npm audit --audit-level=high` on a transitive `sharp` advisory. | Every `npm ci` step in CI would have failed, and the security-scan job with it. | Lockfile regenerated; `sharp` overridden to `^0.35.3` in both frontends. |
+| Low | Test harness | `pytest.ini` pinned `--basetemp` to a single repo-local `.pytest_tmp`. pytest deletes that whole tree at session start, so a second pytest run destroyed the live `tmp_path` directories of a run already in progress. | Phantom failures and teardown `PermissionError`s landed on whichever unrelated test was executing and never reproduced in isolation. Two such failures were observed and initially misread as product defects. | Each session now gets its own `.pytest_tmp/s<pid>` subdirectory (`tests/conftest.py`), with stale session directories pruned after 6 hours. Guarded by `tests/test_pytest_isolation.py`, and verified by running two full suites concurrently. |
 
 Do not describe branch protection or release-gate enforcement as completed
-until one of those artifacts is attached to the release record.
+unless the API export or screenshot is attached to the release record.
 
 ## Alpha Sync Scope
 

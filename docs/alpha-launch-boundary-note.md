@@ -1,6 +1,6 @@
 # Pushkey Alpha Launch Boundary Note
 
-Date: 2026-07-22
+Date: 2026-07-23
 
 This note records the current alpha launch boundary for Pushkey.
 
@@ -32,19 +32,27 @@ Do not claim the following for alpha:
 - distributed Redis/API-gateway rate limiting;
 - PostgreSQL/object-storage sync cutover;
 - signed Windows/macOS artifacts;
-- branch protection or release-gate enforcement in GitHub;
-- production monitoring or alert-delivery proof to a live accountable operator.
+- production monitoring, backup, rollback, signing, or external review for
+  full production/GA readiness.
 
 ## Current Limitations
 
-- Alert routing still uses placeholder destinations in `docs/ops-readiness.md`.
-- Production backups, rollback, signing, branch protection, and external review
-  remain post-alpha / GA work.
-- The current completion tracker shows 307/337 production items complete
-  (91.1%) and 0/3 post-alpha review items complete.
+- Alert-delivery proof is now captured in the accountable-operator inbox.
+- GitHub branch protection and release-gate enforcement are now configured in
+  repository settings.
+- Production backups, rollback, signing, and external review remain post-alpha
+  / GA work.
+- The current completion tracker shows 317/337 production items complete
+  (94.1%) and 0/3 post-alpha review items complete.
 
 ## Recent Verification
 
+- `SMTP/IMAP alert-delivery proof to the accountable operator inbox` ->
+  confirmed.
+- `GitHub release v0.1.0-alpha` -> official alpha bundle published with
+  `build.tar.gz`, `CHECKSUMS.txt`, and `CHECKSUMS.txt.sha256`.
+- `GitHub branch protection and release-gate settings` -> configured through
+  repository settings API and recorded in the handoff checklist.
 - `python -m pytest -q` -> 475 passed, 1 skipped.
 - `npm --prefix web-app run lint` -> passed.
 - `npm --prefix web-app run build` -> passed and generated the integrity
@@ -59,8 +67,6 @@ Do not claim the following for alpha:
 
 - Destructive restore and rollback drills remain deferred until the production
   operations phase.
-- GitHub branch protection and release-gate enforcement still require admin
-  access to the repository settings.
 - Independent security review, penetration testing, and signed-artifact
   installation confirmation remain Public Beta gates.
 
