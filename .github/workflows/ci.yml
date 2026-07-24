@@ -236,11 +236,16 @@ jobs:
           node-version: "24"
 
       - name: npm audit
+        # --omit=dev scopes the high-severity gate to dependencies that ship to
+        # users. The dev toolchain (eslint plugins, the shadcn CLI's bundled MCP
+        # server) pulls deep transitive advisories that never reach the
+        # production bundle; blocking every merge on them turns the gate into
+        # noise. Dev-tool CVEs are tracked via Dependabot instead.
         run: |
           npm --prefix web ci
-          npm --prefix web audit --audit-level=high
+          npm --prefix web audit --omit=dev --audit-level=high
           npm --prefix web-app ci
-          npm --prefix web-app audit --audit-level=high
+          npm --prefix web-app audit --omit=dev --audit-level=high
 
       - name: Trivy filesystem scan
         # v0.36.0. The previous pin resolved an internal
