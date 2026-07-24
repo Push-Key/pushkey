@@ -217,7 +217,11 @@ jobs:
           npm --prefix web-app audit --audit-level=high
 
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
+        # v0.36.0. The previous pin resolved an internal
+        # aquasecurity/setup-trivy@v0.2.1 reference, and that tag no longer
+        # exists upstream (the oldest published tag is now v0.2.6), so the job
+        # failed during "Set up job" before running a single step.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
