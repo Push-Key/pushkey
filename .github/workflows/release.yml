@@ -11,9 +11,54 @@ permissions:
   attestations: write
 
 jobs:
+  verify-provenance:
+    # Non-bypassable release provenance gate. The `push: tags: ["v*"]` trigger
+    # will fire for a tag pointing at ANY commit, and the `release` Environment's
+    # required reviewer is a human approval, not a provenance check. This job
+    # runs before anything is built, signed, or published and fails the whole
+    # release unless the tagged commit is contained in the protected `main`
+    # branch AND every required CI check concluded successfully on that exact
+    # commit. Every other job in this workflow declares `needs: verify-provenance`,
+    # so a failure here blocks the entire release. Removing this job requires a
+    # reviewed pull request into the protected branch.
+    name: Verify release commit provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+      statuses: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Verify tagged commit passed the protected branch and required checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          python scripts/verify_release_commit_provenance.py \
+            --output release-provenance-evidence.json
+
+      - name: Upload provenance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-provenance-evidence
+          path: release-provenance-evidence.json
+          if-no-files-found: warn
+
   release-binaries:
     name: Build npm binary (${{ matrix.asset }})
     runs-on: ${{ matrix.os }}
+    needs: verify-provenance
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +103,113 @@ jobs:
       - name: Build CLI binary
         run: python build_exe.py --cli-only
 
+      - name: Sign Windows binary (Authenticode)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          PUSHKEY_WINDOWS_CERT_BASE64: ${{ secrets.PUSHKEY_WINDOWS_CERT_BASE64 }}
+          PUSHKEY_WINDOWS_CERT_PASSWORD: ${{ secrets.PUSHKEY_WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:PUSHKEY_WINDOWS_CERT_BASE64)) {
+            Write-Host "Windows Authenticode signing skipped — PUSHKEY_WINDOWS_CERT_BASE64 not configured"
+            exit 0
+          }
+
+          $signtool = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -First 1).FullName
+          if (-not $signtool) { $signtool = "signtool.exe" }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "pushkey-windows-cert.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:PUSHKEY_WINDOWS_CERT_BASE64))
+
+          & $signtool sign /f $certPath /p $env:PUSHKEY_WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "${{ matrix.source }}"
+          $signExit = $LASTEXITCODE
+          Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+          if ($signExit -ne 0) {
+            throw "signtool sign failed with exit code $signExit"
+          }
+
+          Write-Host "Windows Authenticode signature applied to ${{ matrix.source }}"
+
+      - name: Verify Windows Authenticode signature
+        if: ${{ matrix.os == 'windows-latest' && secrets.PUSHKEY_WINDOWS_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $signtool = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -First 1).FullName
+          if (-not $signtool) { $signtool = "signtool.exe" }
+
+          & $signtool verify /pa /v "${{ matrix.source }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows Authenticode signature verification FAILED for ${{ matrix.source }}"
+          }
+          Write-Host "Windows Authenticode signature verified OK for ${{ matrix.source }}"
+
+      - name: Sign and notarize macOS binary
+        if: ${{ matrix.os == 'macos-13' }}
+        shell: bash
+        env:
+          PUSHKEY_APPLE_CERT_BASE64: ${{ secrets.PUSHKEY_APPLE_CERT_BASE64 }}
+          PUSHKEY_APPLE_CERT_PASSWORD: ${{ secrets.PUSHKEY_APPLE_CERT_PASSWORD }}
+          PUSHKEY_APPLE_SIGNING_IDENTITY: ${{ secrets.PUSHKEY_APPLE_SIGNING_IDENTITY }}
+          PUSHKEY_APPLE_NOTARIZATION_API_KEY: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_KEY }}
+          PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID }}
+          PUSHKEY_APPLE_NOTARIZATION_API_ISSUER: ${{ secrets.PUSHKEY_APPLE_NOTARIZATION_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSHKEY_APPLE_CERT_BASE64:-}" ]; then
+            echo "macOS codesign/notarization skipped — PUSHKEY_APPLE_CERT_BASE64 not configured"
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/pushkey-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/pushkey-apple-cert.p12"
+
+          echo "$PUSHKEY_APPLE_CERT_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$PUSHKEY_APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+
+          codesign --force --options runtime --timestamp \
+            --sign "${PUSHKEY_APPLE_SIGNING_IDENTITY:-Developer ID Application}" \
+            "${{ matrix.source }}"
+
+          if [ -n "${PUSHKEY_APPLE_NOTARIZATION_API_KEY:-}" ]; then
+            NOTARY_KEY_PATH="$RUNNER_TEMP/pushkey-notary-key.p8"
+            echo "$PUSHKEY_APPLE_NOTARIZATION_API_KEY" > "$NOTARY_KEY_PATH"
+
+            ZIP_PATH="$RUNNER_TEMP/pushkey-macos-notarize.zip"
+            ditto -c -k --keepParent "${{ matrix.source }}" "$ZIP_PATH"
+
+            xcrun notarytool submit "$ZIP_PATH" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$PUSHKEY_APPLE_NOTARIZATION_API_KEY_ID" \
+              --issuer "$PUSHKEY_APPLE_NOTARIZATION_API_ISSUER" \
+              --wait
+
+            rm -f "$NOTARY_KEY_PATH" "$ZIP_PATH"
+          else
+            echo "macOS notarization skipped — PUSHKEY_APPLE_NOTARIZATION_API_KEY not configured (codesign only)"
+          fi
+
+          rm -f "$CERT_PATH"
+          security delete-keychain "$KEYCHAIN_PATH" || true
+
+          echo "macOS code signature applied to ${{ matrix.source }}"
+
+      - name: Verify macOS code signature
+        if: ${{ matrix.os == 'macos-13' && secrets.PUSHKEY_APPLE_CERT_BASE64 != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "${{ matrix.source }}"
+          echo "macOS code signature verified OK for ${{ matrix.source }}"
+
       - name: Stage npm binary asset
         shell: bash
         run: |
@@ -73,7 +225,7 @@ jobs:
   release:
     name: Build release artifacts
     runs-on: ubuntu-latest
-    needs: release-binaries
+    needs: [verify-provenance, release-binaries]
     environment: release
 
     steps:
@@ -144,6 +296,127 @@ jobs:
             fs.writeFileSync(`${assetPath}.sig`, `${signature}\n`, 'utf8');
           }
           NODE
+
+      - name: Verify release artifact checksums and signatures
+        env:
+          PUSHKEY_WINDOWS_CERT_CONFIGURED: ${{ secrets.PUSHKEY_WINDOWS_CERT_BASE64 != '' }}
+          PUSHKEY_APPLE_CERT_CONFIGURED: ${{ secrets.PUSHKEY_APPLE_CERT_BASE64 != '' }}
+        run: |
+          python <<'PY'
+          import hashlib
+          import os
+          import pathlib
+          import struct
+          import sys
+
+          dist = pathlib.Path("dist")
+          failed = False
+
+          def fail(msg):
+              global failed
+              print(f"::error::{msg}")
+              failed = True
+
+          def info(msg):
+              print(msg)
+
+          # --- Checksum verification -------------------------------------------------
+          sums_file = dist / "SHA256SUMS.txt"
+          if not sums_file.exists():
+              fail("SHA256SUMS.txt is missing")
+          else:
+              for line in sums_file.read_text().splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  parts = line.split(None, 1)
+                  if len(parts) != 2:
+                      fail(f"malformed checksum line: {line!r}")
+                      continue
+                  digest, name = parts[0], parts[1].strip().lstrip("*")
+                  path = dist / name
+                  if not path.exists():
+                      fail(f"checksum entry references missing file: {name}")
+                      continue
+                  actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                  if actual != digest:
+                      fail(f"checksum MISMATCH for {name}: expected {digest}, got {actual}")
+                  else:
+                      info(f"checksum OK: {name}")
+
+          # --- Windows Authenticode structural signature check ------------------------
+          # This is a lightweight, tool-free structural check (PE Certificate Table
+          # presence) run on the ubuntu release job as a final gate. The authoritative
+          # cryptographic/trust-chain verification (`signtool verify`) already ran on
+          # the windows-latest matrix runner immediately after signing.
+          def pe_has_certificate_table(path: pathlib.Path) -> bool:
+              data = path.read_bytes()
+              if data[:2] != b"MZ":
+                  return False
+              e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+              if data[e_lfanew:e_lfanew + 4] != b"PE\x00\x00":
+                  return False
+              opt_header_off = e_lfanew + 24
+              magic = struct.unpack_from("<H", data, opt_header_off)[0]
+              if magic == 0x10B:      # PE32
+                  data_dir_off = opt_header_off + 96
+              elif magic == 0x20B:    # PE32+
+                  data_dir_off = opt_header_off + 112
+              else:
+                  return False
+              security_entry_off = data_dir_off + (4 * 8)  # IMAGE_DIRECTORY_ENTRY_SECURITY
+              _, size = struct.unpack_from("<II", data, security_entry_off)
+              return size > 0
+
+          win_exe = dist / "pushkey-windows-x64.exe"
+          if os.environ.get("PUSHKEY_WINDOWS_CERT_CONFIGURED") == "true":
+              if not win_exe.exists():
+                  fail(f"expected Windows artifact missing: {win_exe}")
+              elif not pe_has_certificate_table(win_exe):
+                  fail(f"PUSHKEY_WINDOWS_CERT_BASE64 is configured but {win_exe} has no embedded Authenticode certificate table")
+              else:
+                  info(f"Windows Authenticode certificate table present in {win_exe}")
+          else:
+              info("Windows Authenticode verification skipped — PUSHKEY_WINDOWS_CERT_BASE64 not configured")
+
+          # --- macOS code signature structural check -----------------------------------
+          # Same rationale as above: `codesign --verify` already ran natively on the
+          # macos-13 matrix runner. This checks for an LC_CODE_SIGNATURE load command.
+          MH_MAGIC_64 = 0xFEEDFACF
+          LC_CODE_SIGNATURE = 0x1D
+
+          def macho_has_code_signature(path: pathlib.Path) -> bool:
+              data = path.read_bytes()
+              if len(data) < 32:
+                  return False
+              magic = struct.unpack_from("<I", data, 0)[0]
+              if magic != MH_MAGIC_64:
+                  return False
+              ncmds = struct.unpack_from("<I", data, 16)[0]
+              offset = 32  # size of mach_header_64
+              for _ in range(ncmds):
+                  if offset + 8 > len(data):
+                      break
+                  cmd, cmdsize = struct.unpack_from("<II", data, offset)
+                  if cmd == LC_CODE_SIGNATURE:
+                      return True
+                  offset += cmdsize
+              return False
+
+          mac_bin = dist / "pushkey-macos-x64"
+          if os.environ.get("PUSHKEY_APPLE_CERT_CONFIGURED") == "true":
+              if not mac_bin.exists():
+                  fail(f"expected macOS artifact missing: {mac_bin}")
+              elif not macho_has_code_signature(mac_bin):
+                  fail(f"PUSHKEY_APPLE_CERT_BASE64 is configured but {mac_bin} has no LC_CODE_SIGNATURE load command")
+              else:
+                  info(f"macOS code signature load command present in {mac_bin}")
+          else:
+              info("macOS code signature verification skipped — PUSHKEY_APPLE_CERT_BASE64 not configured")
+
+          if failed:
+              sys.exit(1)
+          PY
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
