@@ -61,18 +61,44 @@ def _prune_stale_session_dirs(basetemp: Path) -> None:
         shutil.rmtree(entry, ignore_errors=True)
 
 
+#: The real vault directory, captured once at import before any redirection.
+REAL_VAULT_DIR = pushkey_shared.VAULT_DIR
+
+
+def vault_path_attributes(module=pushkey_shared) -> dict[str, Path]:
+    """Return every module attribute that points inside the real vault directory.
+
+    Derived rather than hand-listed. The previous fixture enumerated nine paths
+    by name while pushkey_shared defines sixteen, so PROVIDERS_CACHE, MFA_FILE,
+    FIDO2_FILE, SSO_FILE, LEASES_FILE, and AGENT_TOKENS_FILE still pointed at the
+    developer's real ~/.pushkey during tests. That passed on any machine that had
+    a vault directory and failed on a fresh one, and meant the suite could read
+    and write a real user's vault. Deriving the list keeps it correct as
+    pushkey_shared grows.
+    """
+
+    found: dict[str, Path] = {}
+    for name in dir(module):
+        if name.startswith("__"):
+            continue
+        value = getattr(module, name)
+        if not isinstance(value, Path):
+            continue
+        if value == REAL_VAULT_DIR or REAL_VAULT_DIR in value.parents:
+            found[name] = value
+    return found
+
+
 @pytest.fixture(autouse=True)
 def isolate_vault_paths(tmp_path, monkeypatch):
     """Redirect all vault I/O to tmp_path so tests never touch ~/.pushkey."""
-    monkeypatch.setattr(pushkey_shared, "VAULT_DIR", tmp_path)
-    monkeypatch.setattr(pushkey_shared, "VAULT_FILE", tmp_path / "vault.enc")
-    monkeypatch.setattr(pushkey_shared, "SALT_FILE", tmp_path / ".salt")
-    monkeypatch.setattr(pushkey_shared, "CONFIG_FILE", tmp_path / "config.json")
-    monkeypatch.setattr(pushkey_shared, "LOG_FILE", tmp_path / "pushkey.log")
-    monkeypatch.setattr(pushkey_shared, "HEALTH_FILE", tmp_path / "health.json")
-    monkeypatch.setattr(pushkey_shared, "IMPORT_DIR", tmp_path / "import")
-    monkeypatch.setattr(pushkey_shared, "LICENSE_FILE", tmp_path / ".license")
-    monkeypatch.setattr(pushkey_shared, "TOKEN_FILE", tmp_path / ".token")
+    for name, original in vault_path_attributes().items():
+        if original == REAL_VAULT_DIR:
+            monkeypatch.setattr(pushkey_shared, name, tmp_path)
+        else:
+            monkeypatch.setattr(
+                pushkey_shared, name, tmp_path / original.relative_to(REAL_VAULT_DIR)
+            )
     try:
         import pushkey_tiers
         pushkey_tiers._LICENSE_CACHE = None

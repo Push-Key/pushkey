@@ -177,8 +177,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # public_export.py refuses to write inside the source checkout, so that a
+      # recursive copy can never swallow its own output. That invariant is
+      # asserted by tests/test_public_export.py. This step used to pass a
+      # relative `public-export`, which resolves inside the checkout, so it
+      # failed before scanning anything. Export outside the checkout, then stage
+      # a copy inside the workspace because the gitleaks action runs in a
+      # container that only sees the workspace.
       - name: Export public repository boundary
-        run: python scripts/public_export.py public-export
+        run: |
+          python scripts/public_export.py "$RUNNER_TEMP/public-export"
+          cp -r "$RUNNER_TEMP/public-export" public-export
 
       - name: Secret scan public export
         uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
@@ -186,6 +195,12 @@ jobs:
           args: detect --source public-export --no-git --redact
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Drop the staged copy so the later filesystem scan does not walk a
+      # duplicate of the tree it is already scanning.
+      - name: Remove staged public export
+        if: always()
+        run: rm -rf public-export
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065

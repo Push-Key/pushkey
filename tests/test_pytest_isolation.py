@@ -98,3 +98,53 @@ def test_stale_session_directories_are_pruned_but_recent_ones_are_kept(tmp_path)
         "only s<pid> session directories are pruned; an old directory whose "
         "name merely starts with 's' must survive"
     )
+
+
+# --- vault path isolation ---------------------------------------------------
+
+
+def test_every_vault_path_is_redirected_into_tmp_path(tmp_path):
+    # A hand-maintained list drifted: pushkey_shared defines sixteen vault
+    # paths and only nine were redirected, so the suite read and wrote the
+    # developer's real ~/.pushkey. It passed anywhere that directory existed
+    # and failed on a clean machine.
+    import pushkey_shared
+
+    escaped = {
+        name: value
+        for name, value in conftest.vault_path_attributes().items()
+        if conftest.REAL_VAULT_DIR in getattr(pushkey_shared, name).parents
+        or getattr(pushkey_shared, name) == conftest.REAL_VAULT_DIR
+    }
+
+    assert escaped == {}, (
+        f"these pushkey_shared paths still point at the real vault directory "
+        f"during tests: {sorted(escaped)}"
+    )
+
+
+def test_isolation_covers_the_paths_the_hand_written_list_missed():
+    import pushkey_shared
+
+    for name in (
+        "AGENT_TOKENS_FILE",
+        "PROVIDERS_CACHE",
+        "MFA_FILE",
+        "FIDO2_FILE",
+        "SSO_FILE",
+        "LEASES_FILE",
+    ):
+        value = getattr(pushkey_shared, name)
+        assert conftest.REAL_VAULT_DIR not in value.parents, f"{name} escaped isolation"
+
+
+def test_vault_path_discovery_ignores_unrelated_paths(tmp_path):
+    class _Module:
+        VAULT_DIR = conftest.REAL_VAULT_DIR
+        SOME_FILE = conftest.REAL_VAULT_DIR / "x.enc"
+        ELSEWHERE = tmp_path / "not-a-vault-path"
+        NOT_A_PATH = "string"
+
+    found = conftest.vault_path_attributes(_Module)
+
+    assert set(found) == {"VAULT_DIR", "SOME_FILE"}
