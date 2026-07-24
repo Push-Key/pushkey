@@ -632,6 +632,37 @@ def test_project_transaction_rolls_back_config_and_session(unlocked, auth, tmp_p
     monkeypatch.setattr(pushkey_vault, "save_vault", original)
 
 
+def test_failed_vault_save_does_not_clobber_a_concurrent_writers_vault(
+    unlocked, auth, tmp_path, monkeypatch
+):
+    """A vault conflict must not roll the on-disk vault back over a newer one.
+
+    Reproduces the cross-writer loss: the GUI session is unlocked at revision A
+    while a separate process (CLI/MCP) commits revision B; the GUI's next
+    project mutation then fails the revision check. The transaction rollback
+    must leave B on disk, not restore its pre-request snapshot A.
+    """
+    import pushkey_vault
+
+    project = tmp_path / "concurrent-writer"
+    project.mkdir()
+    concurrent_vault = _s.VAULT_FILE.read_bytes() + b"\x00CONCURRENT-COMMIT-B"
+
+    def commit_b_then_conflict(*args, **kwargs):
+        # Stand in for another process committing a newer vault, after which our
+        # revision-checked save detects the conflict instead of overwriting it.
+        _s.VAULT_FILE.write_bytes(concurrent_vault)
+        raise pushkey_vault.VaultConflictError("stale_vault_revision")
+
+    monkeypatch.setattr(pushkey_vault, "save_vault", commit_b_then_conflict)
+    with pytest.raises(pushkey_vault.VaultConflictError):
+        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+
+    assert _s.VAULT_FILE.read_bytes() == concurrent_vault, (
+        "rollback overwrote the concurrently committed vault with a stale snapshot"
+    )
+
+
 def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from pushkey_vault import load_config

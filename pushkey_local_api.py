@@ -659,18 +659,29 @@ def create_app() -> FastAPI:
             tmp.unlink(missing_ok=True)
 
     def _persist_project_state(sess: _Session, mutate, *, save_when=lambda _result: True):
-        """Apply a config/vault mutation and roll both encrypted files back on failure."""
+        """Apply a config/vault mutation, rolling our own writes back on failure.
+
+        The vault file is deliberately never restored here. `save_vault` writes
+        atomically (temp file + os.replace) and refuses to write when the
+        on-disk revision moved out from under the in-memory session
+        (VaultConflictError), so a failed `_save` never leaves a partial vault
+        and never overwrote the disk. Restoring the pre-request vault snapshot
+        would therefore only ever clobber a vault another process (CLI, MCP)
+        committed while we held the in-process lock -- the cross-writer secret
+        loss this transaction exists to prevent.
+        """
         from pushkey_vault import load_config, save_config
         with app.state.project_lock:
             cfg = load_config()
             original_cfg = copy.deepcopy(cfg)
             original_vault = copy.deepcopy(sess.vault)
             cfg_bytes = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
-            vault_bytes = _s.VAULT_FILE.read_bytes() if _s.VAULT_FILE.exists() else None
+            config_written = False
             try:
                 result = mutate(cfg, sess.vault)
                 if save_when(result):
                     save_config(cfg)
+                    config_written = True
                     _save(sess)
                 return cfg, result
             except Exception:
@@ -678,8 +689,11 @@ def create_app() -> FastAPI:
                 sess.vault.update(original_vault)
                 cfg.clear()
                 cfg.update(original_cfg)
-                _restore_bytes(_s.CONFIG_FILE, cfg_bytes)
-                _restore_bytes(_s.VAULT_FILE, vault_bytes)
+                # Only undo the config we actually wrote. `save_config` is also
+                # atomic, and _save runs last, so if we never reached it there is
+                # nothing on disk to undo.
+                if config_written:
+                    _restore_bytes(_s.CONFIG_FILE, cfg_bytes)
                 raise
 
     def _now_date() -> str:

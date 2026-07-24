@@ -492,15 +492,46 @@ def check_expired_leases() -> list:
 # CLOUD SYNC CLIENT  (#28)
 # ═══════════════════════════════════════════════════════════════
 
-def cloud_push(endpoint: str, token: str, vault_bytes: bytes) -> str:
-    """PUT encrypted vault blob. Returns server ETag."""
-    import urllib.request
+class CloudSyncConflict(Exception):
+    """Raised when a push is rejected because the remote vault moved ahead.
+
+    Carries the server's current ETag so the caller can pull and reconcile
+    instead of clobbering another device's newer vault.
+    """
+
+    def __init__(self, current_etag: str = ""):
+        super().__init__("remote vault changed since last sync")
+        self.current_etag = current_etag
+
+
+def cloud_push(endpoint: str, token: str, vault_bytes: bytes, if_match: str = "") -> str:
+    """PUT encrypted vault blob. Returns server ETag.
+
+    When `if_match` is a known ETag, send it as `If-Match` so the server rejects
+    the write (409) if another device pushed a newer vault in the meantime,
+    rather than silently overwriting it. A first-ever push passes no ETag and is
+    unconditional. On 409 this raises CloudSyncConflict carrying the current
+    server ETag.
+    """
+    import urllib.request, urllib.error
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/v1/vault", data=vault_bytes, method="PUT")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/octet-stream")
-    with urlopen_checked(req, timeout=20) as resp:
-        return json.loads(resp.read()).get("etag", "")
+    if if_match:
+        req.add_header("If-Match", if_match)
+    try:
+        with urlopen_checked(req, timeout=20) as resp:
+            return json.loads(resp.read()).get("etag", "")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            current_etag = ""
+            try:
+                current_etag = json.loads(exc.read()).get("current_etag", "")
+            except Exception:
+                pass
+            raise CloudSyncConflict(current_etag) from exc
+        raise
 
 def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
     """GET vault blob. Returns (bytes, etag) or (None, etag) if unchanged."""
@@ -3028,9 +3059,27 @@ class AppFrame(ctk.CTkFrame):
         vault_bytes = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
         if not vault_bytes:
             return
-        etag = cloud_push(endpoint, token, vault_bytes)
-        self.config.setdefault("cloud", {})["last_synced"] = datetime.now().isoformat()
-        self.config["cloud"]["etag"] = etag
+        last_etag = cfg.get("etag", "")
+        try:
+            etag = cloud_push(endpoint, token, vault_bytes, if_match=last_etag)
+        except CloudSyncConflict as conflict:
+            # Another device pushed a newer vault. Do not overwrite it. Record
+            # the server's current ETag and surface the conflict so the user can
+            # pull and reconcile; staying silent here is exactly the cross-device
+            # write-loss this guards against.
+            cloud_cfg = self.config.setdefault("cloud", {})
+            cloud_cfg["conflict_etag"] = conflict.current_etag
+            save_config(self.config)
+            if not silent:
+                raise RuntimeError(
+                    "Cloud sync conflict: the vault was changed on another "
+                    "device. Pull the latest vault before syncing again."
+                ) from conflict
+            return
+        cloud_cfg = self.config.setdefault("cloud", {})
+        cloud_cfg["last_synced"] = datetime.now().isoformat()
+        cloud_cfg["etag"] = etag
+        cloud_cfg.pop("conflict_etag", None)
         save_config(self.config)
 
     # ── Cloud tab renderer ────────────────────────────────────────

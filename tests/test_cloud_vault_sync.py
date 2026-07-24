@@ -190,6 +190,81 @@ def test_vault_put_rejects_stale_if_match_without_overwriting(user_client, app_m
     assert [row["etag"] for row in history] == [first.json()["etag"]]
 
 
+def test_concurrent_register_and_reset_do_not_lose_users(tmp_path, monkeypatch):
+    """Interleaved writes to the users document must all survive.
+
+    request-reset, confirm-reset, and account_delete previously did a
+    non-atomic load -> mutate -> save on the users document, so a registration
+    committing inside that window was silently erased (account loss). Routing
+    every write through the store's row-locked mutate_document serializes them.
+    Here many distinct registrations race against reset writes for one existing
+    account; with the fix every registration persists and the reset lands. The
+    auth rate limit is raised so the limiter, not the store, is not what caps
+    the writes under test.
+    """
+    monkeypatch.setenv("PUSHKEY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUSHKEY_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("PUSHKEY_ADMIN_PASSWORD", "admin-pass-123")
+    monkeypatch.setenv("PUSHKEY_JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setenv("AUTH_RATE_MAX", "10000")
+    if "pushkey_cloud_api" in sys.modules:
+        del sys.modules["pushkey_cloud_api"]
+    app_module = importlib.import_module("pushkey_cloud_api")
+    client = TestClient(app_module.app)
+    assert client.post(
+        "/api/v1/auth/register",
+        json={"email": "victim@example.com", "password": "correct horse battery staple"},
+    ).status_code == 200
+
+    new_emails = [f"racer{i}@example.com" for i in range(24)]
+
+    def op(i: int):
+        if i % 2 == 0:
+            return client.post(
+                "/api/v1/auth/register",
+                json={"email": new_emails[i // 2], "password": "another good passphrase"},
+            ).status_code
+        return client.post(
+            "/api/v1/auth/request-reset", json={"email": "victim@example.com"}
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(op, range(len(new_emails) * 2)))
+
+    users = app_module._load_users()
+    missing = [email for email in new_emails if email not in users]
+    assert not missing, f"registrations lost to a concurrent users-document write: {missing}"
+    assert "reset_token_hash" in users["victim@example.com"]
+
+
+def test_vault_put_rejects_oversized_chunked_body(user_client, app_module):
+    """A chunked PUT (no Content-Length) must still be capped, not buffered whole.
+
+    The security middleware only rejects bodies by Content-Length; a
+    Transfer-Encoding: chunked upload carries none, so before the streaming cap
+    the endpoint would read an arbitrarily large blob into memory and persist
+    it. Sending a generator makes httpx use chunked encoding.
+    """
+
+    client, auth = user_client
+    limit = app_module.MAX_REQUEST_BYTES
+
+    def oversized_chunks():
+        chunk = b"x" * 65536
+        sent = 0
+        while sent <= limit:
+            sent += len(chunk)
+            yield chunk
+
+    resp = client.put("/api/v1/vault", headers=auth, content=oversized_chunks())
+    assert resp.status_code == 413
+
+    # The rejected upload left no vault behind, and normal writes still work.
+    assert client.get("/api/v1/vault", headers=auth).status_code == 404
+    ok = client.put("/api/v1/vault", headers=auth, content=b"encrypted-small")
+    assert ok.status_code == 200
+
+
 def test_vault_put_records_version_history_and_replays_idempotent_retry(user_client, app_module):
     client, auth = user_client
     first = client.put(

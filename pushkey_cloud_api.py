@@ -541,12 +541,18 @@ async def register(request: Request):
     pw    = body.get("password", "")
     if not email or not pw or len(pw) < 8:
         raise HTTPException(400, "email and password (>=8 chars) required")
-    with _USER_LOCK:
-        users = _load_users()
+    new_hash = pwd_ctx.hash(pw)
+
+    def _register(users):
         if email in users:
             raise HTTPException(409, "email already registered")
-        users[email] = {"hash": pwd_ctx.hash(pw), "created": _utcnow().isoformat()}
-        _save_users(users)
+        users[email] = {"hash": new_hash, "created": _utcnow().isoformat()}
+
+    # mutate_document holds the row lock across the existence check and the
+    # write, so a concurrent registration/reset cannot slip in between and be
+    # lost (last-write-wins) -- which the in-process _USER_LOCK could not
+    # prevent across multiple uvicorn workers on PostgreSQL.
+    _STATE_STORE.mutate_document("users", dict, _register)
     return {"token": _create_token(email)}
 
 @app.post("/api/v1/auth/login")
@@ -577,14 +583,21 @@ async def auth_request_reset(request: Request):
     if not email:
         raise HTTPException(400, "email required")
 
-    users = _load_users()
-    if email in users:
-        # Generate token, store hash, expiry
-        token = secrets.token_urlsafe(32)
-        users[email]["reset_token_hash"] = hashlib.sha256(token.encode()).hexdigest()
-        users[email]["reset_expires"]    = (_utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat()
-        _save_users(users)
+    token = secrets.token_urlsafe(32)
 
+    def _set_reset(users):
+        user = users.get(email)
+        if not user:
+            return False
+        user["reset_token_hash"] = hashlib.sha256(token.encode()).hexdigest()
+        user["reset_expires"] = (_utcnow() + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat()
+        return True
+
+    # Atomic read-modify-write so a concurrent write to the users document
+    # cannot erase this reset token (or vice versa). Email is sent after the
+    # transaction commits, never while holding the row lock.
+    email_registered = _STATE_STORE.mutate_document("users", dict, _set_reset)
+    if email_registered:
         # Send email if SMTP configured
         if SMTP_HOST and FROM_EMAIL:
             try:
@@ -653,22 +666,25 @@ async def auth_confirm_reset(request: Request):
     if len(new_pw) < 8:
         raise HTTPException(400, "password must be at least 8 chars")
 
-    users = _load_users()
-    user  = users.get(email)
-    if not user or "reset_token_hash" not in user or "reset_expires" not in user:
-        raise HTTPException(401, "Invalid or expired reset token")
-
+    new_hash = pwd_ctx.hash(new_pw)
     expected_hash = hashlib.sha256(token.encode()).hexdigest()
-    if expected_hash != user["reset_token_hash"]:
-        raise HTTPException(401, "Invalid or expired reset token")
 
-    if user["reset_expires"] < _utcnow().isoformat():
-        raise HTTPException(401, "Reset token expired — request a new one")
+    def _apply_reset(users):
+        user = users.get(email)
+        if not user or "reset_token_hash" not in user or "reset_expires" not in user:
+            raise HTTPException(401, "Invalid or expired reset token")
+        if expected_hash != user["reset_token_hash"]:
+            raise HTTPException(401, "Invalid or expired reset token")
+        if user["reset_expires"] < _utcnow().isoformat():
+            raise HTTPException(401, "Reset token expired — request a new one")
+        user["hash"] = new_hash
+        user.pop("reset_token_hash", None)
+        user.pop("reset_expires", None)
 
-    user["hash"] = pwd_ctx.hash(new_pw)
-    user.pop("reset_token_hash", None)
-    user.pop("reset_expires", None)
-    _save_users(users)
+    # Validate and rewrite the password under one row lock: an HTTPException from
+    # the mutator rolls the transaction back with no partial write, and a
+    # concurrent users-document write cannot clobber the new password hash.
+    _STATE_STORE.mutate_document("users", dict, _apply_reset)
     return {"ok": True, "token": _create_token(email)}
 
 
@@ -1181,6 +1197,28 @@ class _VaultStore:
 _vault_store = _VaultStore(VAULT_STORE_DB, LEGACY_VAULTS_DIR, metadata_url=CLOUD_METADATA_URL)
 _STATE_STORE = _CloudStateStore(VAULT_STORE_DB, metadata_url=CLOUD_METADATA_URL)
 
+async def _read_body_within_limit(request: Request, limit: int) -> bytes:
+    """Read the request body, aborting once it exceeds `limit` bytes.
+
+    The `_cloud_security_boundary` middleware rejects oversized bodies by
+    Content-Length, but a chunked `Transfer-Encoding` request carries no
+    Content-Length, so `await request.body()` would buffer the whole stream
+    into memory before any size check. Streaming with an early abort caps peak
+    memory at one chunk over the limit and stops an unauthenticated-cheap
+    (5/min registration) client from exhausting memory or growing the vault
+    store on disk.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "Request body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.put("/api/v1/vault")
 async def put_vault(
     request: Request,
@@ -1192,7 +1230,7 @@ async def put_vault(
     if idempotency_key and cache_key in app.state.idempotency_cache:
         return app.state.idempotency_cache[cache_key]
 
-    blob = await request.body()
+    blob = await _read_body_within_limit(request, MAX_REQUEST_BYTES)
     if not blob:
         raise HTTPException(400, "empty body")
     try:
@@ -1274,9 +1312,7 @@ async def account_export(email: str = Depends(_current_user)):
 
 @app.delete("/api/v1/account")
 async def account_delete(email: str = Depends(_current_user)):
-    users = _load_users()
-    users.pop(email, None)
-    _save_users(users)
+    _STATE_STORE.mutate_document("users", dict, lambda users: users.pop(email, None))
     _vault_store.delete(email)
     return {"ok": True}
 
