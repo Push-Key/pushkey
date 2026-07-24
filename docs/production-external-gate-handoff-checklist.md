@@ -13,12 +13,12 @@ The step-by-step execution companion lives in
 ## Repo-Local Actions Completed
 
 - [x] Re-ran `scripts/alpha_capacity_smoke.py --users 16 --iterations 8 --output docs/alpha-capacity-load-results.json --max-p95-ms 1000` and preserved the JSON result.
-- [x] Updated `docs/90_PERCENT_EXECUTION_CHECKLIST.md` to `313/337` and closed the last local Track A load-test slice.
+- [x] Updated `docs/90_PERCENT_EXECUTION_CHECKLIST.md` to `320/327` and closed the last local Track A load-test slice.
 - [x] Updated `docs/90_PERCENT_LOCAL_EXECUTION_QUEUE.md` to point at this handoff checklist.
 - [x] Added this handoff checklist with evidence fields for every external production gate.
 - [x] Linked this checklist from `docs/release-readiness.md` and `docs/ops-readiness.md`.
 - [x] Refreshed the stale progress snapshots in `docs/100_PERCENT_COMPLETION_TASKLIST.md`, `docs/REMAINING_TO_100_PERCENT_TASKLIST.md`, and `docs/alpha-launch-boundary-note.md`.
-- [x] Verified `scripts/roadmap_progress.py --json` still reports `313/337`.
+- [x] Verified `scripts/roadmap_progress.py --json` reports `320/327` for the alpha-launch bucket.
 - [x] Ran `pytest tests/test_readiness_checklists.py tests/test_ops_readiness_docs.py -q`.
 - [x] Confirmed no stale `304/337`, `307/337`, `308/337`, `90.2%`, `91.1%`, or `91.4%` references remain in the repo docs.
 - [x] Verified `git diff --check` is clean apart from existing line-ending warnings in unrelated files.

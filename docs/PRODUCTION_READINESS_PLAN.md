@@ -766,8 +766,8 @@ critical-path items.
 ## Quality
 
 - [x] Unit, integration, contract, E2E, migration, load, and install tests pass.
-  Verified 2026-07-24: `pytest -q` 546 passed / 1 skipped (run twice
-  concurrently, both green); Playwright accessibility and WCAG suites 39 passed
+  Verified 2026-07-24: `pytest -q` 584 passed / 1 skipped; Playwright
+  accessibility and WCAG suites 39 passed
   across Chromium, Firefox, and WebKit; `python -m build` plus
   `python -m twine check` PASSED for both the wheel and the sdist;
   `scripts/package_upgrade_smoke.py` and `scripts/npm_package_smoke.py` both
