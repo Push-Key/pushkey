@@ -47,6 +47,12 @@ dist/
 # committed from there make `python -m build` fail on the staging cleanup.
 /pushkey-[0-9]*/
 
+# Test and tooling scratch output
+web-app/test-results/
+web-app/.next-start.log
+web-app/.static-server.log
+.playwright-mcp/
+
 # Tooling scratch
 .git-rewrite/
 .superpowers/
