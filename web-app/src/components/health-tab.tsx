@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Shield, Key, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,14 +22,17 @@ function scoreColor(score: number): string {
 }
 
 function statusBadge(status: HealthEntry["status"]) {
-  if (status === "critical")
+  if (status === "critical") {
     return <Badge className="bg-red-400/20 text-red-400 border-red-400/30">Critical</Badge>;
+  }
   return <Badge className="bg-orange-400/20 text-orange-400 border-orange-400/30">Warning</Badge>;
 }
 
 function StaleTable({ entries }: { entries: HealthEntry[] }) {
-  if (entries.length === 0)
+  if (entries.length === 0) {
     return <p className="text-sm py-3" style={{ color: "var(--color-muted-foreground)" }}>No stale keys.</p>;
+  }
+
   return (
     <Table>
       <TableHeader>
@@ -58,10 +61,15 @@ function StaleTable({ entries }: { entries: HealthEntry[] }) {
 
 function HealthyTable({ entries }: { entries: HealthEntry[] }) {
   const [open, setOpen] = useState(false);
+  const regionId = useId();
+
   return (
     <div>
       <button
+        type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={regionId}
         className="flex items-center gap-2 text-sm font-medium mb-2"
         style={{ color: "var(--color-muted-foreground)" }}
       >
@@ -69,34 +77,36 @@ function HealthyTable({ entries }: { entries: HealthEntry[] }) {
         Healthy keys ({entries.length})
       </button>
       {open && (
-        entries.length === 0 ? (
-          <p className="text-sm pl-4" style={{ color: "var(--color-muted-foreground)" }}>No healthy keys.</p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow style={{ borderColor: "var(--color-muted-foreground)" }}>
-                <TableHead>Name</TableHead>
-                <TableHead>Provider</TableHead>
-                <TableHead>Env</TableHead>
-                <TableHead>Age (days)</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.map((e) => (
-                <TableRow key={e.name} style={{ borderColor: "var(--color-muted-foreground)" }}>
-                  <TableCell className="font-mono text-sm" style={{ color: "var(--color-foreground)" }}>{e.name}</TableCell>
-                  <TableCell className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>{e.provider || "—"}</TableCell>
-                  <TableCell className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>{e.env || "—"}</TableCell>
-                  <TableCell className="text-sm" style={{ color: "var(--color-foreground)" }}>{e.age_days}</TableCell>
-                  <TableCell>
-                    <Badge className="bg-emerald-400/20 text-emerald-400 border-emerald-400/30">Healthy</Badge>
-                  </TableCell>
+        <div id={regionId} role="region" aria-label={`Healthy keys (${entries.length})`}>
+          {entries.length === 0 ? (
+            <p className="text-sm pl-4" style={{ color: "var(--color-muted-foreground)" }}>No healthy keys.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow style={{ borderColor: "var(--color-muted-foreground)" }}>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Provider</TableHead>
+                  <TableHead>Env</TableHead>
+                  <TableHead>Age (days)</TableHead>
+                  <TableHead>Status</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )
+              </TableHeader>
+              <TableBody>
+                {entries.map((e) => (
+                  <TableRow key={e.name} style={{ borderColor: "var(--color-muted-foreground)" }}>
+                    <TableCell className="font-mono text-sm" style={{ color: "var(--color-foreground)" }}>{e.name}</TableCell>
+                    <TableCell className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>{e.provider || "—"}</TableCell>
+                    <TableCell className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>{e.env || "—"}</TableCell>
+                    <TableCell className="text-sm" style={{ color: "var(--color-foreground)" }}>{e.age_days}</TableCell>
+                    <TableCell>
+                      <Badge className="bg-emerald-400/20 text-emerald-400 border-emerald-400/30">Healthy</Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
       )}
     </div>
   );
@@ -129,6 +139,7 @@ export function HealthTab() {
   const [error, setError] = useState<string | null>(null);
   const [threshold, setThreshold] = useState(90);
   const [pendingThreshold, setPendingThreshold] = useState(90);
+  const thresholdId = useId();
 
   const fetch = useCallback(async (days: number) => {
     setLoading(true);
@@ -143,7 +154,9 @@ export function HealthTab() {
     }
   }, []);
 
-  useEffect(() => { fetch(threshold); }, [fetch, threshold]);
+  useEffect(() => {
+    fetch(threshold);
+  }, [fetch, threshold]);
 
   const applyThreshold = () => {
     if (pendingThreshold !== threshold) setThreshold(pendingThreshold);
@@ -154,10 +167,11 @@ export function HealthTab() {
     <div className="space-y-6 p-4">
       {/* Threshold control */}
       <div className="flex items-center gap-3">
-        <label className="text-sm font-medium" style={{ color: "var(--color-muted-foreground)" }}>
+        <label htmlFor={thresholdId} className="text-sm font-medium" style={{ color: "var(--color-muted-foreground)" }}>
           Staleness threshold:
         </label>
         <input
+          id={thresholdId}
           type="number"
           min={1}
           max={730}
@@ -175,11 +189,11 @@ export function HealthTab() {
       </div>
 
       {loading && (
-        <p className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>Loading health data…</p>
+        <p role="status" aria-live="polite" className="text-sm" style={{ color: "var(--color-muted-foreground)" }}>Loading health data...</p>
       )}
 
       {error && (
-        <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4">
+        <div role="alert" aria-live="assertive" className="rounded-lg border border-red-400/30 bg-red-400/10 p-4">
           <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
