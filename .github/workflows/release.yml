@@ -261,8 +261,13 @@ jobs:
             requirements-api.txt
             requirements-dev.txt
 
-      - name: Install tooling
-        run: python -m pip install --upgrade pip build cyclonedx-bom
+      - name: Install tooling and test dependencies
+        # The release gate re-runs the suite before publishing, so it needs the
+        # runtime and test requirements, not just the build tooling -- without
+        # them `python -m pytest` fails with "No module named pytest".
+        run: |
+          python -m pip install --upgrade pip build cyclonedx-bom
+          python -m pip install -r requirements.txt -r requirements-api.txt -r requirements-dev.txt
 
       - name: Run release tests
         run: python -m pytest -q
