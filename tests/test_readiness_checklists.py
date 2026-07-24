@@ -158,12 +158,12 @@ def test_external_gate_handoff_checklist_records_repo_local_completion_and_exter
 
     for completed in (
         "Re-ran `scripts/alpha_capacity_smoke.py --users 16 --iterations 8 --output docs/alpha-capacity-load-results.json --max-p95-ms 1000` and preserved the JSON result.",
-        "Updated `docs/90_PERCENT_EXECUTION_CHECKLIST.md` to `320/327` and closed the last local Track A load-test slice.",
+        "Updated `docs/90_PERCENT_EXECUTION_CHECKLIST.md` to `323/323` and closed the last local Track A load-test slice.",
         "Updated `docs/90_PERCENT_LOCAL_EXECUTION_QUEUE.md` to point at this handoff checklist.",
         "Added this handoff checklist with evidence fields for every external production gate.",
         "Linked this checklist from `docs/release-readiness.md` and `docs/ops-readiness.md`.",
         "Refreshed the stale progress snapshots in `docs/100_PERCENT_COMPLETION_TASKLIST.md`, `docs/REMAINING_TO_100_PERCENT_TASKLIST.md`, and `docs/alpha-launch-boundary-note.md`.",
-        "Verified `scripts/roadmap_progress.py --json` reports `320/327` for the alpha-launch bucket.",
+        "Verified `scripts/roadmap_progress.py --json` reports `323/323` for the alpha-launch bucket.",
     ):
         assert f"- [x] {completed}" in text
 

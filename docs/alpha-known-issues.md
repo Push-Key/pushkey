@@ -11,6 +11,17 @@ Scope reminder: cloud sync is opt-in and experimental for alpha; the product
 is local-first. Most items below live in the cloud or multi-writer paths that
 a single-machine tester never exercises.
 
+## Deferred — cloud backend not deployed for alpha
+
+The production cloud API (`pushkey_cloud_api.py`) is not deployed for the
+local-first alpha: the documented Fly URL and the code-default host do not
+resolve, and the managed Supabase project is on the Free plan (no managed
+backups). Consequently the two cloud-ops roadmap items — managed database
+backups and an external uptime check — are deferred to the public-beta gate;
+there is no live service to back up or monitor yet. They return when the cloud
+backend goes live. This does not affect testers: the alpha is the local CLI and
+web app, and cloud sync is opt-in.
+
 ## Deferred — cloud admin/support paths (same class as a fixed finding)
 
 - **Admin sessions and support tickets still use last-write-wins document
