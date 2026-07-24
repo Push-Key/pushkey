@@ -55,10 +55,30 @@ def _fake_api(responses: dict[str, dict]):
     return fetch
 
 
-def _check_runs(*names: str, conclusion: str = "success") -> dict:
+def _job(context: str) -> str:
+    """The bare job name GitHub actually puts on a check-run for a context."""
+
+    return context.split(" / ", 1)[1]
+
+
+def _check_runs(*names: str, conclusion: str = "success", app: str = "GitHub Actions") -> dict:
+    """Check-runs in the shape GitHub really returns: bare job name, app name.
+
+    GitHub's check-runs API reports a workflow job as `name="Python tests"`,
+    `app.name="GitHub Actions"` -- never the branch-protection spelling
+    "CI / Python tests". Feeding the prefixed form (the old fixture bug) let the
+    matcher pass trivially and hid that it could never match real data.
+    """
+
     return {
         "check_runs": [
-            {"name": name, "status": "completed", "conclusion": conclusion} for name in names
+            {
+                "name": name,
+                "status": "completed",
+                "conclusion": conclusion,
+                "app": {"name": app},
+            }
+            for name in names
         ]
     }
 
@@ -66,7 +86,7 @@ def _check_runs(*names: str, conclusion: str = "success") -> dict:
 def _all_green(compare_status: str = "behind") -> dict:
     return {
         "repos/o/r/compare/": {"status": compare_status, "ahead_by": 0, "behind_by": 3},
-        "repos/o/r/commits/abc/check-runs": _check_runs(*REQUIRED_CONTEXTS),
+        "repos/o/r/commits/abc/check-runs": _check_runs(*(_job(c) for c in REQUIRED_CONTEXTS)),
         "repos/o/r/commits/abc/status": {"statuses": []},
     }
 
@@ -149,7 +169,7 @@ def test_all_required_checks_green_passes():
 
 def test_missing_required_check_fails_and_names_it():
     responses = _all_green()
-    responses["repos/o/r/commits/abc/check-runs"] = _check_runs("CI / Python tests")
+    responses["repos/o/r/commits/abc/check-runs"] = _check_runs("Python tests")
 
     result = provenance.check_required_checks("o/r", "abc", REQUIRED_CONTEXTS, _fake_api(responses))
 
@@ -168,7 +188,7 @@ def test_failed_required_check_is_not_treated_as_success():
 
 def test_commit_statuses_can_satisfy_required_contexts():
     responses = _all_green()
-    responses["repos/o/r/commits/abc/check-runs"] = _check_runs("CI / Python tests")
+    responses["repos/o/r/commits/abc/check-runs"] = _check_runs("Python tests")
     responses["repos/o/r/commits/abc/status"] = {
         "statuses": [{"context": "CI / Web build", "state": "success"}]
     }
@@ -178,23 +198,42 @@ def test_commit_statuses_can_satisfy_required_contexts():
     assert result["status"] == "pass"
 
 
-def test_bare_job_name_is_qualified_with_the_workflow_app_name():
+def test_real_github_check_run_shape_satisfies_prefixed_contexts():
+    """Regression: bare job name + app "GitHub Actions" must match "CI / <job>".
+
+    This is exactly what `GET /commits/{sha}/check-runs` returns in production.
+    The previous matcher assumed `app.name` was the workflow name ("CI"), so it
+    reconstructed "GitHub Actions / Python tests" and never matched
+    "CI / Python tests" -- the gate would have failed every legitimate tag.
+    """
+
     responses = _all_green()
     responses["repos/o/r/commits/abc/check-runs"] = {
         "check_runs": [
             {
-                "name": name.split(" / ", 1)[1],
+                "name": _job(context),  # "Python tests", not "CI / Python tests"
                 "status": "completed",
                 "conclusion": "success",
-                "app": {"name": "CI"},
+                "app": {"name": "GitHub Actions"},
             }
-            for name in REQUIRED_CONTEXTS
+            for context in REQUIRED_CONTEXTS
         ]
     }
 
     result = provenance.check_required_checks("o/r", "abc", REQUIRED_CONTEXTS, _fake_api(responses))
 
-    assert result["status"] == "pass"
+    assert result["status"] == "pass", result["detail"]
+
+
+def test_job_name_match_requires_a_successful_conclusion():
+    responses = _all_green()
+    responses["repos/o/r/commits/abc/check-runs"] = _check_runs(
+        *(_job(c) for c in REQUIRED_CONTEXTS), conclusion="failure"
+    )
+
+    result = provenance.check_required_checks("o/r", "abc", REQUIRED_CONTEXTS, _fake_api(responses))
+
+    assert result["status"] == "fail"
 
 
 # --- verdict ----------------------------------------------------------------

@@ -172,10 +172,37 @@ def check_containment(repo: str, branch: str, sha: str, fetch: ApiFetch) -> dict
     )
 
 
-def _collect_successful_contexts(repo: str, sha: str, fetch: ApiFetch) -> tuple[set[str], list[dict], list[str]]:
-    """Return successful context names on `sha`, evidence, and any fetch errors."""
+def _job_name(context: str) -> str | None:
+    """Return the job-name half of a "<workflow> / <job>" required context.
 
-    successful: set[str] = set()
+    GitHub reports a branch-protection required check for a workflow job as
+    "<workflow name> / <job name>" (e.g. "CI / Python tests"), but the
+    check-runs API exposes only the bare job name ("Python tests") -- the
+    workflow name is nowhere on the check-run object, and `app.name` is the
+    GitHub App ("GitHub Actions"), not the workflow. Splitting the context lets
+    a bare job name satisfy its prefixed context. Returns None when the context
+    has no " / " separator (a plain commit-status context, matched exactly).
+    """
+
+    workflow, sep, job = context.rpartition(" / ")
+    return job if sep and workflow else None
+
+
+def _collect_successful_contexts(
+    repo: str, sha: str, fetch: ApiFetch
+) -> tuple[set[str], set[str], list[dict], list[str]]:
+    """Return successful contexts, successful bare job names, evidence, errors.
+
+    `contexts` holds exact strings a required context may match directly:
+    commit-status contexts and raw check-run names. `job_names` holds the bare
+    check-run job names, which `check_required_checks` matches against the
+    job-name half of each "<workflow> / <job>" required context -- mirroring how
+    `main`'s branch protection (whose checks carry `app_id: null`) matches a
+    context regardless of which app produced it.
+    """
+
+    contexts: set[str] = set()
+    job_names: set[str] = set()
     evidence: list[dict] = []
     errors: list[str] = []
 
@@ -185,15 +212,10 @@ def _collect_successful_contexts(repo: str, sha: str, fetch: ApiFetch) -> tuple[
         for run in runs["json"].get("check_runs") or []:
             if run.get("status") == "completed" and run.get("conclusion") in SUCCESS_CONCLUSIONS:
                 name = run.get("name")
-                app = ((run.get("app") or {}).get("name")) or ""
                 if not name:
                     continue
-                successful.add(name)
-                # GitHub reports required contexts for workflow jobs as
-                # "<workflow name> / <job name>"; check-runs expose only the job
-                # name, so register both spellings.
-                if app and "/" not in name:
-                    successful.add(f"{app} / {name}")
+                contexts.add(name)
+                job_names.add(name)
     else:
         errors.append(
             f"could not read check-runs for {sha} (exit {runs['exit_code']}): "
@@ -205,28 +227,39 @@ def _collect_successful_contexts(repo: str, sha: str, fetch: ApiFetch) -> tuple[
     if statuses["ok"] and isinstance(statuses["json"], dict):
         for status in statuses["json"].get("statuses") or []:
             if status.get("state") in SUCCESS_STATES and status.get("context"):
-                successful.add(status["context"])
+                contexts.add(status["context"])
     else:
         errors.append(
             f"could not read commit statuses for {sha} (exit {statuses['exit_code']}): "
             f"{statuses['stderr'] or 'no response body'}"
         )
 
-    return successful, evidence, errors
+    return contexts, job_names, evidence, errors
 
 
 def check_required_checks(repo: str, sha: str, contexts: list[str], fetch: ApiFetch) -> dict:
     """Check that every required context concluded successfully on `sha`."""
 
-    successful, evidence, errors = _collect_successful_contexts(repo, sha, fetch)
-    missing = [context for context in contexts if context not in successful]
+    successful, job_names, evidence, errors = _collect_successful_contexts(repo, sha, fetch)
+
+    def satisfied(context: str) -> bool:
+        if context in successful:
+            return True
+        job = _job_name(context)
+        return job is not None and job in job_names
+
+    missing = [context for context in contexts if not satisfied(context)]
 
     if errors and missing:
         return _check(
             "required_checks_passed_on_commit",
             "error",
             "; ".join(errors),
-            {"evidence": evidence, "successful_contexts": sorted(successful)},
+            {
+                "evidence": evidence,
+                "successful_contexts": sorted(successful),
+                "successful_job_names": sorted(job_names),
+            },
         )
     if missing:
         return _check(
@@ -236,7 +269,11 @@ def check_required_checks(repo: str, sha: str, contexts: list[str], fetch: ApiFe
                 f"required check contexts without a successful conclusion on {sha}: "
                 f"{missing!r}. Observed successful contexts: {sorted(successful)!r}"
             ),
-            {"evidence": evidence, "successful_contexts": sorted(successful)},
+            {
+                "evidence": evidence,
+                "successful_contexts": sorted(successful),
+                "successful_job_names": sorted(job_names),
+            },
         )
     return _check(
         "required_checks_passed_on_commit",
