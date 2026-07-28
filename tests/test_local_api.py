@@ -12,7 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pushkey_crypto import encrypt_data_v3
+import pushkey_agent_tokens as _at
 import pushkey_shared as _s
+from pushkey_vault import load_vault as _load_vault
 
 
 @pytest.fixture
@@ -1038,3 +1040,251 @@ def test_cloud_status(client, auth):
     body = r.json()
     assert "tier" in body
     assert "cloud_sync_available" in body
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Agent-token authentication (/api/unlock with a pk_agent_... credential)
+# ════════════════════════════════════════════════════════════════════════
+#
+# The local API could always mint and revoke agent tokens (POST/DELETE
+# /api/agents), but /api/unlock only ever accepted a master password or
+# recovery code -- there was no way to actually authenticate WITH a token.
+# These tests cover that missing path: unlocking with a token, the resulting
+# session's scopes, and require_scope gating every read/write/inject endpoint
+# the same way pushkey_mcp.py's _require_scope gates MCP tools.
+
+@pytest.fixture
+def licensed_tier(monkeypatch):
+    # "team" (5-token limit) rather than "pro" (1) so a test can mint more
+    # than one token without tripping the tier limit that
+    # test_create_agent_token_requires_pro already covers directly.
+    import pushkey_tiers
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "team")
+
+
+def _mint_local_token(password: str, scopes: list, name: str = "agent") -> str:
+    vault, vault_key = _load_vault(password)
+    ok, token_value, _token_id = _at.create_token(name, scopes, vault_key)
+    assert ok, token_value
+    return token_value
+
+
+@pytest.fixture
+def token_seed(licensed_tier):
+    """Seed a V3 vault and return (password, recovery) for minting tokens."""
+    password, recovery = "master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD"
+    _seed_vault(password, recovery, {
+        "OPENAI_API_KEY": {"value": "sk-original", "env": "prod", "provider": "OpenAI",
+                           "rotated": "2026-01-01", "created": "2026-01-01", "projects": []},
+    })
+    return password, recovery
+
+
+def test_unlock_with_agent_token_succeeds(client, auth, token_seed):
+    password, _ = token_seed
+    token = _mint_local_token(password, ["read"])
+
+    r = client.post("/api/unlock", headers=auth, json={"password": token})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["locked"] is False
+    assert body["auth_method"] == "agent_token"
+    assert body["scopes"] == ["read"]
+    assert body["can_write"] is False  # can_write stays password-only by design
+
+
+def test_unlock_with_agent_token_exposes_the_vault(client, auth, token_seed):
+    password, _ = token_seed
+    token = _mint_local_token(password, ["read"])
+    client.post("/api/unlock", headers=auth, json={"password": token})
+
+    r = client.get("/api/keys", headers=auth)
+
+    assert r.status_code == 200
+    assert any(k["name"] == "OPENAI_API_KEY" for k in r.json()["keys"])
+
+
+def test_unlock_with_garbage_agent_token_rejected(client, auth, token_seed):
+    token_seed  # seed a vault so the failure is auth, not "no vault"
+    r = client.post("/api/unlock", headers=auth, json={"password": "pk_agent_" + "0" * 48})
+    assert r.status_code == 401
+
+
+def test_unlock_with_revoked_agent_token_rejected(client, auth, token_seed):
+    password, _ = token_seed
+    vault, vault_key = _load_vault(password)
+    ok, token, token_id = _at.create_token("temp", ["read"], vault_key)
+    assert ok
+    assert _at.revoke_token(token_id)
+
+    r = client.post("/api/unlock", headers=auth, json={"password": token})
+    assert r.status_code == 401
+
+
+def test_unlock_with_stale_agent_token_after_rekey_rejected(client, auth, token_seed):
+    """A token wraps the vault key at mint time; rekeying (new password, new
+    key material) must not leave the old token able to decrypt the vault."""
+    password, _ = token_seed
+    token = _mint_local_token(password, ["read"])
+    loaded_vault, _ = _load_vault(password)
+    from pushkey_vault import save_vault as _sv
+    from pushkey_crypto import generate_recovery_code
+    _sv(loaded_vault, "brand-new-password", recovery_code=generate_recovery_code())
+
+    r = client.post("/api/unlock", headers=auth, json={"password": token})
+    assert r.status_code == 422
+
+
+@pytest.fixture
+def token_unlocked(client, auth, token_seed):
+    """Return a scopes_setter(scopes) that unlocks a fresh agent-token
+    session with exactly those scopes and returns the shared client."""
+    password, _ = token_seed
+
+    def _unlock_with_scopes(scopes):
+        token = _mint_local_token(password, scopes)
+        r = client.post("/api/unlock", headers=auth, json={"password": token})
+        assert r.status_code == 200
+        return client
+
+    return _unlock_with_scopes
+
+
+# ── read scope ────────────────────────────────────────────────────────────
+
+def test_read_scope_allows_list_and_reveal(token_unlocked, auth):
+    c = token_unlocked(["read"])
+    assert c.get("/api/keys", headers=auth).status_code == 200
+    assert c.get("/api/keys/OPENAI_API_KEY", headers=auth).status_code == 200
+    assert c.get("/api/projects", headers=auth).status_code == 200
+    assert c.get("/api/health", headers=auth).status_code == 200
+
+
+def test_missing_read_scope_denies_list(token_unlocked, auth):
+    c = token_unlocked(["write"])
+    r = c.get("/api/keys", headers=auth)
+    assert r.status_code == 403
+    assert "read" in r.json()["detail"]
+
+
+def test_missing_read_scope_denies_reveal(token_unlocked, auth):
+    c = token_unlocked(["inject"])
+    r = c.get("/api/keys/OPENAI_API_KEY", headers=auth)
+    assert r.status_code == 403
+
+
+# ── write scope ───────────────────────────────────────────────────────────
+
+def test_write_scope_allows_create_and_rotate(token_unlocked, auth):
+    c = token_unlocked(["write"])
+    created = c.post("/api/keys", headers=auth,
+                     json={"name": "AGENT_KEY", "value": "sk-agent", "env": "dev"})
+    assert created.status_code == 201
+    rotated = c.post("/api/keys/AGENT_KEY/rotate", headers=auth, json={"new_value": "sk-rotated"})
+    assert rotated.status_code == 200
+
+
+def test_missing_write_scope_denies_create(token_unlocked, auth):
+    c = token_unlocked(["read"])
+    r = c.post("/api/keys", headers=auth,
+              json={"name": "SHOULD_FAIL", "value": "sk-nope", "env": "dev"})
+    assert r.status_code == 403
+    assert "write" in r.json()["detail"]
+
+
+def test_missing_write_scope_denies_delete(token_unlocked, auth):
+    c = token_unlocked(["read"])
+    r = c.delete("/api/keys/OPENAI_API_KEY", headers=auth)
+    assert r.status_code == 403
+
+
+def test_write_scope_allows_project_assign(token_unlocked, auth, tmp_path):
+    c = token_unlocked(["write"])
+    p = str(tmp_path / "agent-project")
+    (tmp_path / "agent-project").mkdir()
+    assert c.post("/api/projects", headers=auth, json={"path": p}).status_code == 201
+    r = c.post("/api/projects/assign", headers=auth, params={"path": p},
+              json={"keys": ["OPENAI_API_KEY"]})
+    assert r.status_code == 200
+
+
+# ── inject scope (separate from write) ─────────────────────────────────────
+
+def test_inject_scope_allows_inject(token_unlocked, auth, tmp_path):
+    proj = tmp_path / "inject-project"
+    proj.mkdir()
+    c1 = token_unlocked(["write"])
+    assert c1.post("/api/projects", headers=auth, json={"path": str(proj)}).status_code == 201
+    assert c1.post("/api/projects/assign", headers=auth, params={"path": str(proj)},
+                   json={"keys": ["OPENAI_API_KEY"]}).status_code == 200
+
+    c2 = token_unlocked(["inject"])
+    r = c2.post("/api/projects/inject", headers=auth, params={"path": str(proj)}, json={})
+    assert r.status_code == 200
+    assert "OPENAI_API_KEY" in r.json()["injected"]
+
+
+def test_write_scope_alone_cannot_inject(token_unlocked, auth, tmp_path):
+    """write and inject are deliberately separate scopes: a token minted to
+    rotate keys should not also be able to write .env files to projects."""
+    proj = tmp_path / "no-inject"
+    proj.mkdir()
+    c1 = token_unlocked(["write"])
+    assert c1.post("/api/projects", headers=auth, json={"path": str(proj)}).status_code == 201
+
+    c2 = token_unlocked(["write"])
+    r = c2.post("/api/projects/inject", headers=auth, params={"path": str(proj)}, json={})
+    assert r.status_code == 403
+    assert "inject" in r.json()["detail"]
+
+
+def test_inject_scope_alone_cannot_create_keys(token_unlocked, auth):
+    c = token_unlocked(["inject"])
+    r = c.post("/api/keys", headers=auth,
+              json={"name": "SHOULD_FAIL", "value": "sk-nope", "env": "dev"})
+    assert r.status_code == 403
+
+
+# ── token sessions cannot mint or revoke other tokens ───────────────────────
+
+def test_agent_token_session_cannot_create_new_tokens(token_unlocked, auth):
+    """Matches pushkey_mcp.py's create_agent_token, which explicitly refuses
+    to run from a token session: minting more tokens requires disclosing the
+    raw vault key, which only a master-password session should authorize."""
+    c = token_unlocked(["write"])
+    r = c.post("/api/agents", headers=auth, json={"name": "escalate", "scopes": ["write"]})
+    assert r.status_code == 403
+
+
+def test_agent_token_session_cannot_revoke_tokens(token_unlocked, auth, token_seed):
+    password, _ = token_seed
+    _mint_local_token(password, ["read"], name="victim")
+    tokens = _at.list_tokens()
+    victim_id = next(t["id"] for t in tokens if t["name"] == "victim")
+
+    c = token_unlocked(["write"])
+    r = c.delete(f"/api/agents/{victim_id}", headers=auth)
+    assert r.status_code == 403
+
+
+# ── password/recovery sessions are unaffected by the scope machinery ────────
+
+def test_password_session_unaffected_by_scope_gating(unlocked, auth):
+    """require_scope must not narrow password-session behavior at all."""
+    assert unlocked.get("/api/keys", headers=auth).status_code == 200
+    created = unlocked.post("/api/keys", headers=auth,
+                            json={"name": "PW_KEY", "value": "sk-pw", "env": "dev"})
+    assert created.status_code == 201
+
+
+def test_recovery_session_can_still_read_but_not_write(client, auth, token_seed):
+    password, recovery = token_seed
+    r = client.post("/api/unlock", headers=auth, json={"recovery_code": recovery})
+    assert r.status_code == 200
+    assert r.json()["auth_method"] == "recovery"
+
+    assert client.get("/api/keys", headers=auth).status_code == 200
+    write = client.post("/api/keys", headers=auth,
+                        json={"name": "REC_KEY", "value": "sk-rec", "env": "dev"})
+    assert write.status_code == 403
