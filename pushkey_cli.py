@@ -24,7 +24,7 @@ from pushkey_crypto import generate_recovery_code, log_event
 from pushkey_env import format_env_value as _format_env_value
 from pushkey_env import mutate_env_file
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
-from pushkey_vault import load_vault, save_vault
+from pushkey_vault import load_vault, load_vault_with_key, save_vault, save_vault_with_key
 
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
@@ -64,14 +64,92 @@ def _get_password(args):
         sys.exit(1)
 
 
+def _get_agent_token(args):
+    return getattr(args, "token", None) or os.environ.get("PUSHKEY_AGENT_TOKEN")
+
+
+def _open_vault_with_token(token_value):
+    """Unlock via a scoped agent token instead of the master password.
+
+    Mirrors pushkey_mcp.py's _unlock_with_token: the vault key is unwrapped
+    from the token (never the master password), so writes go through
+    save_vault_with_key rather than save_vault -- see _save_vault_for_session.
+    Returns (vault, password, vault_key, scopes) with password=None, the
+    session-less signal that this credential cannot re-derive the password slot.
+    """
+    import pushkey_agent_tokens as _at
+    vault_key, scopes, err = _at.authenticate_token(token_value)
+    if vault_key is None:
+        print(f"Error: {err or 'invalid or expired agent token'}", file=sys.stderr)
+        sys.exit(EXIT_AUTH)
+    vault, vk = load_vault_with_key(vault_key)
+    if vault is None:
+        print(
+            "Error: agent token could not decrypt vault (stale after a master password change?)",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_AUTH)
+    return vault, None, vk, scopes
+
+
 def _open_vault(args):
+    token = _get_agent_token(args)
+    if token:
+        return _open_vault_with_token(token)
     password = _get_password(args)
+    if password.startswith("pk_agent_"):
+        return _open_vault_with_token(password)
     _s.ensure_vault_dir()
     vault, vault_key = load_vault(password)
     if vault is None:
         print("Error: wrong master password", file=sys.stderr)
         sys.exit(EXIT_AUTH)
-    return vault, password, vault_key
+    return vault, password, vault_key, None
+
+
+def _save_vault_for_session(vault, password, vault_key):
+    """Persist vault changes for either auth path.
+
+    Agent-token sessions never hold the master password (password is None),
+    so they write through the raw-key path -- save_vault would otherwise
+    require re-deriving the password slot with a password we were never given.
+    """
+    if password is not None:
+        save_vault(vault, password, vault_key=vault_key)
+    else:
+        save_vault_with_key(vault, vault_key)
+
+
+_COMMAND_SCOPES = {
+    "add": "write",
+    "get": "read",
+    "list": "read",
+    "rotate": "write",
+    "set-backup": "write",
+    "delete": "write",
+    "status": "read",
+    "inject": "inject",
+    "import": "write",
+}
+
+
+def _require_command_scope(command, scopes):
+    """Exit with EXIT_AUTH if an agent token lacks the scope a command needs.
+
+    scopes is None for master-password sessions (full access, unchanged
+    behavior); a list for agent-token sessions, checked against
+    _COMMAND_SCOPES the same way pushkey_mcp.py's _require_scope gates tools.
+    """
+    if scopes is None:
+        return
+    required = _COMMAND_SCOPES.get(command)
+    if required and required not in scopes:
+        have = ", ".join(scopes) or "none"
+        print(
+            f"Error: agent token missing required scope '{required}' for '{command}' (token has: {have})",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_AUTH)
 
 
 _ENV_LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
@@ -96,7 +174,7 @@ def cmd_add(args, vault, password, vault_key=None):
         "notes": args.notes or "",
         "rotation_count": 0,
     }
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: added {name}")
     suffix = f" [{provider}]" if provider else ""
     print(f"Added {name}{suffix}")
@@ -173,7 +251,7 @@ def cmd_rotate(args, vault, password, vault_key=None):
     info["value"] = new_val
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: rotated {name}")
     print(f"Rotated {name}")
 
@@ -196,7 +274,7 @@ def cmd_set_backup(args, vault, password, vault_key=None):
     info["next_value"] = backup_value
     info["next_added"] = datetime.now().isoformat()
     info["dual_rotation"] = True
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: set backup for {name}")
     print(f"Backup staged for {name}")
 
@@ -216,7 +294,7 @@ def cmd_delete(args, vault, password, vault_key=None):
             print("Cancelled.")
             return
     del vault[name]
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: deleted {name}")
     print(f"Deleted {name}")
 
@@ -295,7 +373,7 @@ def cmd_import(args, vault, password, vault_key=None):
         added += 1
 
     if added:
-        save_vault(vault, password, vault_key=vault_key)
+        _save_vault_for_session(vault, password, vault_key)
         log_event(f"cli: imported {added} keys from {path.name}")
     print(f"Imported {added} key(s), skipped {skipped} existing")
 
@@ -338,6 +416,11 @@ def main():
         description="Pushkey - encrypted API key manager",
     )
     parser.add_argument("--password", "-p", help="Master password (or set PUSHKEY_MASTER)")
+    parser.add_argument(
+        "--token",
+        help="Scoped agent token, pk_agent_... (or set PUSHKEY_AGENT_TOKEN). "
+             "Grants only the read/write/inject scopes the token was created with.",
+    )
     sub = parser.add_subparsers(dest="command", required=False)
 
     p_add = sub.add_parser("add", help="Add a new key")
@@ -397,7 +480,8 @@ def main():
     if args.command == "completion":
         return cmd_completion(args)
 
-    vault, password, vault_key = _open_vault(args)
+    vault, password, vault_key, scopes = _open_vault(args)
+    _require_command_scope(args.command, scopes)
 
     {
         "add":    cmd_add,
@@ -816,7 +900,7 @@ def _repl_add(vault, password, vault_key=None):
         "provider": provider, "env": "all", "projects": [],
         "notes": notes, "rotation_count": 0,
     }
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: added {name}")
     print(f"  {C_GREEN}✓ Added {name}{C_RESET}")
 
@@ -841,7 +925,7 @@ def _repl_rotate(vault, password, name, vault_key=None):
     info["value"] = new_val.strip()
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: rotated {name}")
     age_str = f"{int(old_age)}d" if old_age != float("inf") else "?"
     print(f"  {C_GREEN}✓ Rotated. Was {age_str} old.{C_RESET}")
@@ -860,7 +944,7 @@ def _repl_delete(vault, password, name, vault_key=None):
         print("  Cancelled.")
         return
     del vault[name]
-    save_vault(vault, password, vault_key=vault_key)
+    _save_vault_for_session(vault, password, vault_key)
     log_event(f"cli: deleted {name}")
     print(f"  {C_GREEN}✓ Deleted {name}{C_RESET}")
 
