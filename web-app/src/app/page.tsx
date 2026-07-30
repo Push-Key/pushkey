@@ -96,12 +96,17 @@ export default function Page() {
 
     return (
       <main id="main-content" aria-label="Vault workspace" className="flex h-screen items-center justify-center p-4">
-        <div className="max-w-md rounded-lg border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-6 text-sm">
+        <div className="max-w-xl rounded-lg border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-6 text-sm">
           <div className="font-semibold text-[var(--color-destructive)]">Cannot reach Pushkey local API</div>
           <p className="mt-2 text-[var(--color-muted-foreground)]">{error}</p>
-          <p className="mt-4 text-xs text-[var(--color-muted-foreground)]">
-            Make sure you opened this app via <code className="text-[var(--color-foreground)]">pushkey app</code> from the CLI - opening this URL directly bypasses the launch token.
-          </p>
+          <div className="mt-4 rounded-md border border-[var(--color-border)] bg-[var(--color-card)] p-4">
+            <div className="font-medium text-[var(--color-foreground)]">How to reopen it</div>
+            <ol className="mt-2 list-decimal space-y-2 pl-5 text-[var(--color-muted-foreground)]">
+              <li>Run <code className="text-[var(--color-foreground)]">pushkey app</code> from the CLI to open a fresh local session.</li>
+              <li>Do not open the bare local URL manually — the browser needs the one-time launch token added by Pushkey.</li>
+              <li>If the browser tab is stale, close it and run <code className="text-[var(--color-foreground)]">pushkey app</code> again.</li>
+            </ol>
+          </div>
         </div>
       </main>
     );

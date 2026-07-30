@@ -17,7 +17,7 @@ Usage:
 """
 
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, simpledialog
 import customtkinter as ctk
 import json
 import os
@@ -88,7 +88,7 @@ from pushkey_crypto import (
     generate_recovery_code,
     _aes_encrypt, _aes_decrypt, _legacy_fernet_decrypt,
     encrypt_data, decrypt_data, team_encrypt, team_decrypt,
-    encrypt_data_v3, decrypt_data_v3, rekey_vault, add_recovery_key,
+    encrypt_data_v3, decrypt_data_v3, rekey_vault,
     _migrate_vault, _serialize_vault, _deserialize_vault,
     _LOG_KEY_CACHE, _log_key, _log_encrypt, _log_decrypt_all,
     _log_line_age_days, _migrate_plaintext_log, log_event,
@@ -105,7 +105,7 @@ from pushkey_tiers import (
     maybe_heartbeat, deactivate_device,
     load_license, save_license,
     current_tier, tier_limits, can_do, within_limit,
-    activate_license, generate_license_key,
+    activate_license,
 )
 from pushkey_providers import (
     _BUNDLED_PROVIDERS, _load_providers, update_providers_from_web,
@@ -114,6 +114,30 @@ from pushkey_providers import (
 
 
 
+
+def _start_fresh_local_vault(vault_dir: Path | None = None, now: datetime | None = None) -> Path:
+    vault_dir = Path(vault_dir or VAULT_DIR)
+    if not vault_dir.exists():
+        raise FileNotFoundError(2, "No such file or directory", str(vault_dir))
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    backup_dir = vault_dir.parent / f"{vault_dir.name}-backup-{stamp}"
+    suffix = 2
+    while backup_dir.exists():
+        backup_dir = vault_dir.parent / f"{vault_dir.name}-backup-{stamp}-{suffix}"
+        suffix += 1
+    os.replace(str(vault_dir), str(backup_dir))
+    return backup_dir
+
+
+def _login_card_layout(window_width: int) -> dict[str, int]:
+    window_width = max(0, int(window_width or 0))
+    card_padx = min(240, max(24, (window_width - 752) // 2))
+    compact = window_width <= 900
+    return {
+        "card_padx": card_padx,
+        "form_padx": 20 if compact else 36,
+        "note_wraplength": 240 if compact else 320,
+    }
 
 
 def write_health_sidecar(vault):
@@ -1424,11 +1448,12 @@ def days_until_rotation(key_info):
 # ═══════════════════════════════════════════════
 
 class LoginFrame(ctk.CTkFrame):
-    def __init__(self, master, on_login):
+    def __init__(self, master, on_login, on_start_fresh=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
         import threading
         threading.Thread(target=_try_load_argon2, daemon=True).start()
         self.on_login = on_login
+        self.on_start_fresh = on_start_fresh
         self.is_new = not VAULT_FILE.exists()
         self._reveal_state = False
 
@@ -1541,12 +1566,13 @@ class LoginFrame(ctk.CTkFrame):
             ctk.CTkLabel(note_inner, text="",
                          image=icon("shield", 12, C["amber"]),
                          width=16).pack(side="left")
-            ctk.CTkLabel(
+            self._new_vault_note_label = ctk.CTkLabel(
                 note_inner,
                 text="This password cannot be recovered. Store it safely.",
                 font=FONT_XS, text_color=C["amber"], anchor="w", justify="left",
                 wraplength=320,
-            ).pack(side="left", padx=(4, 0))
+            )
+            self._new_vault_note_label.pack(side="left", padx=(4, 0))
         else:
             link_row = ctk.CTkFrame(form, fg_color="transparent")
             link_row.pack(pady=(10, 0))
@@ -1567,7 +1593,27 @@ class LoginFrame(ctk.CTkFrame):
         # Bottom spacer (mirrors top spacer for vertical centering)
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
+        self._card = card
+        self._form = form
+        self._last_layout = None
+        self.bind("<Configure>", self._on_resize, add="+")
+        self.after(0, self._apply_responsive_layout)
+
     # ── helpers ──────────────────────────────────────────────
+
+    def _on_resize(self, _event=None):
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self):
+        layout = _login_card_layout(self.winfo_width())
+        if layout == self._last_layout:
+            return
+        self._card.pack_configure(padx=layout["card_padx"])
+        self._form.pack_configure(padx=layout["form_padx"])
+        note_label = getattr(self, "_new_vault_note_label", None)
+        if note_label is not None:
+            note_label.configure(wraplength=layout["note_wraplength"])
+        self._last_layout = layout
 
     def _pw_label_row(self, parent, text):
         """Row with a small lock icon + uppercase field label."""
@@ -1636,14 +1682,53 @@ class LoginFrame(ctk.CTkFrame):
                     "If you have an exported backup file, copy it to:\n"
                     f"  {VAULT_FILE.parent}\n"
                     "as 'vault.enc', then unlock with the password you\n"
-                    "used when you created that backup."
+                    "used when you created that backup.\n\n"
+                    "If you want to keep using this device without that password,\n"
+                    "you can start fresh and move the current local vault into a\n"
+                    "timestamped backup folder."
                 ),
                 font=FONT_SM, text_color=C["text2"],
                 anchor="w", justify="left",
             ).pack(padx=20, pady=(0, 16), anchor="w")
-            make_btn(win, "Got it", win.destroy,
+
+            def _start_fresh():
+                confirm = simpledialog.askstring(
+                    "Start Fresh",
+                    "This will move your current local Pushkey vault into a backup folder and reset this device.\n\nType RESET to continue:",
+                    parent=win,
+                )
+                if confirm is None:
+                    return
+                if confirm.strip().upper() != "RESET":
+                    messagebox.showwarning("Start Fresh", "Confirmation text did not match. No changes were made.", parent=win)
+                    return
+                try:
+                    backup_dir = _start_fresh_local_vault()
+                    log_event(f"local vault reset: moved to {backup_dir}")
+                except FileNotFoundError:
+                    messagebox.showinfo("Start Fresh", "No local vault folder was found. Pushkey is already ready for a fresh start.", parent=win)
+                    backup_dir = None
+                except OSError as e:
+                    messagebox.showerror("Start Fresh", f"Could not move the local vault folder.\n\n{e}", parent=win)
+                    return
+                win.destroy()
+                if callable(self.on_start_fresh):
+                    self.on_start_fresh()
+                moved_msg = f"\n\nMoved to:\n{backup_dir}" if backup_dir else ""
+                messagebox.showinfo(
+                    "Start Fresh",
+                    "Pushkey is ready for first-time setup on this device." + moved_msg,
+                    parent=self,
+                )
+
+            actions = ctk.CTkFrame(win, fg_color="transparent")
+            actions.pack(padx=20, pady=(0, 16), fill="x")
+            make_btn(actions, "Start Fresh on This Device", _start_fresh,
+                     fg_color=C["amber"], text_color="#111827",
+                     height=34).pack(fill="x", pady=(0, 10))
+            make_btn(actions, "Got it", win.destroy,
                      fg_color=C["accent"], text_color="#FFFFFF",
-                     width=120, height=34).pack(pady=(0, 16))
+                     width=120, height=34).pack()
             return
 
         # V3 vault — show recovery flow
@@ -8466,7 +8551,7 @@ class PushkeyApp:
         self.frame.pack(fill="both", expand=True)
 
     def show_login(self):
-        self.switch(LoginFrame, on_login=self.on_login)
+        self.switch(LoginFrame, on_login=self.on_login, on_start_fresh=self.show_login)
 
     def on_login(self, pw, vault, vault_key=None):
         write_health_sidecar(vault)
