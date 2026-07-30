@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 import pushkey
 
 
@@ -77,3 +78,59 @@ def test_toggle_expand_switches_key():
     assert app._expanded_key == "KEY_B"
     assert app._rotate_pending is False
     assert app._rotate_result is None
+
+
+def test_start_fresh_local_vault_renames_directory(tmp_path):
+    vault_dir = tmp_path / ".pushkey"
+    vault_dir.mkdir()
+    (vault_dir / "vault.enc").write_text("secret", encoding="utf-8")
+    now = datetime(2026, 7, 30, 16, 45, 12)
+
+    backup_dir = pushkey._start_fresh_local_vault(vault_dir=vault_dir, now=now)
+
+    assert backup_dir == tmp_path / ".pushkey-backup-20260730-164512"
+    assert backup_dir.is_dir()
+    assert (backup_dir / "vault.enc").read_text(encoding="utf-8") == "secret"
+    assert not vault_dir.exists()
+
+
+def test_start_fresh_local_vault_avoids_name_collisions(tmp_path):
+    vault_dir = tmp_path / ".pushkey"
+    vault_dir.mkdir()
+    (vault_dir / "vault.enc").write_text("secret", encoding="utf-8")
+    now = datetime(2026, 7, 30, 16, 45, 12)
+    existing = tmp_path / ".pushkey-backup-20260730-164512"
+    existing.mkdir()
+
+    backup_dir = pushkey._start_fresh_local_vault(vault_dir=vault_dir, now=now)
+
+    assert backup_dir == tmp_path / ".pushkey-backup-20260730-164512-2"
+    assert backup_dir.is_dir()
+    assert (backup_dir / "vault.enc").read_text(encoding="utf-8") == "secret"
+
+
+def test_start_fresh_local_vault_requires_existing_directory(tmp_path):
+    missing = tmp_path / ".pushkey"
+
+    try:
+        pushkey._start_fresh_local_vault(vault_dir=missing, now=datetime(2026, 7, 30, 16, 45, 12))
+    except FileNotFoundError as exc:
+        assert Path(exc.filename) == missing
+    else:
+        raise AssertionError("expected FileNotFoundError")
+
+
+def test_login_card_layout_clamps_padding_on_small_windows():
+    layout = pushkey._login_card_layout(800)
+
+    assert layout["card_padx"] == 24
+    assert layout["form_padx"] == 20
+    assert layout["note_wraplength"] == 240
+
+
+def test_login_card_layout_expands_for_large_windows():
+    layout = pushkey._login_card_layout(1280)
+
+    assert layout["card_padx"] == 240
+    assert layout["form_padx"] == 36
+    assert layout["note_wraplength"] == 320

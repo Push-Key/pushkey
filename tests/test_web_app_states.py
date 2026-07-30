@@ -15,6 +15,9 @@ def test_local_web_shell_has_loading_locked_and_offline_states():
     assert "Preparing secure local session" in page
     assert "Loading vault status" in page
     assert "Cannot reach Pushkey local API" in page
+    assert "How to reopen it" in page
+    assert "from the CLI to open a fresh local session" in page
+    assert "one-time launch token" in page
     assert "Offline or locked" in page
 
 

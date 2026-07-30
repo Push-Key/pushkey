@@ -21,10 +21,9 @@ from pathlib import Path
 
 import pushkey_shared as _s
 from pushkey_crypto import generate_recovery_code, log_event
-from pushkey_env import format_env_value as _format_env_value
 from pushkey_env import mutate_env_file
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
-from pushkey_vault import load_vault, load_vault_with_key, save_vault, save_vault_with_key
+from pushkey_vault import load_config, load_vault, load_vault_with_key, save_config, save_vault, save_vault_with_key
 
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
@@ -50,8 +49,224 @@ CLI_COMMANDS = [
     "inject", "import", "init", "app", "completion",
 ]
 
+CLI_ONBOARDING_MARKER = ".cli_onboarding_seen"
+PUSHKEY_ASCII_ART = [
+    "██████  ██    ██ ███████ ██   ██ ██   ██ ███████ ██    ██",
+    "██   ██ ██    ██ ██      ██   ██ ██  ██  ██       ██  ██ ",
+    "██████  ██    ██ ███████ ███████ █████   █████     ████  ",
+    "██      ██    ██      ██ ██   ██ ██  ██  ██         ██   ",
+    "██       ██████  ███████ ██   ██ ██   ██ ███████    ██   ",
+]
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _cli_onboarding_marker_path() -> Path:
+    return _s.VAULT_DIR / CLI_ONBOARDING_MARKER
+
+
+def _has_seen_cli_onboarding() -> bool:
+    return _cli_onboarding_marker_path().exists()
+
+
+def _mark_cli_onboarding_seen() -> Path:
+    marker = _cli_onboarding_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("seen\n", encoding="utf-8")
+    return marker
+
+
+def _print_pushkey_ascii_art() -> None:
+    for line in PUSHKEY_ASCII_ART:
+        print(f"{C_CYAN}{line}{C_RESET}")
+
+
+
+def _render_cli_header(first_run: bool, has_vault: bool) -> None:
+    _print_pushkey_ascii_art()
+    print()
+    if first_run:
+        print("Pushkey is an encrypted vault for API keys, secrets, and project environment injection.")
+        print("Unlock your vault to use the CLI, launch the secure web app, or open the desktop interface.")
+        print()
+    else:
+        print(f"{C_CYAN}=== PUSHKEY CLI ==={C_RESET}")
+        print()
+    primary = "UNLOCK" if has_vault else "CREATE A VAULT"
+    print(f"{C_WHITE}{primary}{C_RESET}  ·  menu numbers or command names both work")
+    print()
+
+
+def _print_pre_unlock_menu(has_vault: bool) -> None:
+    rows = [
+        ("1", "unlock" if has_vault else "init", "Unlock vault" if has_vault else "Create vault"),
+        ("2", "init" if has_vault else "app", "Create vault" if has_vault else "Open web app"),
+        ("3", "app" if has_vault else "desktop", "Open web app" if has_vault else "Open desktop app"),
+        ("4", "desktop" if has_vault else "help", "Open desktop app" if has_vault else "Help"),
+        ("5", "help" if has_vault else "exit", "Help" if has_vault else "Exit"),
+    ]
+    if not has_vault:
+        rows.append(("6", "exit", "Exit"))
+    for num, cmd, desc in rows:
+        print(f"  {C_CYAN}[{num}] {cmd.ljust(8)}{C_RESET} {desc}")
+    print()
+
+
+def _print_pre_unlock_help(has_vault: bool = True) -> None:
+    print(f"{C_WHITE}Basic actions{C_RESET}")
+    basics = [
+        ("unlock", "enter your master password and open the CLI"),
+        ("init", "create a new vault"),
+        ("app", "launch the secure local web app"),
+        ("desktop", "open the desktop application"),
+        ("exit", "leave Pushkey"),
+    ]
+    if not has_vault:
+        basics[0] = ("init", "create your first vault to get started")
+    for cmd, desc in basics:
+        print(f"  {C_CYAN}{cmd.ljust(8)}{C_RESET} {desc}")
+    print()
+    print(f"{C_WHITE}After unlock{C_RESET}")
+    advanced = [
+        ("list", "show vault keys"),
+        ("get NAME", "print a key value"),
+        ("add", "add a key interactively or via subcommand"),
+        ("rotate NAME", "rotate a key value"),
+        ("inject [PATH]", "write assigned keys to a project .env"),
+        ("pushkey app", "launch the web app directly from a subcommand"),
+    ]
+    for cmd, desc in advanced:
+        print(f"  {C_CYAN}{cmd.ljust(14)}{C_RESET} {desc}")
+    print()
+
+
+def _desktop_app_candidates() -> list[Path]:
+    home = Path.home()
+    return [
+        home / "OneDrive" / "Desktop" / "Pushkey" / "Pushkey.exe",
+        home / "Desktop" / "Pushkey" / "Pushkey.exe",
+        home / "OneDrive" / "Desktop" / "Pushkey.exe",
+        home / "Desktop" / "Pushkey.exe",
+    ]
+
+
+def _launch_desktop_app() -> None:
+    gui = shutil.which("pushkey-gui")
+    if gui:
+        subprocess.Popen([gui])
+        return
+    for candidate in _desktop_app_candidates():
+        if candidate.exists():
+            subprocess.Popen([str(candidate)])
+            return
+    print("Desktop app not found. Try pushkey-gui or rebuild the desktop app.", file=sys.stderr)
+    sys.exit(EXIT_USAGE)
+
+
+def _run_repl_session(vault, password, vault_key=None):
+    history_file = _s.VAULT_DIR / ".cli_history"
+    rl = _setup_readline(vault, history_file)
+
+    print()
+    _render_dashboard(vault)
+    _render_stale_warnings(vault, password)
+    print()
+
+    app_proc = None
+    prompt = f"{C_CYAN}pushkey{C_RESET}> "
+
+    try:
+        while True:
+            try:
+                line = input(prompt)
+            except EOFError:
+                print()
+                break
+            except KeyboardInterrupt:
+                print()
+                continue
+
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            cmd = parts[0].lower()
+            rest = parts[1:]
+            app_proc = _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc)
+            if app_proc is False:
+                break
+    finally:
+        _save_history(rl, history_file)
+        if app_proc and app_proc is not False and app_proc.poll() is None:
+            try:
+                app_proc.terminate()
+            except Exception:
+                pass
+
+
+def _unlock_into_repl(args) -> None:
+    vault, password, vault_key, _scopes = _open_vault(args)
+    _mark_cli_onboarding_seen()
+    _run_repl_session(vault, password, vault_key)
+
+
+def _dispatch_pre_unlock_command(command: str, args, has_vault: bool) -> bool:
+    normalized = (command or "").strip().lower()
+    aliases = {
+        "1": "unlock" if has_vault else "init",
+        "2": "init" if has_vault else "app",
+        "3": "app" if has_vault else "desktop",
+        "4": "desktop" if has_vault else "help",
+        "5": "help" if has_vault else "exit",
+        "6": "exit",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized in {"exit", "quit"}:
+        return False
+    if normalized in {"unlock", "login"}:
+        _unlock_into_repl(args)
+        return True
+    if normalized in {"init", "create", "new"}:
+        init_password = os.environ.get("PUSHKEY_MASTER") or getattr(args, "password", None)
+        _cmd_init(None, password=init_password)
+        return True
+    if normalized in {"app", "web"}:
+        _cmd_app(blocking=False)
+        return True
+    if normalized in {"desktop", "gui"}:
+        _launch_desktop_app()
+        return True
+    if normalized in {"help", "?"}:
+        _print_pre_unlock_help(has_vault)
+        return True
+    print(f"{C_RED}Unknown option. Type help.{C_RESET}")
+    return True
+
+
+def _pre_unlock_shell(args) -> None:
+    _s.ensure_vault_dir()
+    first_run = not _has_seen_cli_onboarding()
+    has_vault = _s.VAULT_FILE.exists()
+    if first_run:
+        _mark_cli_onboarding_seen()
+    while True:
+        _render_cli_header(first_run, has_vault)
+        _print_pre_unlock_menu(has_vault)
+        try:
+            command = input(f"{C_CYAN}pushkey setup{C_RESET}> ")
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print()
+            continue
+        if not _dispatch_pre_unlock_command(command, args, has_vault):
+            break
+        first_run = False
+        has_vault = _s.VAULT_FILE.exists()
+        print()
 
 def _get_password(args):
     pw = os.environ.get("PUSHKEY_MASTER") or getattr(args, "password", None)
@@ -468,7 +683,7 @@ def main():
     args = parser.parse_args()
 
     if args.command is None:
-        return _repl(args)
+        return _pre_unlock_shell(args)
 
     if args.command == "init":
         init_password = os.environ.get("PUSHKEY_MASTER") or args.password
@@ -626,7 +841,6 @@ def _cmd_app(blocking=False):
         **os.environ,
         "PUSHKEY_LOCAL_PORT": str(port),
         "PUSHKEY_LAUNCH_TOKEN": token,
-        "PUSHKEY_PARENT_PID": str(os.getpid()),
     }
     command = (
         [sys.executable, "--local-api-server"]
@@ -661,7 +875,8 @@ def _cmd_app(blocking=False):
         webbrowser.open(url)
     except Exception:
         pass
-    print(f"  {C_CYAN}->{C_RESET} http://127.0.0.1:{port}/")
+    print(f"  {C_GREEN}✓ Opened secure web app in your browser.{C_RESET}")
+    print(f"  {C_DIM}If nothing opened, rerun 'pushkey app' instead of opening the local URL manually.{C_RESET}")
 
     if blocking:
         try:
@@ -678,7 +893,8 @@ def _cmd_app(blocking=False):
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
 _REPL_COMMANDS = ["list", "get", "copy", "add", "rotate", "delete",
-                  "inject", "app", "status", "help", "exit", "quit"]
+                  "inject", "project", "projects", "security", "app", "desktop",
+                  "status", "help", "about", "agents", "exit", "quit"]
 
 
 def _setup_readline(vault, history_file):
@@ -733,6 +949,42 @@ def _save_history(rl, history_file):
         pass
 
 
+def _project_summary(vault):
+    config = load_config()
+    projects = []
+    registered = config.get("projects", {}) if isinstance(config, dict) else {}
+    for path, meta in sorted(registered.items()):
+        assigned = [name for name, entry in sorted(vault.items()) if path in (entry.get("projects") or [])]
+        projects.append({
+            "path": path,
+            "name": meta.get("name", Path(path).name) if isinstance(meta, dict) else Path(path).name,
+            "keys": assigned,
+        })
+    for name, entry in sorted(vault.items()):
+        for path in entry.get("projects") or []:
+            if not any(project["path"] == path for project in projects):
+                projects.append({"path": path, "name": Path(path).name, "keys": [name]})
+            else:
+                for project in projects:
+                    if project["path"] == path and name not in project["keys"]:
+                        project["keys"].append(name)
+    return projects
+
+
+def _agent_token_count() -> int:
+    try:
+        import pushkey_agent_tokens as _at
+        return len(_at.list_tokens())
+    except Exception:
+        return 0
+
+
+def _render_brand_header() -> None:
+    _print_pushkey_ascii_art()
+    print(f"{C_DIM}Local encrypted API key vault for developers, apps, and autonomous agents.{C_RESET}")
+    print()
+
+
 def _color_for_age(age):
     if age == float("inf"):
         return C_DIM
@@ -759,8 +1011,12 @@ def _render_dashboard(vault):
             backup_staged += 1
     total = sum(counts.values())
     need_rot = counts["warning"] + counts["critical"]
-    line1 = f"  PUSHKEY  v2.1.0          {total} keys total  "
-    line2 = f"  {need_rot} need rotation          {backup_staged} backup staged"
+    projects = _project_summary(vault)
+    token_count = _agent_token_count()
+
+    _render_brand_header()
+    line1 = f"  {total} keys total   {need_rot} need rotation   {backup_staged} backup staged  "
+    line2 = f"  {len(projects)} Projects   {token_count} Agent tokens   {counts['critical']} critical  "
     width = max(len(line1), len(line2)) + 2
     top = "╔" + "═" * (width - 2) + "╗"
     mid = "╚" + "═" * (width - 2) + "╝"
@@ -771,6 +1027,26 @@ def _render_dashboard(vault):
     print(f"  {C_GREEN}✓ healthy ({counts['healthy']}){C_RESET}   "
           f"{C_ORANGE}⚠ warning ({counts['warning']}){C_RESET}   "
           f"{C_RED}✗ critical ({counts['critical']}){C_RESET}")
+    print()
+    print(f"{C_WHITE}Quick actions{C_RESET}")
+    actions = [
+        "[1] Add key", "[2] Get key", "[3] Inject project", "[4] Rotate key",
+        "[5] Projects", "[6] Agents", "[7] Security", "[8] Launch app",
+    ]
+    print("  " + "   ".join(f"{C_CYAN}{item}{C_RESET}" for item in actions[:4]))
+    print("  " + "   ".join(f"{C_CYAN}{item}{C_RESET}" for item in actions[4:]))
+    print()
+    print(f"{C_WHITE}Projects{C_RESET}")
+    if projects:
+        for project in projects[:3]:
+            keys = ", ".join(project["keys"][:3]) if project["keys"] else "no assigned keys"
+            display_name = project.get("name") or Path(project["path"]).name or project["path"]
+            print(f"  {C_CYAN}{display_name}{C_RESET}  {C_DIM}{project['path']}{C_RESET}  {len(project['keys'])} key(s): {keys}")
+    else:
+        print(f"  {C_DIM}No linked projects yet. Use: project add <path>{C_RESET}")
+    print()
+    print(f"{C_WHITE}Agent tokens{C_RESET}")
+    print(f"  {token_count} token(s). Use {C_CYAN}agents list{C_RESET}, {C_CYAN}agents create <name> read,write,inject{C_RESET}, {C_CYAN}agents revoke <token_id>{C_RESET}")
 
 
 def _render_stale_warnings(vault, password):
@@ -963,6 +1239,8 @@ def _repl_inject(vault, password, project_arg=None):
     if not keys_to_write:
         print(f"  {C_DIM}No keys assigned to {project}.{C_RESET}")
         return
+    print(f"  {C_DIM}Inject writes the keys assigned to this project into its local .env file.{C_RESET}")
+    print(f"  {C_DIM}Only keys linked to this project path are written here.{C_RESET}")
     print(f"  Project: {C_CYAN}{project}{C_RESET}")
     print(f"  Will write: {', '.join(sorted(keys_to_write))}")
     try:
@@ -981,7 +1259,238 @@ def _repl_inject(vault, password, project_arg=None):
     cmd_inject(a, vault, password)
 
 
+def _repl_project_add(project_arg: str) -> str:
+    project = Path(project_arg).resolve()
+    config = load_config()
+    config.setdefault("projects", {})
+    project_key = str(project)
+    if project_key not in config["projects"]:
+        config["projects"][project_key] = {
+            "name": project.name,
+            "created": datetime.now().isoformat(),
+        }
+        save_config(config)
+    print(f"  {C_GREEN}✓ Linked project{C_RESET} {C_CYAN}{project_key}{C_RESET}")
+    return project_key
+
+
+def _repl_project_assign(vault, password, project_arg: str, key_names: list[str], vault_key=None) -> None:
+    project_key = _repl_project_add(project_arg)
+    missing = [name.upper() for name in key_names if name.upper() not in vault]
+    if missing:
+        print(f"{C_RED}Unknown keys: {', '.join(missing)}{C_RESET}")
+        return
+    for raw_name in key_names:
+        name = raw_name.upper()
+        projects = vault[name].setdefault("projects", [])
+        if project_key not in projects:
+            projects.append(project_key)
+    _save_vault_for_session(vault, password, vault_key)
+    print(f"  {C_GREEN}✓ Assigned{C_RESET} {', '.join(name.upper() for name in key_names)} to {C_CYAN}{project_key}{C_RESET}")
+
+
+def _repl_projects(vault) -> None:
+    print(f"{C_WHITE}Projects{C_RESET}")
+    print(f"  {C_DIM}A project is a local repo or app folder that should receive selected secrets in its .env file.{C_RESET}")
+    print(f"  {C_DIM}Typical flow: project add <path>  ->  project assign <path> OPENAI_API_KEY  ->  inject <path>{C_RESET}")
+    print()
+    projects = _project_summary(vault)
+    if not projects:
+        print(f"  {C_DIM}No projects linked yet. Use: project add <path>{C_RESET}")
+        return
+    for project in projects:
+        keys = ", ".join(project["keys"]) if project["keys"] else "no assigned keys"
+        print(f"  {C_CYAN}{project['path']}{C_RESET}\n    {len(project['keys'])} key(s): {keys}")
+
+
+def _render_security_panel(vault) -> None:
+    stale = []
+    missing_backups = []
+    for name, info in sorted(vault.items()):
+        age = days_since(info.get("rotated") or info.get("created"))
+        if age != float("inf") and age > 90:
+            stale.append((name, int(age)))
+        if not info.get("next_value"):
+            missing_backups.append(name)
+    print(f"{C_WHITE}Security / Health{C_RESET}")
+    print(f"  {C_DIM}Healthy keys are fresh. Warning keys are aging toward rotation. Critical keys are overdue or risky.{C_RESET}")
+    print(f"  {C_DIM}Backup staged means you already saved the next secret value and can promote it during rotation.{C_RESET}")
+    print()
+    print(f"  Stale keys: {len(stale)}")
+    print(f"  Missing backup slots: {len(missing_backups)}")
+    if stale:
+        print("  Needs rotation: " + ", ".join(f"{name} ({age}d)" for name, age in stale[:5]))
+    if missing_backups:
+        print("  No backup staged: " + ", ".join(missing_backups[:5]))
+
+
+def _repl_agents(vault, password, vault_key, rest=None) -> None:
+    rest = rest or []
+    import pushkey_agent_tokens as _at
+    action = rest[0].lower() if rest else "help"
+    if action in {"help", "about"}:
+        _print_agent_help()
+        print()
+        print(f"  {C_CYAN}agents list{C_RESET}                 show existing tokens")
+        print(f"  {C_CYAN}agents create NAME scopes{C_RESET} create a token, e.g. agents create builder read,inject")
+        print(f"  {C_CYAN}agents revoke TOKEN_ID{C_RESET}     revoke a token by id")
+        return
+    if action == "list":
+        tokens = _at.list_tokens()
+        if not tokens:
+            print(f"  {C_DIM}No agent tokens yet.{C_RESET}")
+            return
+        for token in tokens:
+            scopes = ",".join(token.get("scopes", []))
+            print(f"  {C_CYAN}{token['id']}{C_RESET}  {token['name']}  [{scopes}]")
+        return
+    if action == "create":
+        if password is None:
+            print(f"{C_RED}Master password session required to create tokens.{C_RESET}")
+            return
+        if len(rest) < 3:
+            print(f"{C_RED}Usage: agents create <name> read,write,inject{C_RESET}")
+            return
+        name = rest[1]
+        scopes = [scope.strip() for scope in rest[2].split(",") if scope.strip()]
+        ok, result, token_id = _at.create_token(name, scopes, vault_key)
+        if not ok:
+            print(f"{C_RED}{result}{C_RESET}")
+            return
+        print(f"  {C_GREEN}✓ Created token{C_RESET} {C_CYAN}{token_id}{C_RESET}")
+        print(f"  {result}")
+        return
+    if action == "revoke":
+        if password is None:
+            print(f"{C_RED}Master password session required to revoke tokens.{C_RESET}")
+            return
+        if len(rest) < 2:
+            print(f"{C_RED}Usage: agents revoke <token_id>{C_RESET}")
+            return
+        if not _at.revoke_token(rest[1]):
+            print(f"{C_RED}Token not found.{C_RESET}")
+            return
+        print(f"  {C_GREEN}✓ Revoked token{C_RESET} {C_CYAN}{rest[1]}{C_RESET}")
+        return
+    print(f"{C_RED}Usage: agents [list|create|revoke]{C_RESET}")
+
+
+def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
+    aliases = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
+    cmd = aliases.get(cmd, cmd)
+    if cmd in ("exit", "quit"):
+        return False
+    if cmd in ("help", "about"):
+        _print_help()
+        return app_proc
+    if cmd == "agents":
+        _repl_agents(vault, password, vault_key, rest)
+        return app_proc
+    if cmd == "projects":
+        _repl_projects(vault)
+        return app_proc
+    if cmd == "project":
+        if not rest:
+            print(f"{C_RED}Usage: project [add|assign|inject] ...{C_RESET}")
+        elif rest[0] == "add" and len(rest) >= 2:
+            _repl_project_add(rest[1])
+        elif rest[0] == "assign" and len(rest) >= 3:
+            _repl_project_assign(vault, password, rest[1], rest[2:], vault_key)
+        elif rest[0] == "inject" and len(rest) >= 2:
+            _repl_inject(vault, password, rest[1])
+        else:
+            print(f"{C_RED}Usage: project [add|assign|inject] ...{C_RESET}")
+        return app_proc
+    if cmd == "security":
+        _render_security_panel(vault)
+        return app_proc
+    if cmd == "desktop":
+        _launch_desktop_app()
+        return app_proc
+    if cmd == "status":
+        _render_dashboard(vault)
+        return app_proc
+    if cmd == "list":
+        f = None
+        if rest and rest[0] in ("healthy", "warning", "critical"):
+            f = rest[0]
+        elif rest and rest[0] == "--status" and len(rest) > 1:
+            f = rest[1]
+        _repl_list(vault, f)
+        return app_proc
+    if cmd == "get":
+        if not rest:
+            print(f"{C_RED}Usage: get NAME{C_RESET}")
+        else:
+            _repl_get(vault, rest[0].upper())
+        return app_proc
+    if cmd == "copy":
+        if not rest:
+            print(f"{C_RED}Usage: copy NAME{C_RESET}")
+        else:
+            _repl_copy(vault, rest[0].upper())
+        return app_proc
+    if cmd == "add":
+        _repl_add(vault, password, vault_key)
+        return app_proc
+    if cmd == "rotate":
+        if not rest:
+            print(f"{C_RED}Usage: rotate NAME{C_RESET}")
+        else:
+            _repl_rotate(vault, password, rest[0].upper(), vault_key)
+        return app_proc
+    if cmd == "delete":
+        if not rest:
+            print(f"{C_RED}Usage: delete NAME{C_RESET}")
+        else:
+            _repl_delete(vault, password, rest[0].upper(), vault_key)
+        return app_proc
+    if cmd == "inject":
+        _repl_inject(vault, password, rest[0] if rest else None)
+        return app_proc
+    if cmd == "app":
+        if app_proc and app_proc.poll() is None:
+            print(f"  {C_DIM}App already running.{C_RESET}")
+            return app_proc
+        return _cmd_app(blocking=False)
+    print(f"{C_RED}Unknown command. Type help.{C_RESET}")
+    return app_proc
+
+
+def _print_agent_help():
+    print(f"{C_WHITE}Agent tokens{C_RESET}")
+    print("An agent token is a scoped credential for an AI agent, CI job, or local automation flow.")
+    print("Use a scoped pk_agent_... token when something should access the vault without the master password.")
+    print("If a token is no longer needed, revoke it and that automation path immediately loses access.")
+    print("")
+    scopes = [
+        ("read", "list keys, get a value, check status/health"),
+        ("write", "add, rotate, delete, import, or stage backup values"),
+        ("inject", "write assigned secrets into a local project .env file"),
+    ]
+    w = max(len(name) for name, _desc in scopes)
+    for name, desc in scopes:
+        print(f"  {C_CYAN}{name.ljust(w)}{C_RESET}  {C_DIM}{desc}{C_RESET}")
+    print()
+    print(f"{C_WHITE}Where agentic access works{C_RESET}")
+    surfaces = [
+        ("CLI", "pushkey --token pk_agent_... list --json"),
+        ("MCP", 'unlock_vault("pk_agent_...") then call list_keys / inject_env / rotate_to_backup'),
+        ("Local API", 'POST /api/unlock with {"password": "pk_agent_..."}'),
+    ]
+    w = max(len(name) for name, _desc in surfaces)
+    for name, example in surfaces:
+        print(f"  {C_CYAN}{name.ljust(w)}{C_RESET}  {C_DIM}{example}{C_RESET}")
+    print()
+    print(f"{C_DIM}Tip: use plaintext write tools only for short-lived dev/test keys. For long-lived production keys, prefer the local CLI so the secret never enters chat context.{C_RESET}")
+
+
 def _print_help():
+    print(f"{C_WHITE}What Pushkey does{C_RESET}")
+    print("Pushkey helps developers keep API keys local, encrypted, organized by project, and ready to inject into .env files.")
+    print()
+
+    print(f"{C_WHITE}Vault commands{C_RESET}")
     rows = [
         ("list [filter]",     "show all keys (filter: healthy|warning|critical)"),
         ("get NAME",          "print key value"),
@@ -990,14 +1499,33 @@ def _print_help():
         ("rotate NAME",       "rotate key value"),
         ("delete NAME",       "delete a key"),
         ("inject [PATH]",     "write assigned keys to project .env"),
-        ("app",               "launch web UI in browser"),
-        ("status",            "re-render dashboard"),
-        ("help",              "this help"),
+        ("projects",          "list linked projects and assigned keys"),
+        ("project add PATH",  "link a project folder"),
+        ("project assign PATH KEYS...", "assign one or more keys to a project"),
+        ("agents",            "list/create/revoke agent tokens"),
+        ("security",          "show stale keys and missing backup coverage"),
+        ("app / desktop",     "launch the web app or desktop app"),
+        ("status",            "re-render the branded command center"),
+        ("about",             "show this guide again"),
         ("exit / quit",       "exit REPL"),
     ]
     w = max(len(r[0]) for r in rows)
     for cmd, desc in rows:
         print(f"  {C_CYAN}{cmd.ljust(w)}{C_RESET}  {C_DIM}{desc}{C_RESET}")
+    print()
+
+    print(f"{C_WHITE}Common workflows{C_RESET}")
+    workflows = [
+        "Add a secret: add  → save OPENAI_API_KEY once, encrypted locally",
+        "Use a secret: get OPENAI_API_KEY  or  copy OPENAI_API_KEY",
+        "Inject project env: inject .  → write assigned keys into the current repo .env",
+        "Rotate a key: rotate OPENAI_API_KEY  → replace the live value and keep metadata updated",
+    ]
+    for line in workflows:
+        print(f"  {C_DIM}{line}{C_RESET}")
+    print()
+
+    _print_agent_help()
 
 
 def _repl(args):
@@ -1010,88 +1538,7 @@ def _repl(args):
     if vault is None:
         print(f"{C_RED}Error: wrong master password{C_RESET}", file=sys.stderr)
         sys.exit(1)
-
-    history_file = _s.VAULT_DIR / ".cli_history"
-    rl = _setup_readline(vault, history_file)
-
-    print()
-    _render_dashboard(vault)
-    _render_stale_warnings(vault, password)
-    print()
-
-    app_proc = None
-    prompt = f"{C_CYAN}pushkey{C_RESET}> "
-
-    try:
-        while True:
-            try:
-                line = input(prompt)
-            except EOFError:
-                print()
-                break
-            except KeyboardInterrupt:
-                print()
-                continue
-
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split()
-            cmd = parts[0].lower()
-            rest = parts[1:]
-
-            if cmd in ("exit", "quit"):
-                break
-            elif cmd == "help":
-                _print_help()
-            elif cmd == "status":
-                _render_dashboard(vault)
-            elif cmd == "list":
-                f = None
-                if rest and rest[0] in ("healthy", "warning", "critical"):
-                    f = rest[0]
-                elif rest and rest[0] == "--status" and len(rest) > 1:
-                    f = rest[1]
-                _repl_list(vault, f)
-            elif cmd == "get":
-                if not rest:
-                    print(f"{C_RED}Usage: get NAME{C_RESET}")
-                else:
-                    _repl_get(vault, rest[0].upper())
-            elif cmd == "copy":
-                if not rest:
-                    print(f"{C_RED}Usage: copy NAME{C_RESET}")
-                else:
-                    _repl_copy(vault, rest[0].upper())
-            elif cmd == "add":
-                _repl_add(vault, password, _vk)
-            elif cmd == "rotate":
-                if not rest:
-                    print(f"{C_RED}Usage: rotate NAME{C_RESET}")
-                else:
-                    _repl_rotate(vault, password, rest[0].upper(), _vk)
-            elif cmd == "delete":
-                if not rest:
-                    print(f"{C_RED}Usage: delete NAME{C_RESET}")
-                else:
-                    _repl_delete(vault, password, rest[0].upper(), _vk)
-            elif cmd == "inject":
-                _repl_inject(vault, password, rest[0] if rest else None)
-            elif cmd == "app":
-                if app_proc and app_proc.poll() is None:
-                    print(f"  {C_DIM}App already running.{C_RESET}")
-                else:
-                    app_proc = _cmd_app(blocking=False)
-            else:
-                print(f"{C_RED}Unknown command. Type help.{C_RESET}")
-    finally:
-        _save_history(rl, history_file)
-        if app_proc and app_proc.poll() is None:
-            try:
-                app_proc.terminate()
-            except Exception:
-                pass
+    _run_repl_session(vault, password, _vk)
 
 
 if __name__ == "__main__":
