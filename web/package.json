@@ -9,7 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@base-ui/react": "^1.4.1",
+    "@base-ui/react": "^1.6.0",
     "@fontsource/ibm-plex-sans": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "class-variance-authority": "^0.7.1",
