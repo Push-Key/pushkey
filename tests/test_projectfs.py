@@ -448,6 +448,16 @@ def test_gitignore_line_that_names_a_glob_folder_without_escapes_is_not_a_cover(
     assert (project / ".gitignore").read_bytes() == b"app/[id]/.env.local\napp/\\[id\\]/.env.local\n"
 
 
+def test_gitignore_escape_covers_the_pattern_characters_and_trailing_spaces():
+    escape = pushkey_projectfs._gitignore_escape
+    assert escape("app/[id]/.env.local") == "app/\\[id\\]/.env.local"
+    assert escape("a*b/c?d/.env") == "a\\*b/c\\?d/.env"
+    assert escape("#notes/.env") == "\\#notes/.env"
+    assert escape("!bang/.env") == "\\!bang/.env"
+    assert escape("mid#dle!/.env") == "mid#dle!/.env"
+    assert escape("dir/.env.x  ") == "dir/.env.x\\ \\ "
+
+
 # ── git tracking ─────────────────────────────────────────────────────────────
 
 

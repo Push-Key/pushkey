@@ -27,6 +27,7 @@ _INVALID_ENV_PATH = "invalid env file path"
 # wildcards to git).
 _FORBIDDEN_SEGMENT_CHARS = frozenset(':*?"<>|')
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
+_GITIGNORE_PATTERN_CHARS = re.compile(r"([\[\]*?])")
 _GIT_TIMEOUT_SECONDS = 5
 
 
@@ -180,14 +181,29 @@ def atomic_project_write(
         temp_path.unlink(missing_ok=True)
 
 
+def _gitignore_escape(path: str) -> str:
+    """Escape ``path`` so a .gitignore line matches exactly that file.
+
+    ``[ ] * ?`` are pattern characters anywhere, a leading ``!`` or ``#`` would
+    negate or comment the line, and trailing spaces are dropped unless escaped.
+    """
+    escaped = _GITIGNORE_PATTERN_CHARS.sub(r"\\\1", path)
+    if escaped[:1] in ("!", "#"):
+        escaped = "\\" + escaped
+    unspaced = escaped.rstrip(" ")
+    return unspaced + "\\ " * (len(escaped) - len(unspaced))
+
+
 def _gitignore_covers(text: str, relpath: str) -> bool:
     """True when the last matching line of a .gitignore ignores ``relpath``.
 
-    A line matches when, without a leading ``/``, it equals the path, or it has
-    no ``/`` at all and matches the file name as a pattern. ``!`` lines undo an
-    earlier match, as in git (the last matching line wins).
+    A line matches when, without a leading ``/``, it equals the escaped path
+    (the only spelling git reads as that literal file), or it has no ``/`` at
+    all and matches the file name as a pattern. ``!`` lines undo an earlier
+    match, as in git (the last matching line wins).
     """
     name = relpath.rsplit("/", 1)[-1]
+    literal = _gitignore_escape(relpath).strip()
     covered = False
     for raw in text.replace("\r\n", "\n").split("\n"):
         line = raw.strip()
@@ -197,7 +213,7 @@ def _gitignore_covers(text: str, relpath: str) -> bool:
         if negated:
             line = line[1:].strip()
         bare = line[1:] if line.startswith("/") else line
-        if bare == relpath or ("/" not in line and fnmatch.fnmatch(name, line)):
+        if bare == literal or ("/" not in line and fnmatch.fnmatch(name, line)):
             covered = not negated
     return covered
 
@@ -219,7 +235,7 @@ def ensure_project_gitignore(
     atomic_project_write(
         registered,
         ".gitignore",
-        existing + separator + relpath.encode("utf-8") + eol,
+        existing + separator + _gitignore_escape(relpath).encode("utf-8") + eol,
         expected_identity,
     )
     return True
