@@ -411,6 +411,43 @@ def test_gitignore_goes_through_the_module_writer(project, monkeypatch):
     assert calls == [(str(project), ".gitignore", b".env.local\n")]
 
 
+def _git_ignore_status(project, relpath):
+    """Exit code of `git check-ignore -q`: 0 ignored, 1 not ignored."""
+    return subprocess.run(
+        ["git", "-C", str(project), "check-ignore", "-q", "--", relpath],
+        capture_output=True, text=True, check=False,
+    ).returncode
+
+
+def test_gitignore_line_for_glob_named_folder_is_matched_by_git(project):
+    _git(project, "init")
+    (project / "app" / "[id]").mkdir(parents=True)
+    (project / "app" / "[id]" / ".env.local").write_text("A=1\n")
+    identity = project_identity(project)
+    assert ensure_project_gitignore(str(project), "app/[id]/.env.local", identity) is True
+    assert _git_ignore_status(project, "app/[id]/.env.local") == 0
+    assert ensure_project_gitignore(str(project), "app/[id]/.env.local", identity) is False
+
+
+@pytest.mark.parametrize("folder", ["#notes", "!bang", "x[1]", "a]b"])
+def test_gitignore_line_for_awkward_folder_names_is_matched_by_git(project, folder):
+    _git(project, "init")
+    (project / folder).mkdir()
+    (project / folder / ".env.local").write_text("A=1\n")
+    identity = project_identity(project)
+    relpath = f"{folder}/.env.local"
+    assert ensure_project_gitignore(str(project), relpath, identity) is True
+    assert _git_ignore_status(project, relpath) == 0
+    assert ensure_project_gitignore(str(project), relpath, identity) is False
+
+
+def test_gitignore_line_that_names_a_glob_folder_without_escapes_is_not_a_cover(project):
+    identity = project_identity(project)
+    (project / ".gitignore").write_bytes(b"app/[id]/.env.local\n")
+    assert ensure_project_gitignore(str(project), "app/[id]/.env.local", identity) is True
+    assert (project / ".gitignore").read_bytes() == b"app/[id]/.env.local\napp/\\[id\\]/.env.local\n"
+
+
 # ── git tracking ─────────────────────────────────────────────────────────────
 
 
