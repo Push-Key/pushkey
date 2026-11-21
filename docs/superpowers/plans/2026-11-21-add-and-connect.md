@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, FastAPI (local API), FastMCP, argparse CLI, customtkinter desktop, Next.js 16 static web app (bundled into `pushkey_web/out`), pytest.
 
-**Spec:** `docs/superpowers/specs/2026-11-21-add-and-connect-design.md` (approved 2026-11-21, owner decisions Q1-Q5 = the recommended answers). Real code shapes this plan was written from: the three mapping reports (storage, entry points, UI) summarised in each task's "Real shapes" lines; line numbers are this branch at `0aed231`.
+**Spec:** `docs/superpowers/specs/2026-11-21-add-and-connect-design.md` (approved 2026-11-21, owner decisions Q1-Q5 = the recommended answers). Real code shapes this plan was written from, committed beside it: `docs/superpowers/plans/2026-11-21-add-and-connect-shapes/storage.md`, `entrypoints.md`, `ui.md` (read from code at `0aed231`; line numbers are that commit). Each task's "Real shapes" lines summarise them; the reports have the rest.
 
 ## Global Constraints
 
@@ -26,6 +26,8 @@
 - Connection shape (spec 5.1): `{project, file, var, added}` plus optional `last_error` (str, set when the last write failed, cleared on success).
 - Q4: only a master-password session may register or remove a project, in every entry point. Connect, assign and inject require a registered project.
 - Q5: `pushkey_tiers.within_limit("max_projects", len(registered))` gates new registrations in every entry point; migration never removes projects. Free tier limit is 1, so existing tests that register 2+ projects patch `pushkey_tiers.current_tier` to `"pro"` with `monkeypatch.setattr`.
+- Who may change the store: only a master-password session runs the migration, registers or removes projects (same rule as `GET /api/projects`, which persists canonicalisation only for `sess.can_write`, `pushkey_local_api.py:867`). Agent-token and recovery sessions never write during unlock; on a store that is not migrated yet, their connect/assign/inject/sync calls fail with `ConnectError("migration_pending")` ("Open Pushkey with your master password once to finish the update"), and key reads work as today.
+- A damaged or busy `config.json` never blocks unlock or key reads. Migration is skipped for that unlock; project features fail with `ConnectError("config_unreadable")` / `("config_busy")` (local API 503).
 - New modules are registered in `pyproject.toml` `py-modules`, `build_exe.py` `SUBMODULES` and `Pushkey.spec` hiddenimports (`tests/test_package_metadata.py` checks the first two).
 
 ## Spec rules this plan restates (compare before Task 1)
@@ -42,9 +44,10 @@
 
 | Clause (spec) | Test (task) |
 |---|---|
-| A key lands only in a project the user confirmed (anti-goal 1, Q4) | `test_mcp_connect_key_refuses_unregistered_folder` (T9), `test_token_session_cannot_register_project` (T8), `test_cli_token_cannot_add_project` and `test_shell_read_token_cannot_add_key` (T10) |
+| A key lands only in a project the user confirmed (anti-goal 1, Q4) | `test_mcp_connect_key_refuses_unregistered_folder`, `test_mcp_assign_key_refuses_unregistered_folder`, `test_mcp_inject_env_refuses_unregistered_folder` (T9), `test_token_session_cannot_register_project` (T8), `test_cli_token_cannot_add_project` and `test_shell_read_token_cannot_add_key` (T10) |
+| Token and recovery sessions do not write on unlock | `test_read_token_unlock_leaves_vault_bytes_unchanged` (T8) |
 | Never write outside the project folder (anti-goal 3) | `test_relpath_rejects_parent_segments`, `test_write_refuses_junction_subfolder` (T2), `test_connect_refuses_escape_path` (T6) |
-| Never write a secret file git does not ignore (anti-goal 4) | `test_write_adds_exact_path_to_project_gitignore`, `test_tracked_file_is_refused` (T2), `test_existing_backup_files_get_ignored` (T1) |
+| Never write a secret file git does not ignore (anti-goal 4) | `test_write_adds_exact_path_to_project_gitignore` (T2), `test_connect_refuses_tracked_file` (T6), `test_connect_route_refuses_tracked_file` (T8), `test_existing_backup_files_get_ignored` (T1) |
 | Values never in logs, health, audit or MCP replies (anti-goal 5) | `test_connect_result_and_log_have_no_value` (T6), `test_mcp_connect_reply_has_no_value` (T9) |
 | Long-lived values never cross the LLM channel (anti-goal 2) | `test_connect_key_takes_no_value_parameter` (T9) |
 
@@ -199,7 +202,7 @@ Real shapes: `load_vault(password) -> (VaultData, vault_key)`; `load_vault_with_
   - `@dataclass class Preview: key: str; project: str; project_name: str; file: str; var: str; environment: str; line: str; change: Literal["add", "replace", "none"]; gitignore_change: bool; needs_confirm: list[str]; conflict_key: Optional[str]`
   - `preview(vault, config, *, key_name, project, file=None, var=None) -> Preview`. Defaults: `file = record["default_file"]`, `var = key_name`. Errors (`ConnectError` codes): `key_not_found`, `project_not_registered`, `var_taken` (another key already has `(project, file, var)`; `detail={"key": other}`), `file_tracked_by_git`, `invalid_var` (var must match `^[A-Za-z_][A-Za-z0-9_]*$`); path errors pass through as `ProjectPathError`. `needs_confirm` codes: `"env_mismatch"` (key `env` not in `{record["environment"], "all"}`), `"public_prefix"` (var starts with a browser prefix and neither the key name nor the var contains `ANON`, `PUBLISHABLE`, `PUBLIC_KEY`, `_URL`, `CLIENT_ID`, and the value does not start with `pk_` or `sb_publishable_`).
   - `@dataclass class ConnectResult: key: str; project: str; file: str; var: str; written: bool; reason: Optional[str]; change: str; gitignore_changed: bool; health_warning: Optional[str]`
-  - `connect(*, key_name, project, file=None, var=None, value=None, provider=None, env=None, notes="", write=True, confirmed: Iterable[str] = (), replace_source: bool = False, vault_key, password, target=None, actor: str) -> ConnectResult`: order per spec 5.3 (add or `replace_value` when `value` given; allowlist + connection; commit; write file with backup + gitignore; `log_event(f"{actor}: connected {key} -> {project_name} {file} as {var}")`). Missing confirmations → `ConnectError("confirmation_required", detail={"needs": [...]})` before any write. A file failure keeps the connection, sets `last_error`, returns `written=False, reason=<reason>`.
+  - `connect(*, key_name, project, file=None, var=None, value=None, replace: bool = False, provider=None, env=None, notes="", write=True, confirmed: Iterable[str] = (), replace_source: bool = False, vault_key, password, target=None, actor: str) -> ConnectResult`. `value` given and the key exists: `ConnectError("key_exists")` unless `replace=True` (then `replace_value`); `value` given and the key is new: a new entry `{value, created, rotated, provider (detect_provider or "Unknown"), env (default "dev"), projects: [], connections: [], notes, rotation_count: 0}`. Order per spec 5.3 (add or `replace_value` when `value` given; allowlist + connection; commit; write file with backup + gitignore; `log_event(f"{actor}: connected {key} -> {project_name} {file} as {var}")`). Missing confirmations → `ConnectError("confirmation_required", detail={"needs": [...]})` before any write. A file failure keeps the connection, sets `last_error`, returns `written=False, reason=<reason>`.
   - `sync(*, key_name=None, project=None, vault_key, password, target=None, actor: str) -> list[ConnectResult]`: rewrite every matching connection (Q2: replace values); folders not on this computer → `written=False, reason="folder_missing"`; clears or sets `last_error`.
   - `@dataclass class ConnectionStatus: key: str; project: str; project_name: str; file: str; var: str; state: Literal["up_to_date", "out_of_date", "not_in_file", "file_missing", "folder_missing", "not_ignored", "not_written"]; reason: Optional[str]`
   - `status(vault, config, *, key_name=None, project=None) -> list[ConnectionStatus]` (compares `decode_env_value(line.value_text)` with `sanitize_env_value(value)`; `last_error` set and not up to date → `not_written`; values never in the result).
@@ -212,6 +215,8 @@ Real shapes: `load_vault(password) -> (VaultData, vault_key)`; `load_vault_with_
   - `test_connect_writes_and_records`: `connect(..., file=".env.local", var="NEXT_PUBLIC_SUPABASE_ANON_KEY", actor="test")` → file has `NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_x`, `.gitignore` has `.env.local`, vault entry `connections == [{"project": p, "file": ".env.local", "var": "NEXT_PUBLIC_SUPABASE_ANON_KEY", "added": ANY}]` and `p in projects`.
   - `test_connect_refuses_unregistered_folder`: unregistered folder → `project_not_registered`, nothing written.
   - `test_connect_refuses_escape_path`: `file="../.env"` → `ProjectPathError`; no file outside the project.
+  - `test_connect_refuses_tracked_file`: `git init` the project, commit `.env.local`; `connect(..., file=".env.local")` → `ConnectError` code `file_tracked_by_git`; the committed file's bytes are unchanged and the vault has no connection.
+  - `test_connect_value_on_existing_key_needs_replace`: `connect(value="v2")` on an existing key → `key_exists`; with `replace=True` → history holds the old value and connections are kept.
   - `test_public_prefix_needs_confirmation`: key `SUPABASE_SERVICE_ROLE_KEY` value `eyJ...` to var `NEXT_PUBLIC_SR` → `confirmation_required` with `needs == ["public_prefix"]`; with `confirmed={"public_prefix"}` it writes.
   - `test_env_mismatch_needs_confirmation`: key env `prod`, project env `dev` → `needs == ["env_mismatch"]`.
   - `test_var_taken_by_other_key`: second key to the same `(project, file, var)` → `var_taken` with `detail["key"]`.
@@ -238,7 +243,8 @@ Real shapes: desktop entries `config["projects"][NAME] = {path, keys, added (iso
 - Produces:
   - `@dataclass class MigrationReport: moved: list[str]; connections_added: int; every_key_projects: list[str]; env_skipped: list[tuple[str, str]]; missing_keys: list[tuple[str, str]]`
   - `plan_migration(vault: dict, config: dict) -> MigrationReport` mutates both dicts in memory (pure apart from that): name-keyed entries with a usable `path` → path-keyed record (`name`, `created` from `added[:10]` or today, `default_file ".env"`, `environment = target_env if in ENV_LEVELS else "dev"`, extra fields kept); every listed key that exists and passes the env rule → allowlist + connection `{file ".env", var KEY}`; others into `env_skipped` / `missing_keys`; empty `keys` → `every_key_projects` (Q1: no keys); old entries moved to `config["projects_legacy"]`; every existing allowlist entry (any origin) without a connection gets one; `config["connect_schema"] = 1`; `config["connect_notice"] = {"every_key_projects": [...], "env_skipped": [...]}` when either is non-empty. Running it again on its own output adds nothing.
-  - `ensure_migrated(*, vault_key, password, target=None) -> Optional[MigrationReport]`: under `config_lock()`, `load_config(strict=True)` (raises `ConfigUnreadableError`); returns `None` when `connect_schema == 1` and no name-keyed entries remain; else `commit()` the vault side first, then save the config side.
+  - `ensure_migrated(*, vault_key, password, target=None) -> Optional[MigrationReport]`: requires `password` (a master-password session; callers never call it for token or recovery sessions); under `config_lock()`, `load_config(strict=True)` (raises `ConfigUnreadableError`, which callers log and skip); returns `None` when `connect_schema == 1` and no name-keyed entries remain; else `commit()` the vault side first, then save the config side.
+  - `is_migrated(config: dict) -> bool`; `pushkey_connect` write functions raise `ConnectError("migration_pending")` when it is False.
   - `dismiss_notice() -> None` (removes `connect_notice` via `update_config`).
 
 - [ ] **Step 1: Failing tests**:
@@ -248,6 +254,7 @@ Real shapes: desktop entries `config["projects"][NAME] = {path, keys, added (iso
   - `test_existing_assignment_becomes_connection`: CLI-style record + `vault["B"]["projects"] = [p]` → one connection for `B`.
   - `test_migration_is_idempotent`: `plan_migration` twice → second report all empty, dicts equal.
   - `test_migration_refuses_unreadable_config`: garbage `config.json` → `ensure_migrated` raises `ConfigUnreadableError`, file bytes and vault unchanged.
+  - `test_connect_before_migration_is_pending`: name-keyed desktop config, no migration run → `connect(...)` raises `migration_pending`; vault bytes unchanged.
 - [ ] **Step 2: Run** — FAIL; record RED.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `python -m pytest tests/test_connect_migrate.py tests/test_connect_core.py -q` — PASS.
@@ -263,16 +270,17 @@ Real shapes: desktop entries `config["projects"][NAME] = {path, keys, added (iso
 Real shapes: `require_scope(scope)` takes one scope and lets agent tokens through on scope alone; `require_writable` = password session only (LA:694-697); models are `StrictBody` (extra fields rejected); `_save(sess, response)` sets `X-Pushkey-Warning`; inject today skips existing values and allows explicit `keys` outside the allowlist (LA:977-984).
 
 Changes (each with its test):
-- Unlock (password, recovery and agent token) calls `ensure_migrated(..., target=sess.vault)`; `ConfigUnreadableError` → 500 `{"detail": "config_unreadable"}` and the session stays locked.
+- Password unlock calls `ensure_migrated(..., target=sess.vault)`; recovery and agent-token unlocks never do. `ConfigUnreadableError` during unlock is logged and the unlock still succeeds; project routes then answer 503 `{"detail": "config_unreadable"}`.
+- `tests/test_local_api.py:564-571` patches `fresh_app._atomic_project_write`; once inject goes through the core, repoint that test to `pushkey_projectfs.atomic_project_write` (same assertions).
 - `POST /api/projects` and `DELETE /api/projects` → `Depends(require_writable)`; use `register_project` / `unregister_project`; `project_limit` → 402 `{"detail": "project_limit"}`; `project_exists` → 409.
 - `POST /api/keys`: `KeyCreate` gains `connect: Optional[ConnectBody]` (`project: str`, `file: Optional[str]`, `var: Optional[str]`, `confirmed: list[Literal["env_mismatch","public_prefix"]] = []`); `overwrite=true` uses `replace_value` (keeps connections) then `sync`; with `connect`, calls `connect(...)` and returns `{"name","provider","env","connection": <ConnectResult as dict>}`.
 - Rotate and promote use `replace_value` + `sync`; responses gain `"synced": [<ConnectResult dicts>]` (no values). An agent-token session without `inject` still rotates; the response carries `"not_synced": [{"project","file","var"}]` instead (spec 5.3).
 - New routes: `POST /api/connections/preview` [read] body `{key, project, file?, var?}` → Preview dict; `POST /api/connections` [write and inject] → ConnectResult (write+inject: `Depends(require_scope("write"))` and `Depends(require_scope("inject"))`); `DELETE /api/connections` [write] body `{key, project, file, var}`; `GET /api/connections?key=&project=` [read] → `{"connections": [ConnectionStatus dicts]}`; `POST /api/connections/sync` [inject] body `{key?, project?}`; `GET /api/connections/suggest?key=&project=` [read] → Suggestion; `GET /api/connect/notice` [read] and `DELETE /api/connect/notice` [write].
 - `POST /api/projects/assign` → `connect(write=False)` per key (file/var defaults); `/inject` → `sync(project=path)` limited to `body.keys` when given; explicit keys that are not connected → 400 `keys not connected: [...]`.
 - `GET /api/projects` returns `keys` from connections plus `"connections": <count>`; `GET /api/keys` rows gain `"connections": <count>`.
-- `ConnectError` → status map: `key_not_found` 404, `project_not_registered` 404, `var_taken` 409, `confirmation_required` 409 with `{"detail":"confirmation_required","needs":[...]}`, `file_tracked_by_git` 400, `vault_changed` 409, `vault_unavailable` 423; `ProjectPathError` → its `status` and `reason`.
+- `ConnectError` → status map: `migration_pending` 409, `config_unreadable` 503, `config_busy` 503, `key_exists` 409, `key_not_found` 404, `project_not_registered` 404, `var_taken` 409, `confirmation_required` 409 with `{"detail":"confirmation_required","needs":[...]}`, `file_tracked_by_git` 400, `vault_changed` 409, `vault_unavailable` 423; `ProjectPathError` → its `status` and `reason`.
 
-- [ ] **Step 1: Failing tests** (`tests/test_local_api_connect.py`, reuse `fresh_app`/`client`/`auth`/`token_unlocked` patterns from `tests/test_local_api.py:20-49, 346-354, 1261-1273`): `test_add_key_with_connect_writes_file`, `test_preview_returns_line`, `test_token_session_cannot_register_project` (write+inject token → 403 on `POST /api/projects`), `test_connections_route_needs_write_and_inject` (write-only token → 403), `test_overwrite_keeps_connections_and_syncs`, `test_rotate_syncs_connected_files`, `test_inject_replaces_connected_values` (replaces the old `test_inject_skips_existing_env_keys` expectation on purpose; unconnected existing variables stay untouched), `test_inject_refuses_unconnected_explicit_keys`, `test_project_limit_returns_402`, `test_unlock_runs_migration_and_notice_route`, `test_conflict_maps_to_409`.
+- [ ] **Step 1: Failing tests** (`tests/test_local_api_connect.py`, reuse `fresh_app`/`client`/`auth`/`token_unlocked` patterns from `tests/test_local_api.py:20-49, 346-354, 1261-1273`): `test_add_key_with_connect_writes_file`, `test_preview_returns_line`, `test_token_session_cannot_register_project` (write+inject token → 403 on `POST /api/projects`), `test_connections_route_needs_write_and_inject` (write-only token → 403), `test_overwrite_keeps_connections_and_syncs`, `test_rotate_syncs_connected_files`, `test_inject_replaces_connected_values` (replaces the old `test_inject_skips_existing_env_keys` expectation on purpose; unconnected existing variables stay untouched), `test_inject_refuses_unconnected_explicit_keys`, `test_project_limit_returns_402`, `test_unlock_runs_migration_and_notice_route`, `test_conflict_maps_to_409`, `test_read_token_unlock_leaves_vault_bytes_unchanged` (name-keyed config; read token unlock; `VAULT_FILE` and `CONFIG_FILE` bytes unchanged; `POST /api/connections` → 409 `migration_pending`), `test_unlock_works_with_unreadable_config` (garbage config; password unlock 200; `GET /api/keys` 200; `GET /api/projects` 503), `test_connect_route_refuses_tracked_file`.
 - [ ] **Step 2: Run** — FAIL; record RED.
 - [ ] **Step 3: Implement**; add the `docs/local-api-v1.md` rows.
 - [ ] **Step 4: Run** `python -m pytest tests/test_local_api_connect.py tests/test_local_api.py tests/test_local_contracts.py tests/test_local_api_contract_static.py -q` — PASS.
@@ -288,13 +296,13 @@ Changes (each with its test):
 Real shapes: `_require_scope(scope)` returns `None` or an error dict; tools return `{"success": bool, ...}`; the three plaintext warnings (MCP:294-299, 423-428, 485-490) keep their text; `assign_key` accepts any path today; `rotate_key`/`rotate_to_backup` keep no history.
 
 Changes:
-- Unlock runs `ensure_migrated(target=_SESSION["vault"])`.
+- Master-password unlock runs `ensure_migrated(target=_SESSION["vault"])`; token unlock never does.
 - New tools: `preview_connection(name: str, project_path: str, file: str | None = None, var: str | None = None) -> dict` [read]; `connect_key(name: str, project_path: str, file: str | None = None, var: str | None = None, confirm: list[str] | None = None) -> dict` [write and inject; name only]; `key_usage(name: str) -> dict` [read] → `{"name", "connections": [ConnectionStatus dicts]}`.
 - `assign_key` → `connect(write=False)`; `inject_env` → `sync(project=...)` (explicit keys must be connected); both refuse unregistered folders with `{"success": False, "error": "project_not_registered", "hint": "A person must add this folder as a project in Pushkey first."}`.
 - `add_key(overwrite=True)`, `rotate_key`, `rotate_to_backup` use `replace_value` then `sync` when the session has `inject` (else reply lists `"not_synced": [...]`).
 - Every reply built from core results; no value fields.
 
-- [ ] **Step 1: Failing tests**: `test_mcp_connect_key_refuses_unregistered_folder`, `test_mcp_connect_reply_has_no_value` (`json.dumps(reply)` lacks the value), `test_connect_key_takes_no_value_parameter` (`inspect.signature(mcp_mod.connect_key)` has no parameter named `value`), `test_connect_key_needs_write_and_inject` (session scopes `["read","write"]` → `scope_denied` for `inject`), `test_rotate_to_backup_syncs_connected_file`, `test_add_key_warning_text_unchanged` (substrings `"MCP client context"` and `` "pushkey add NEW_KEY" ``).
+- [ ] **Step 1: Failing tests**: `test_mcp_connect_key_refuses_unregistered_folder`, `test_mcp_assign_key_refuses_unregistered_folder` (allowlist unchanged on disk), `test_mcp_inject_env_refuses_unregistered_folder` (no `.env` written), `test_mcp_connect_reply_has_no_value` (`json.dumps(reply)` lacks the value), `test_connect_key_takes_no_value_parameter` (`inspect.signature(mcp_mod.connect_key)` has no parameter named `value`), `test_connect_key_needs_write_and_inject` (session scopes `["read","write"]` → `scope_denied` for `inject`), `test_rotate_to_backup_syncs_connected_file`, `test_add_key_warning_text_unchanged` (substrings `"MCP client context"` and `` "pushkey add NEW_KEY" ``).
 - [ ] **Step 2: Run** — FAIL; record RED.
 - [ ] **Step 3: Implement**; update `docs/mcp-setup.md` tool list.
 - [ ] **Step 4: Run** `python -m pytest tests/test_mcp_connect.py tests/test_mcp.py -q` — PASS.
@@ -315,7 +323,7 @@ Changes:
 - Shell: `_run_repl_session(vault, password, vault_key=None, scopes=None)`; every shell command goes through the same gate; token sessions cannot run `project add/remove`; split lines with `shlex.split(line, posix=(os.name != "nt"))`; `project add/assign/inject`, `inject`, `rotate` route through `pushkey_connect`.
 - `inject [--project] [--all]`: `sync(project=...)`; `--all` (master password only) connects every key with defaults first.
 - `rotate`, shell rotate, stale-warning rotate: `replace_value` + `sync`; pass `vault_key`. A token session without `inject` still rotates and prints `Not updated (token lacks inject): <project> <file>` per connection.
-- `_open_vault` runs `ensure_migrated`; prints the one-time notice text when `connect_notice` exists.
+- `_open_vault` runs `ensure_migrated` for master-password sessions only (a `ConfigUnreadableError` prints one warning line and the command still runs); prints the one-time notice text when `connect_notice` exists.
 
 - [ ] **Step 1: Failing tests**: `test_add_with_project_connects` (Namespace with `project`, `file=".env.local"`, `as_var="NEXT_PUBLIC_X"`, `yes=True`), `test_add_prompts_for_value_when_omitted` (patch `cli.getpass.getpass`), `test_cli_token_cannot_add_project` (exit code `EXIT_AUTH`), `test_shell_read_token_cannot_add_key` (`_handle_repl_command("add", ...)` with scopes `["read"]` refused, vault unchanged), `test_shell_project_add_path_with_spaces` (folder `tmp_path/"My Project"`), `test_unmapped_command_fails_closed`, `test_where_lists_states`, `test_stale_warning_rotate_saves_v3_vault` (no `VaultFormatError`).
 - [ ] **Step 2: Run** — FAIL; record RED.
@@ -323,28 +331,44 @@ Changes:
 - [ ] **Step 4: Run** `python -m pytest tests/test_cli_connect.py tests/test_cli.py tests/test_cli_agent_tokens.py -q` — PASS.
 - [ ] **Step 5: Commit** `feat: add-and-connect in the CLI; shell honours token scopes`.
 
-### Task 11: Desktop switches to the shared store (no new screens)
+### Task 11: Desktop save and reload safety, migration at login
 
 **Files:**
-- Modify: `pushkey.py` (login 1900-1974, `AppFrame.__init__` 2166-2174, `save` 2371-2373, project functions 3757-3759, 3924-3927, 4630, 6334-6366, 7134-7136, 7186-7187, 7686-8186, 8651; copy 2015-2027, 7670, 7688)
-- Test: `tests/test_desktop_projects.py` (new; FakeApp + `types.MethodType` pattern from `tests/test_ui_helpers.py:122-136`, fake `messagebox`)
+- Modify: `pushkey.py` (login 1900-1974, `AppFrame.__init__` 2166-2174, `save` 2371-2373, direct `save_config` calls 2446, 2618, 3106, 3183, 3194, 3270, 8085)
+- Test: `tests/test_desktop_save.py` (new; FakeApp + `types.MethodType` pattern from `tests/test_ui_helpers.py:122-136`, fake `messagebox`)
 
-Real shapes: see the UI mapping report sections 1.0-1.2 and risks 1-18 (empty list = every key in six places; name-prefix auto-assign in four; `self.vault`/`self.config` loaded once; `save()` writes the whole config; `VaultConflictError` never caught; CI fields on project dicts).
+Real shapes: `docs/superpowers/plans/2026-11-21-add-and-connect-shapes/ui.md` section 1.0 and risk 4: `self.vault`/`self.config` loaded once at login; `save()` writes the vault and the whole config; `VaultConflictError` never caught; config also holds `theme`, tray toggles, `sso_settings`, `cloud`.
 
 Changes:
-- After login: `ensure_migrated(vault_key=..., password=..., target=self.vault)`; show the notice dialog text when `connect_notice` exists.
-- `AppFrame.save()`: vault save catches `VaultConflictError` → reload vault from disk, `adopt_vault`, show "The vault changed in another Pushkey window or tool. It has been reloaded; please repeat your last change."; config side uses `update_config` and writes only desktop-owned keys (everything except `projects`, `projects_legacy`, `connect_schema`, `connect_notice`, `last_project`).
+- After login: `ensure_migrated(vault_key=..., password=..., target=self.vault)` (master password is the only desktop login); `ConfigUnreadableError` → one warning dialog, desktop continues; show the notice text when `connect_notice` exists.
+- `AppFrame.save()`: vault save catches `VaultConflictError` → reload vault from disk, `adopt_vault`, show "The vault changed in another Pushkey window or tool. It has been reloaded; please repeat your last change."; config side uses `update_config` and writes only desktop-owned keys (everything except `projects`, `projects_legacy`, `connect_schema`, `connect_notice`, `last_project`). The direct `save_config(self.config)` calls go through the same helper.
+
+- [ ] **Step 1: Failing tests**: `test_desktop_login_runs_migration`, `test_desktop_save_reloads_after_conflict` (external save between load and `save()` → no exception, vault reloaded, message shown via fake `messagebox`), `test_desktop_save_keeps_projects_added_elsewhere` (register a project through `register_project` after the desktop loaded config; desktop `save()` keeps it), `test_desktop_login_survives_unreadable_config`.
+- [ ] **Step 2: Run** — FAIL; record RED.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `python -m pytest tests/test_desktop_save.py tests/test_ui_helpers.py -q` — PASS.
+- [ ] **Step 5: Commit** `fix: desktop saves survive changes made by other Pushkey tools`.
+
+### Task 12: Desktop project functions use the shared store (no new screens)
+
+**Files:**
+- Modify: `pushkey.py` (project functions 3757-3759, 3924-3927, 4630, 6334-6366, 7134-7136, 7186-7187, 7686-8186, 8651; copy 2015-2027, 7670, 7688)
+- Test: `tests/test_desktop_projects.py` (new; same FakeApp pattern)
+
+Real shapes: `ui.md` sections 1.1-1.2 and risks 1-3, 5-7, 15-17 (empty list = every key in six places; name-prefix auto-assign in four; CI fields on project dicts; scans read `info["path"]`).
+
+Changes:
 - Project list, cards, scans, sync and CI sync read `registered_projects(config)` (path = dict key, title = `name`); add/remove project call `register_project` / `unregister_project` (Q5 gate message reused from `_gate`); assign dialog writes connections through `connect(write=False)`; "Sync .env" → `sync(project=...)` with the existing confirm dialog; `_auto_inject_key(s)` → `sync(key_name=...)` (connections only); remove `_auto_match_keys` callers and the "empty list = every key" branches; `inject_env_file` with an empty list raises `ValueError` instead of writing all keys; `_cli_main inject` requires `--keys`.
 - Every core call passes `target=self.vault` and reloads `self.config = load_config()` afterwards.
 - Copy changes: help text and empty-state text no longer promise automatic writes into every project.
 
-- [ ] **Step 1: Failing tests**: `test_desktop_login_runs_migration`, `test_desktop_save_reloads_after_conflict` (external save between load and `save()` → no exception, vault reloaded, message shown via fake `messagebox`), `test_desktop_save_keeps_projects_added_elsewhere` (register a project through `register_project` after the desktop loaded config; desktop `save()` keeps it), `test_add_key_no_longer_writes_unassigned_projects` (project with no connections gets no file), `test_project_scan_roots_use_registry_paths`, `test_inject_env_file_refuses_empty_list`.
+- [ ] **Step 1: Failing tests**: `test_add_key_no_longer_writes_unassigned_projects` (project with no connections gets no file), `test_project_scan_roots_use_registry_paths`, `test_inject_env_file_refuses_empty_list`, `test_assign_dialog_writes_connections`, `test_remove_project_drops_connections`.
 - [ ] **Step 2: Run** — FAIL; record RED.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `python -m pytest tests/test_desktop_projects.py tests/test_ui_helpers.py tests/test_env_injection.py tests/test_multi_project.py -q` — PASS.
 - [ ] **Step 5: Commit** `feat: desktop uses the shared project store`.
 
-### Task 12: Desktop screens (add-key connect section, "Used in", notice)
+### Task 13: Desktop screens (add-key connect section, "Used in", notice)
 
 **Files:**
 - Modify: `pushkey.py` (`_show_add_key_modal` 5775-5845, `add_key` 5847-5890, `_render_expand_panel` 5402-5561)
@@ -362,7 +386,7 @@ Changes (layout per the mockup artboard 1 and `make_btn`/`field` style at 1315-1
 - [ ] **Step 4: Run** `python -m pytest tests/test_desktop_projects.py tests/test_ui_helpers.py -q` — PASS.
 - [ ] **Step 5: Commit** `feat: desktop add-and-connect screens`.
 
-### Task 13: Web app screens and bundle
+### Task 14: Web app screens and bundle
 
 **Files:**
 - Modify: `web-app/src/lib/api.ts`, `web-app/src/components/vault-tab.tsx`, `web-app/src/components/projects-tab.tsx`, `web-app/src/app/page.tsx` (notice), `web-app/tests/e2e/support/mock-local-api.ts`
@@ -382,7 +406,7 @@ Changes (per the mockup artboard 1):
 - [ ] **Step 3: Run** `python -m pytest tests/test_local_contracts.py tests/test_local_api_contract_static.py tests/test_web_app_accessibility_static.py tests/test_web_app_states.py tests/test_web_app_security.py tests/test_local_api.py -q` — PASS; run the two Playwright specs — PASS; screenshot the add-key form and a "Used in" row from `npm run dev` against the mock API and attach.
 - [ ] **Step 4: Commit** source + `pushkey_web/out` + `pushkey_web/_manifest.py` together: `feat: add-and-connect screens in the web app`.
 
-### Task 14: Documentation and whole-branch check
+### Task 15: Documentation and whole-branch check
 
 **Files:**
 - Modify: `AGENTS.md` (MCP policy table gains `connect_key`; test baseline line), `README.md` (CLI usage), `docs/mcp-setup.md` (if not done in Task 9), `docs/local-api-v1.md` (if not done in Task 8)

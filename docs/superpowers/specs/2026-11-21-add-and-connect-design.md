@@ -205,7 +205,18 @@ desktop writes the old shape after migration. (my calls)
    `projects[canonical(path)]` with `name`, `environment = target_env`,
    `default_file = ".env"`. For each key in its `keys`, add the path to that key's
    `projects`. Then turn every assignment in the vault (desktop or CLI/web/MCP)
-   into an explicit connection `{file: ".env", var: KEY}` (5.1).
+   into an explicit connection `{file: ".env", var: KEY}` (5.1). For desktop
+   entries, only keys that passed the desktop's environment filter (project
+   `target_env` is `all`, or the key's `env` is `all` or equal to it) are
+   connected; the rest were never written by the desktop, so they stay
+   unconnected and are listed in the notice. (plan restatement, 2026-11-21)
+
+   Only a master-password session runs the migration. Agent-token and recovery
+   sessions never write during unlock; until the store is migrated, their
+   connect, assign, inject and sync calls answer "migration pending: open
+   Pushkey with your master password once". A damaged or busy `config.json`
+   never blocks unlock or key reads; migration is skipped for that unlock and
+   only the project features refuse. (plan restatement, 2026-11-21)
 2. An entry with an empty `keys` list (today: "receives every key"): **owner
    decision Q1**. Whatever the answer, the one-time notice shows in the desktop,
    the web app and the CLI, not only the desktop.
@@ -241,10 +252,14 @@ Shared by every entry point; no UI code.
   reason; `sync` retries it. The vault is never rolled back because of a file
   failure, the same rule `_persist_project_state` follows in
   `pushkey_local_api.py`.
-  `pushkey_connect` owns the reload-change-save cycle under the vault lock; it
-  never saves a caller's stale in-memory copy. On a vault conflict it reloads
-  and retries once, then fails with "the vault changed elsewhere; try again".
-  (my call)
+  `pushkey_connect` owns the reload-change-save cycle; it never saves a caller's
+  stale in-memory copy. It reloads the vault, applies the change and saves;
+  `save_vault` checks the file's revision under its own lock and refuses a
+  stale copy. On that conflict it reloads and retries once, then fails with
+  "the vault changed elsewhere; try again". It does not hold the vault lock
+  across the cycle: the existing lock is not re-entrant, and nesting it around
+  `save_vault` deadlocks for 5 seconds (probed). (my call; plan restatement,
+  2026-11-21)
 - `sync(session, key_name=None, project=None)`: rewrite connected variables.
   Every entry point calls it after rotate, rotate-to-backup and promote.
   Whether it asks first is **owner decision Q2**. When the caller is an agent
@@ -281,10 +296,13 @@ managed variables, keep every other line, add new lines under
   file is committed to git; Pushkey will not write secrets into it". (my call)
 - Never write `.env.example`, `.env.sample` or `.env.template`; they are usually
   committed. They are read-only inputs for suggestions. (my call)
-- Gitignore: in a git repo, ask git (`git check-ignore -q <file>`); if the file is
-  not ignored, append its exact relative path to the root `.gitignore`. Without
-  git, check for an exact line or a `.env*` pattern and append the exact path when
-  missing. (my call)
+- Gitignore: the project's own `.gitignore` always lists the file. A line covers
+  it when it equals the relative path (with or without a leading `/`), or has no
+  `/` and matches the file name as a pattern (`.env*`); otherwise Pushkey
+  appends the exact relative path. Git itself is used only to refuse files it
+  already tracks. Asking `git check-ignore` was dropped: it answers from the
+  enclosing repository, which may not be the project's. (my call; plan
+  restatement, 2026-11-21)
 - Backups of a file before Pushkey changes it go outside the project, to
   `~/.pushkey/env-backups/<project id>/`, the last 3 per file. That removes the
   `.env.pushkey_backup_*` files from projects (the bug in section 2). (my call)
@@ -320,8 +338,10 @@ Phase 1
   `DELETE /api/connections` [write], `GET /api/connections?key=|project=` [read],
   `POST /api/connections/sync` [inject]. `POST /api/keys` accepts an optional
   `connect` object so one call does both.
-- **CLI**: `pushkey add NAME [--project PATH] [--file F] [--as VAR] [--yes]`
-  (value asked with getpass when left out, as today), `pushkey connect NAME
+- **CLI**: `pushkey add NAME [VALUE] [--project PATH] [--file F] [--as VAR] [--yes]`
+  (VALUE becomes optional and is asked with getpass when left out; today it is
+  required, which contradicts the MCP warning that already tells people to run
+  `pushkey add NAME`), `pushkey connect NAME
   --project PATH [--file F] [--as VAR]`, `pushkey where NAME`,
   `pushkey sync [NAME]`, and the same in the shell. `inject` stays.
 - **MCP**: `preview_connection(name, project_path, file=None, var=None)`,
