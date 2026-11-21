@@ -40,15 +40,23 @@ def bounded_file_lock(path: Path, *, timeout_seconds: float = 5.0, poll_seconds:
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
+    # Unbuffered, so a refused write of the initial byte leaves nothing pending in
+    # a buffer that a later seek or close would try (and fail) to flush again.
+    handle = path.open("a+b", buffering=0)
     acquired = False
 
     try:
         _enforce_private_mode(path)
         handle.seek(0, 2)
         if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
+            try:
+                handle.write(b"\0")
+            except OSError as error:
+                # Another holder created the file, wrote the byte and locked it
+                # between our size check and this write; the byte exists, so wait
+                # for the lock below instead of failing. Anything else is real.
+                if not _is_lock_contention(error):
+                    raise
         handle.seek(0)
 
         deadline = time.monotonic() + timeout_seconds
