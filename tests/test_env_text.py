@@ -215,6 +215,9 @@ def test_apply_keeps_indentation_and_export_spacing_and_normalises_the_equals():
     new_text, _, updated = apply_env_assignments(text, {"A": "x", "B": "y", "C": "z"})
     assert new_text == "  A=x\n\texport B=y\nexport   C=z\n"
     assert updated == ["A", "B", "C"]
+    # the value after the equals sign goes, with any comment that followed it
+    new_text, _, _ = apply_env_assignments("A=1 # note\nB=\"x y\" # why\n", {"A": "2", "B": "3"})
+    assert new_text == "A=2\nB=3\n"
 
 
 def test_apply_replaces_every_duplicate_and_counts_it_once():
@@ -261,6 +264,7 @@ def test_apply_with_no_assignments_only_ends_the_text_with_a_newline():
     assert apply_env_assignments("A=1", {}) == ("A=1\n", [], [])
     assert apply_env_assignments("\ufeffA=1\r\n", {}) == ("\ufeffA=1\r\n", [], [])
     assert apply_env_assignments("A=1\n", {})[0] == "A=1\n"
+    assert apply_env_assignments("", {}) == ("", [], [])  # an empty file stays empty
 
 
 def test_apply_rejects_names_and_values_that_would_break_the_file():
