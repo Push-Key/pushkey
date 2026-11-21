@@ -52,30 +52,150 @@ def sanitize_env_value(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
 
 
+#: Line Pushkey puts above the variables it appends to an env file.
+MANAGED_HEADER = "# Managed by Pushkey"
+
+# One assignment line, already split from its line ending: optional indent and
+# `export`, the name in its original case, and the value text without the
+# whitespace around it. `prefix` is everything before the name.
+_ASSIGNMENT_LINE = re.compile(
+    r"^(?P<prefix>\s*(?P<export>export\s+)?)"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*$"
+)
+_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_DOUBLE_QUOTE_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_DOUBLE_QUOTE_DECODED = {"\\": "\\", '"': '"', "n": "\n", "r": "\r"}
+
+
 @dataclass(frozen=True)
 class EnvLine:
+    """One `NAME=value` line of an env file.
+
+    `index` is the 0-based line number (lines end at `\\n` or `\\r\\n`), `value_text`
+    the text after the `=` as written (still quoted, whitespace around it removed).
+    """
+
     index: int
     name: str
     value_text: str
     export: bool
 
 
+def _split_env_text(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split env text into (bom, [(line without its ending, its ending)]).
+
+    Only `\\n` ends a line, and a `\\r` just before it belongs to the ending, so a
+    separator such as `\\x0c` or `\\u2028` inside a value never splits a line (that is
+    what `str.splitlines` would do). The last line has an empty ending when the text
+    does not end with a newline.
+    """
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    pieces = text[len(bom):].split("\n")
+    last = pieces.pop()  # what follows the final "\n"; "" when the text ends with one
+    lines = [
+        (piece[:-1], "\r\n") if piece.endswith("\r") else (piece, "\n")
+        for piece in pieces
+    ]
+    if last:
+        lines.append((last, ""))
+    return bom, lines
+
+
 def parse_env_lines(text: str) -> list[EnvLine]:
-    return []
+    """Every assignment line of `text`, names in their original case.
+
+    Understands `export NAME=...` and indented lines; a leading BOM is ignored.
+    Comments and lines that are not assignments are skipped, and a name that
+    appears on several lines gives several entries.
+    """
+    _bom, lines = _split_env_text(text)
+    found: list[EnvLine] = []
+    for index, (content, _ending) in enumerate(lines):
+        match = _ASSIGNMENT_LINE.match(content)
+        if match:
+            found.append(
+                EnvLine(
+                    index=index,
+                    name=match["name"],
+                    value_text=match["value"],
+                    export=match["export"] is not None,
+                )
+            )
+    return found
 
 
 def decode_env_value(value_text: str) -> str:
-    return ""
+    """The value a `value_text` stands for (the inverse of `format_env_value`).
+
+    Double quotes: `\\\\`, `\\"`, `\\n` and `\\r` are decoded in one left-to-right pass
+    and any other backslash is kept. Single quotes are literal. Anything else is
+    returned as it is.
+    """
+    if len(value_text) >= 2 and value_text[0] == value_text[-1]:
+        inner = value_text[1:-1]
+        if value_text[0] == '"':
+            return _DOUBLE_QUOTE_ESCAPE.sub(
+                lambda m: _DOUBLE_QUOTE_DECODED.get(m.group(1), m.group(0)), inner
+            )
+        if value_text[0] == "'":
+            return inner
+    return value_text
 
 
 def render_connected_value(value: object) -> str:
-    return ""
+    """The text written after `NAME=` for `value`: the one transform used to write and to compare."""
+    return format_env_value(sanitize_env_value(value))
 
 
 def apply_env_assignments(
     text: str, assignments: Mapping[str, str]
 ) -> tuple[str, list[str], list[str]]:
-    return "", [], []
+    """Set variables in env `text`; returns `(new_text, added_vars, updated_vars)`.
+
+    `assignments` maps a variable name to its value text, already rendered with
+    `render_connected_value`. Every line of an assigned variable is rewritten as
+    `<indent>[export ]NAME=value` (its own line ending is kept); the variable is
+    listed once in `updated_vars` even when it sits on several lines or already
+    holds that value. Variables not in the text are appended under a single
+    `# Managed by Pushkey` header, which is only added when it is not there yet.
+    Every other line is kept exactly. A BOM is kept, new lines use `\\r\\n` when the
+    text contains one and `\\n` otherwise, and a non-empty result ends with a
+    newline. Both lists follow the order of `assignments`.
+
+    Raises ValueError for a name that is not `[A-Za-z_][A-Za-z0-9_]*` or a value
+    with a line break (the message names the variable, never the value).
+    """
+    for name, value in assignments.items():
+        if not _VAR_NAME.fullmatch(name):
+            raise ValueError(f"invalid environment variable name: {name!r}")
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"value for {name} contains a line break; render it first")
+
+    bom, lines = _split_env_text(text)
+    eol = "\r\n" if "\r\n" in text else "\n"
+
+    found: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for content, ending in lines:
+        match = _ASSIGNMENT_LINE.match(content)
+        if match and match["name"] in assignments:
+            name = match["name"]
+            found.add(name)
+            content = f"{match['prefix']}{name}={assignments[name]}"
+        out.append((content, ending))
+    if out and not out[-1][1]:
+        out[-1] = (out[-1][0], eol)
+
+    added = [name for name in assignments if name not in found]
+    updated = [name for name in assignments if name in found]
+    if added:
+        if not any(content.strip() == MANAGED_HEADER for content, _ending in out):
+            if out and out[-1][0].strip():
+                out.append(("", eol))
+            out.append((MANAGED_HEADER, eol))
+        out.extend((f"{name}={assignments[name]}", eol) for name in added)
+
+    return bom + "".join(content + ending for content, ending in out), added, updated
 
 
 def project_id(project: Path) -> str:

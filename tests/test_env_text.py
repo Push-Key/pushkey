@@ -45,7 +45,7 @@ def test_parse_reports_index_value_text_and_export():
 
 
 def test_parse_ignores_a_leading_bom_and_non_assignments():
-    text = "﻿A=1\n# B=2\nC D=3\n1E=4\nexport F\nexport=5\nexportG=6\n"
+    text = "\ufeffA=1\n# B=2\nC D=3\n1E=4\nexport F\nexport=5\nexportG=6\n"
     lines = parse_env_lines(text)
     assert [(line.index, line.name, line.export) for line in lines] == [
         (0, "A", False),
@@ -56,12 +56,12 @@ def test_parse_ignores_a_leading_bom_and_non_assignments():
 
 
 def test_parse_splits_on_newline_only():
-    # \x0c, \x85 and   are line breaks for str.splitlines but not for env files.
-    text = "A=a\x0cb\nB=c d\nC=e\x85f\n"
+    # \x0c, \x85 and \u2028 are line breaks for str.splitlines but not for env files.
+    text = "A=a\x0cb\nB=c\u2028d\nC=e\x85f\n"
     lines = parse_env_lines(text)
     assert [(line.index, line.name, line.value_text) for line in lines] == [
         (0, "A", "a\x0cb"),
-        (1, "B", "c d"),
+        (1, "B", "c\u2028d"),
         (2, "C", "e\x85f"),
     ]
 
@@ -131,7 +131,7 @@ def test_render_is_the_one_transform_for_writing_and_comparing():
 
 
 def test_render_then_parse_survives_unusual_line_separators():
-    for v in ["a\x0cb", "a b", "a\x85b", "tab\there", "x\x0b"]:
+    for v in ["a\x0cb", "a\u2028b", "a\x85b", "tab\there", "x\x0b"]:
         rendered = render_connected_value(v)
         lines = parse_env_lines("K=" + rendered + "\n")
         assert [line.value_text for line in lines] == [rendered], repr(v)
@@ -142,9 +142,9 @@ def test_render_then_parse_survives_unusual_line_separators():
 
 
 def test_apply_assignments_keeps_crlf_bom_export_and_dupes():
-    text = "﻿export A=1\r\nB=2\r\nA=old\r\n"
+    text = "\ufeffexport A=1\r\nB=2\r\nA=old\r\n"
     new_text, added, updated = apply_env_assignments(text, {"A": "9", "C": "3"})
-    assert new_text == "﻿export A=9\r\nB=2\r\nA=9\r\n\r\n# Managed by Pushkey\r\nC=3\r\n"
+    assert new_text == "\ufeffexport A=9\r\nB=2\r\nA=9\r\n\r\n# Managed by Pushkey\r\nC=3\r\n"
     assert added == ["C"]
     assert updated == ["A"]
 
@@ -183,8 +183,8 @@ def test_apply_to_empty_text_starts_with_the_header():
 
 
 def test_apply_to_a_bom_only_file_keeps_the_bom():
-    text, added, _ = apply_env_assignments("﻿", {"A": "1"})
-    assert text == "﻿# Managed by Pushkey\nA=1\n"
+    text, added, _ = apply_env_assignments("\ufeff", {"A": "1"})
+    assert text == "\ufeff# Managed by Pushkey\nA=1\n"
     assert added == ["A"]
 
 
@@ -259,7 +259,7 @@ def test_apply_leaves_a_lone_carriage_return_inside_the_line():
 
 def test_apply_with_no_assignments_only_ends_the_text_with_a_newline():
     assert apply_env_assignments("A=1", {}) == ("A=1\n", [], [])
-    assert apply_env_assignments("﻿A=1\r\n", {}) == ("﻿A=1\r\n", [], [])
+    assert apply_env_assignments("\ufeffA=1\r\n", {}) == ("\ufeffA=1\r\n", [], [])
     assert apply_env_assignments("A=1\n", {})[0] == "A=1\n"
 
 
@@ -286,7 +286,7 @@ def test_apply_then_parse_and_decode_gives_back_the_values():
         "BREAK": "l1\nl2",
     }
     assignments = {name: render_connected_value(v) for name, v in values.items()}
-    text, added, _ = apply_env_assignments("﻿X=1\r\n", assignments)
+    text, added, _ = apply_env_assignments("\ufeffX=1\r\n", assignments)
     assert added == list(values)
     parsed = {line.name: decode_env_value(line.value_text) for line in parse_env_lines(text)}
     assert parsed == {"X": "1", **{n: sanitize_env_value(v) for n, v in values.items()}}
