@@ -217,9 +217,13 @@ def mutate_env_file(
     skipped = [name for name in selected_names if name in selected and name in existing_keys and not update_existing]
     if write:
         ensure_gitignore_env(project, write=True, atomic_write=atomic_write)
-        if backup_existing and env_path.exists():
-            backup_env_file(project, ".env", env_path.read_bytes())
         data = ("\n".join(new_lines) + "\n").encode("utf-8")
+        if backup_existing and env_path.exists():
+            previous = env_path.read_bytes()
+            # Only a change needs a backup: an idempotent re-run must not push
+            # the user's real earlier file out of the few kept backups.
+            if previous != data:
+                backup_env_file(project, ".env", previous)
         if atomic_write:
             atomic_write(".env", data)
         else:
