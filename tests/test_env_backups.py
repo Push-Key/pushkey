@@ -128,3 +128,21 @@ def test_backup_names_stay_ordered_when_the_clock_stalls(tmp_path: Path, monkeyp
 
     # The newest three survive even though every call saw the same clock reading.
     assert _contents(project, r".*\.bak") == [b"V3", b"V4", b"V5"]
+
+
+def test_unchanged_write_takes_no_backup(tmp_path: Path):
+    project = _project(tmp_path)
+
+    # Writing what the file already holds is not a change: nothing to back up.
+    _write(project, "1")
+    assert sorted(_backup_dir(project).glob("*.bak")) == []
+
+    # The first real change backs up the user's original file ...
+    _write(project, "2")
+    assert _contents(project, r".*\.bak") == [b"A=1\n"]
+
+    # ... and idempotent re-runs must not push that backup out of the 3 slots.
+    for _ in range(4):
+        _write(project, "2")
+    assert _contents(project, r".*\.bak") == [b"A=1\n"]
+    assert (project / ".env").read_bytes() == b"A=2\n"
