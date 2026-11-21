@@ -78,16 +78,14 @@ def _safe_health_paths(path, *, create_parent):
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HealthPathError() from exc
-    # This detects accidental/hostile path substitution.  A same-account
-    # attacker can still race path operations on platforms without dir_fd
-    # support; that cannot be eliminated portably, so checks are repeated.
-    ancestor = parent
-    while True:
-        if _is_link_or_reparse(ancestor):
-            raise HealthPathError()
-        if ancestor.parent == ancestor:
-            break
-        ancestor = ancestor.parent
+    # This detects accidental/hostile path substitution of the paths Pushkey
+    # owns: the sidecar's directory (~/.pushkey), the sidecar, and its lock.
+    # Links above that directory are the operating system's or the user's
+    # layout (macOS /var -> /private/var, Fedora Silverblue /home -> /var/home)
+    # and are deliberately not checked; rejecting them made `pushkey init` fail
+    # on those systems. A same-account attacker can still race path operations
+    # on platforms without dir_fd support; that cannot be eliminated portably,
+    # so checks are repeated.
     try:
         parent_is_dir = parent.is_dir()
     except OSError as exc:

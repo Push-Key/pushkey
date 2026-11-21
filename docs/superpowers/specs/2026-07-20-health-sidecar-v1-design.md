@@ -325,14 +325,18 @@ On Windows:
   owner-only ACL;
 - paths are inspected for `FILE_ATTRIBUTE_REPARSE_POINT` before opening and
   again before replacement;
-- existing reparse destinations, parents, or lock paths fail publication; and
+- existing reparse destinations, parent directories (the sidecar's own
+  directory, not directories above it), or lock paths fail publication; and
 - inability to establish reparse status fails publication.
 
 The sidecar is local-sensitive derived metadata, not a security boundary
 against another malicious process already running as the same operating-system
 user. Standard path APIs cannot eliminate every same-account time-of-check to
 time-of-use race on both platforms. CP1 guarantees bounded writes, unique
-temporary files, adjacent locking, no intentional link traversal, repeated
+temporary files, adjacent locking, no intentional link traversal at the paths
+Pushkey owns (the sidecar's directory, the sidecar, and its lock; links above
+that directory belong to the operating system or the user's layout and are not
+checked), repeated
 identity checks, and preservation against ordinary crashes and concurrent
 Pushkey writers. Tests and documentation must not claim stronger hostile-user
 isolation.

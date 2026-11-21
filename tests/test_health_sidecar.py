@@ -323,6 +323,72 @@ def test_health_paths_reject_symlinks(tmp_path, kind):
     assert external.read_text() == "unchanged"
 
 
+def _link_directory(link, target):
+    """Directory link: a junction on Windows (needs no privilege), a symlink elsewhere."""
+    if os.name == "nt":
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True, text=True, check=False,
+        )
+        if created.returncode:
+            pytest.skip("Windows junction creation is unavailable in this environment")
+    else:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+
+def test_health_paths_allow_a_linked_ancestor_above_the_pushkey_directory(tmp_path):
+    # OS-level links above ~/.pushkey (macOS /var -> /private/var, Fedora Silverblue
+    # /home -> /var/home) must not block publication or invalidation. Links at the
+    # Pushkey directory, the sidecar, or its lock are still rejected (tests above).
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    real_home = tmp_path / "real-home"
+    (real_home / ".pushkey").mkdir(parents=True)
+    linked_home = tmp_path / "linked-home"
+    _link_directory(linked_home, real_home)
+    path = linked_home / ".pushkey" / "health.json"
+
+    written, rejected = None, None
+    try:
+        written = write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    except HealthPathError as exc:
+        rejected = exc
+    assert rejected is None, f"a link above the Pushkey directory was rejected: {rejected}"
+
+    assert written["schema_version"] == 1
+    assert (real_home / ".pushkey" / "health.json").exists()
+    invalidate_health_sidecar(path, expected_vault_revision=revision)
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junctions are reparse points")
+@pytest.mark.parametrize("kind", ["destination", "lock"])
+def test_health_paths_reject_windows_junction_destination_and_lock(tmp_path, kind):
+    # Symlinks need a privilege on Windows (so the symlink cases above skip there,
+    # including on the Windows CI runner); junctions do not, and are reparse points.
+    import hashlib
+    import pushkey_shared as shared
+    shared.VAULT_FILE.write_bytes(b"encrypted vault")
+    revision = hashlib.sha256(shared.VAULT_FILE.read_bytes()).digest()
+    target = tmp_path / "elsewhere"; target.mkdir()
+    path = tmp_path / "health.json"
+    _link_directory(path if kind == "destination" else tmp_path / ".health.lock", target)
+
+    error = None
+    try:
+        write_health_sidecar({}, path, generated_at=NOW, expected_vault_revision=revision)
+    except HealthUnavailableError as exc:
+        error = exc
+    # The path guard must refuse it up front, not a later step failing on the link.
+    assert str(error) == "health_path_unsafe", f"a junction at the {kind} path was not refused by the guard: {error!r}"
+    assert list(target.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junctions are reparse points")
 def test_health_paths_reject_windows_junction_parent(tmp_path):
     import hashlib
