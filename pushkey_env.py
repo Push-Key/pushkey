@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,10 +35,11 @@ class EnvMutationResult:
         return len(self.injected_names) + len(self.updated_names)
 
 
-def format_env_value(value: object) -> str:
+def format_env_value(value: object, *, force_quote: bool = False) -> str:
     value = str(value) if value is not None else ""
     needs_quotes = (
-        not value
+        force_quote
+        or not value
         or value[0].isspace()
         or value[-1].isspace()
         or any(ch in value for ch in ("\n", "\r", "\t", " ", "#", '"'))
@@ -50,6 +52,15 @@ def format_env_value(value: object) -> str:
 
 def sanitize_env_value(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
+
+
+def normalize_env_value(value: object) -> str:
+    """`value` as it is kept in an env file: None is the empty string, line breaks are dropped.
+
+    Writing a connected variable (`render_connected_value`) and comparing it with what
+    the file holds (`decode_env_value(line.value_text)`) must both start from this.
+    """
+    return "" if value is None else sanitize_env_value(value)
 
 
 #: Line Pushkey puts above the variables it appends to an env file.
@@ -65,6 +76,11 @@ _ASSIGNMENT_LINE = re.compile(
 _VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DOUBLE_QUOTE_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
 _DOUBLE_QUOTE_DECODED = {"\\": "\\", '"': '"', "n": "\n", "r": "\r"}
+_INLINE_COMMENT = re.compile(r"\s#")  # a hash after whitespace starts a comment in an unquoted value
+_BARE_CR = re.compile(r"\r(?!\n)")  # a CR that is not the first half of CRLF
+# A value that starts or ends with one of these is read as (part of) a quoted string by
+# some loaders (python-dotenv, Node) when written bare, so it is always double-quoted.
+_QUOTE_CHARS = "'\"`"
 
 
 @dataclass(frozen=True)
@@ -72,7 +88,9 @@ class EnvLine:
     """One `NAME=value` line of an env file.
 
     `index` is the 0-based line number (lines end at `\\n` or `\\r\\n`), `value_text`
-    the text after the `=` as written (still quoted, whitespace around it removed).
+    the text after the `=` as written (still quoted, whitespace around it removed). For
+    a double-quoted value that runs over several lines it is the text on the first
+    line only; the other lines belong to that value and are not reported.
     """
 
     index: int
@@ -101,50 +119,104 @@ def _split_env_text(text: str) -> tuple[str, list[tuple[str, str]]]:
     return bom, lines
 
 
+def _closing_quote_index(text: str, start: int = 0) -> int:
+    """Index of the first double quote in `text[start:]` that a backslash does not escape, or -1.
+
+    A backslash escapes the character after it, so `\\"` is not a closing quote but the
+    `"` after an escaped backslash (`\\\\"`) is.
+    """
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i
+        else:
+            i += 1
+    return -1
+
+
+def _assignment_spans(lines: list[tuple[str, str]]):
+    """Yield `(first, last, match)` for each assignment of the split `lines`.
+
+    `lines[first:last + 1]` hold its value: more than one line when a double-quoted
+    value is still open at the end of its line and a later line closes it. Lines inside
+    such a value are never matched as assignments. When no later line holds a closing
+    quote the value is not treated as multi-line (python-dotenv and Node also keep the
+    following lines live then).
+    """
+    closers = [i for i, (content, _ending) in enumerate(lines) if _closing_quote_index(content) >= 0]
+    i = 0
+    while i < len(lines):
+        match = _ASSIGNMENT_LINE.match(lines[i][0])
+        if not match:
+            i += 1
+            continue
+        last = i
+        value = match["value"]
+        if value.startswith('"') and _closing_quote_index(value, 1) < 0:
+            later = bisect_right(closers, i)
+            if later < len(closers):
+                last = closers[later]
+        yield i, last, match
+        i = last + 1
+
+
 def parse_env_lines(text: str) -> list[EnvLine]:
     """Every assignment line of `text`, names in their original case.
 
     Understands `export NAME=...` and indented lines; a leading BOM is ignored.
     Comments and lines that are not assignments are skipped, and a name that
-    appears on several lines gives several entries.
+    appears on several lines gives several entries. The lines inside a multi-line
+    double-quoted value are not assignments and are not reported.
     """
     _bom, lines = _split_env_text(text)
-    found: list[EnvLine] = []
-    for index, (content, _ending) in enumerate(lines):
-        match = _ASSIGNMENT_LINE.match(content)
-        if match:
-            found.append(
-                EnvLine(
-                    index=index,
-                    name=match["name"],
-                    value_text=match["value"],
-                    export=match["export"] is not None,
-                )
-            )
-    return found
+    return [
+        EnvLine(
+            index=first,
+            name=match["name"],
+            value_text=match["value"],
+            export=match["export"] is not None,
+        )
+        for first, _last, match in _assignment_spans(lines)
+    ]
 
 
 def decode_env_value(value_text: str) -> str:
     """The value a `value_text` stands for (the inverse of `format_env_value`).
 
-    Double quotes: `\\\\`, `\\"`, `\\n` and `\\r` are decoded in one left-to-right pass
-    and any other backslash is kept. Single quotes are literal. Anything else is
-    returned as it is.
+    A double-quoted value ends at its first unescaped closing quote (what follows is
+    ignored); inside, `\\\\`, `\\"`, `\\n` and `\\r` are decoded in one left-to-right pass and
+    any other backslash is kept. A single-quoted value is literal up to the next `'`. An
+    unquoted value is cut at the first `#` that follows whitespace and loses its trailing
+    whitespace. A value that opens a quote it never closes is read as unquoted text.
     """
-    if len(value_text) >= 2 and value_text[0] == value_text[-1]:
-        inner = value_text[1:-1]
-        if value_text[0] == '"':
+    if value_text.startswith('"'):
+        end = _closing_quote_index(value_text, 1)
+        if end >= 0:
             return _DOUBLE_QUOTE_ESCAPE.sub(
-                lambda m: _DOUBLE_QUOTE_DECODED.get(m.group(1), m.group(0)), inner
+                lambda m: _DOUBLE_QUOTE_DECODED.get(m.group(1), m.group(0)), value_text[1:end]
             )
-        if value_text[0] == "'":
-            return inner
-    return value_text
+    elif value_text.startswith("'"):
+        end = value_text.find("'", 1)
+        if end >= 0:
+            return value_text[1:end]
+    comment = _INLINE_COMMENT.search(value_text)
+    if comment:
+        value_text = value_text[: comment.start()]
+    return value_text.rstrip()
 
 
 def render_connected_value(value: object) -> str:
-    """The text written after `NAME=` for `value`: the one transform used to write and to compare."""
-    return format_env_value(sanitize_env_value(value))
+    """The text written after `NAME=` for `value`: the one transform used to write and to compare.
+
+    The value goes through `normalize_env_value` (None is empty, line breaks dropped) and
+    `format_env_value`, except that a value starting or ending with `'`, `"` or a
+    backtick is always double-quoted so no loader reads it as an open string.
+    """
+    text = normalize_env_value(value)
+    edge_quote = bool(text) and (text[0] in _QUOTE_CHARS or text[-1] in _QUOTE_CHARS)
+    return format_env_value(text, force_quote=edge_quote)
 
 
 def apply_env_assignments(
@@ -154,35 +226,45 @@ def apply_env_assignments(
 
     `assignments` maps a variable name to its value text, already rendered with
     `render_connected_value`. Every line of an assigned variable is rewritten as
-    `<indent>[export ]NAME=value` (its own line ending is kept); the variable is
-    listed once in `updated_vars` even when it sits on several lines or already
-    holds that value. Variables not in the text are appended under a single
-    `# Managed by Pushkey` header, which is only added when it is not there yet.
-    Every other line is kept exactly. A BOM is kept, new lines use `\\r\\n` when the
-    text contains one and `\\n` otherwise, and a non-empty result ends with a
-    newline. Both lists follow the order of `assignments`.
+    `<indent>[export ]NAME=value` (its own line ending is kept); a value that runs over
+    several lines is replaced as a whole. The variable is listed once in `updated_vars`
+    even when it sits on several lines or already holds that value. Variables not in the
+    text are appended under a single `# Managed by Pushkey` header, which is only added
+    when it is not there yet. Every other line is kept exactly, including the lines of a
+    multi-line quoted value, which are never taken for assignments. A BOM is kept, new
+    lines use `\\r\\n` when the text contains it and `\\n` otherwise, and the result ends
+    with a newline. With no assignments the text comes back untouched. Both lists follow
+    the order of `assignments`.
 
-    Raises ValueError for a name that is not `[A-Za-z_][A-Za-z0-9_]*` or a value
-    with a line break (the message names the variable, never the value).
+    Raises ValueError for a name that is not `[A-Za-z_][A-Za-z0-9_]*`, a value with a
+    line break (the message names the variable, never the value), or text with a bare
+    CR line ending (a CR not followed by LF), which this function cannot rewrite safely.
     """
     for name, value in assignments.items():
         if not _VAR_NAME.fullmatch(name):
             raise ValueError(f"invalid environment variable name: {name!r}")
         if "\n" in value or "\r" in value:
             raise ValueError(f"value for {name} contains a line break; render it first")
+    if not assignments:
+        return text, [], []
+    if _BARE_CR.search(text):
+        raise ValueError("env file has bare CR line endings")
 
     bom, lines = _split_env_text(text)
     eol = "\r\n" if "\r\n" in text else "\n"
 
     found: set[str] = set()
     out: list[tuple[str, str]] = []
-    for content, ending in lines:
-        match = _ASSIGNMENT_LINE.match(content)
-        if match and match["name"] in assignments:
-            name = match["name"]
-            found.add(name)
-            content = f"{match['prefix']}{name}={assignments[name]}"
-        out.append((content, ending))
+    cursor = 0
+    for first, last, match in _assignment_spans(lines):
+        name = match["name"]
+        if name not in assignments:
+            continue
+        found.add(name)
+        out.extend(lines[cursor:first])
+        out.append((f"{match['prefix']}{name}={assignments[name]}", lines[last][1]))
+        cursor = last + 1
+    out.extend(lines[cursor:])
     if out and not out[-1][1]:
         out[-1] = (out[-1][0], eol)
 
