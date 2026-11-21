@@ -549,6 +549,35 @@ def test_tracked_file_is_found_under_a_different_case_folder(project):
     assert _tracked(project, "Apps/.env.other") is False
 
 
+def test_tracked_file_found_when_folder_case_differs_on_disk(project):
+    # The usual case-only rename in Explorer: git (core.ignorecase=true) does not
+    # record it, so the index still says apps/ while the disk says Apps/. A
+    # pathspec on the on-disk folder name finds nothing in the index.
+    if not _filesystem_ignores_case(project):
+        pytest.skip("case-sensitive file system: Apps and apps are different folders")
+    _commit_env_files(project, "apps/.env.local")
+    _git(project, "config", "core.ignorecase", "true")
+    (project / "apps").rename(project / "Apps")
+    assert "Apps" in os.listdir(project)
+    for variant in ("apps/.env.local", "Apps/.env.local", "APPS/.ENV.LOCAL"):
+        assert _tracked(project, variant) is True, variant
+    assert _tracked(project, "Apps/.env.other") is False
+    assert _tracked(project, "apps/.env.other") is False
+
+
+def test_tracked_file_found_by_the_given_spelling_when_git_matches_case_and_the_folder_was_renamed(project):
+    # core.ignorecase=false: git compares case-sensitively, so only the spelling
+    # the index holds can match, and that is the one the caller gave.
+    if not _filesystem_ignores_case(project):
+        pytest.skip("case-sensitive file system: Apps and apps are different folders")
+    _commit_env_files(project, "apps/.env.local")
+    _git(project, "config", "core.ignorecase", "false")
+    (project / "apps").rename(project / "Apps")
+    assert "Apps" in os.listdir(project)
+    assert _tracked(project, "apps/.env.local") is True
+    assert _tracked(project, "apps/.env.other") is False
+
+
 def test_tracked_file_is_found_under_a_different_case_file_name(project):
     if not _filesystem_ignores_case(project):
         pytest.skip("case-sensitive file system: .env.LOCAL and .env.local are different files")
@@ -633,6 +662,8 @@ GITIGNORE_ROWS = [
     ("negated class", b".env.[^l]ocal\n", ".env.local"),
     ("class", b".env.[l]ocal\n", ".env.local"),
     ("escaped trailing space", b".env.local\\ \n", ".env.local"),
+    ("space before a trailing backslash", b".env.local \\\n", ".env.local"),
+    ("space before a trailing backslash crlf", b".env.local \\\r\n", ".env.local"),
     ("upper-case pattern", b".ENV*\n", ".env.local"),
     ("comment", b"#.env.local\n", ".env.local"),
     ("negated wildcard in a folder", b".env*\n!apps/.env.*\n", "apps/.env.local"),
@@ -681,6 +712,10 @@ def test_trailing_spaces_are_trimmed_as_git_does():
     assert trim("a\\ ") == "a\\ "
     assert trim("a\\  ") == "a\\ "
     assert trim("a\\") == "a\\"
+    assert trim("a \\") == "a \\"
+    assert trim("a  \\") == "a  \\"
+    assert trim("a \\ ") == "a \\ "
+    assert trim("a \\  ") == "a \\ "
 
 
 # ── the web API keeps its names as thin shims ────────────────────────────────
