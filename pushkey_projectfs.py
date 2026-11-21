@@ -211,7 +211,7 @@ def _trim_trailing_spaces(line: str) -> str:
         elif char == "\\":
             index += 1
             if index >= len(line):
-                break
+                return line
             last_space = None
         else:
             last_space = None
@@ -302,18 +302,16 @@ def _fold(text: str) -> str:
     return unicodedata.normalize("NFC", text).casefold()
 
 
-def _on_disk_segments(project: str, segments: list[str]) -> tuple[list[str], int]:
-    """Spell ``segments`` the way they are on disk; also count the existing folders.
+def _on_disk_segments(project: str, segments: list[str]) -> list[str]:
+    """Spell ``segments`` the way they are on disk.
 
     NTFS and macOS open one file under any letter case, while git matches
     paths case-sensitively. Each segment that exists is replaced by the real
     name of the same file (the entry whose identity equals the given spelling's),
     until the first segment that does not exist; the rest is kept as given.
-    The count is the number of leading folders (not the leaf) that exist.
     """
     folder = Path(project)
     spelled: list[str] = []
-    existing = 0
     for index, segment in enumerate(segments):
         try:
             wanted = (folder / segment).lstat()
@@ -337,8 +335,7 @@ def _on_disk_segments(project: str, segments: list[str]) -> tuple[list[str], int
                     continue
         spelled.append(real)
         folder = folder / real
-        existing = index + 1
-    return spelled, min(existing, len(segments) - 1)
+    return spelled
 
 
 def _git_ignores_case(project: str) -> bool:
@@ -346,16 +343,14 @@ def _git_ignores_case(project: str) -> bool:
     return result.returncode == 0 and result.stdout.strip().lower() == b"true"
 
 
-def _tracked_ignoring_case(project: str, folders: list[str], path: str) -> bool:
-    """Compare ``path`` case-folded with what git tracks below ``folders``.
+def _tracked_ignoring_case(project: str, path: str) -> bool:
+    """Compare ``path`` case-folded with every path git tracks.
 
-    Covers a tracked file that is missing from disk, which no on-disk spelling
-    can find.
+    Covers a tracked file that is missing from disk, or whose folder was renamed
+    by letter case only on disk (git does not record that, and its pathspec
+    match is case-sensitive, so the listing cannot be narrowed to a folder).
     """
-    args = ["-C", project, "ls-files", "-z"]
-    if folders:
-        args += ["--", "/".join(folders)]
-    result = _run_git(args, project)
+    result = _run_git(["-C", project, "ls-files", "-z"], project)
     if result.returncode != 0:
         return False
     wanted = _fold(path)
@@ -368,22 +363,24 @@ def _tracked_ignoring_case(project: str, folders: list[str], path: str) -> bool:
 def is_git_tracked(project: str, relpath: str) -> bool:
     """True when git already tracks ``relpath``; no git, a timeout or any error is False.
 
-    The path is first spelled the way it is on disk, so a different letter case
-    cannot slip past git's case-sensitive match; when git itself ignores case
-    (``core.ignorecase``) the path is also compared case-folded with the tracked
-    files, which finds a tracked file that was deleted from disk.
+    The path is asked for as spelled on disk, so a different letter case cannot
+    slip past git's case-sensitive match, and as given, because the index may
+    still hold the old spelling of a folder that was renamed by case only on
+    disk. When git itself ignores case (``core.ignorecase``) the path is also
+    compared case-folded with the tracked files, which finds a tracked file
+    that was deleted from disk or sits under such a renamed folder.
     """
-    segments = _relative_segments(relpath)
-    spelled, existing = _on_disk_segments(project, segments)
-    path = "/".join(spelled)
+    given = "/".join(_relative_segments(relpath))
+    spelled = "/".join(_on_disk_segments(project, _relative_segments(relpath)))
     try:
-        listed = _run_git(
-            ["-C", project, "ls-files", "--error-unmatch", "--", path], project
-        )
-        if listed.returncode == 0:
-            return True
+        for path in dict.fromkeys((spelled, given)):
+            listed = _run_git(
+                ["-C", project, "ls-files", "--error-unmatch", "--", path], project
+            )
+            if listed.returncode == 0:
+                return True
         if not _git_ignores_case(project):
             return False
-        return _tracked_ignoring_case(project, spelled[:existing], path)
+        return _tracked_ignoring_case(project, spelled)
     except (OSError, subprocess.SubprocessError):
         return False
