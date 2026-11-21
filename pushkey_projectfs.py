@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 _LINK_REASON = "refusing link or reparse-point project target"
@@ -29,6 +30,10 @@ _FORBIDDEN_SEGMENT_CHARS = frozenset(':*?"<>|')
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 _GITIGNORE_PATTERN_CHARS = re.compile(r"([\[\]*?])")
 _GIT_TIMEOUT_SECONDS = 5
+# Repository-selecting variables of the caller's environment, never passed to git.
+_GIT_ENV_DROPPED = frozenset(
+    {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS"}
+)
 
 
 class ProjectPathError(ValueError):
@@ -194,27 +199,61 @@ def _gitignore_escape(path: str) -> str:
     return unspaced + "\\ " * (len(escaped) - len(unspaced))
 
 
-def _gitignore_covers(text: str, relpath: str) -> bool:
-    """True when the last matching line of a .gitignore ignores ``relpath``.
+def _trim_trailing_spaces(line: str) -> str:
+    """Drop trailing unescaped spaces, as git does (tabs and other spaces stay)."""
+    last_space = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == " ":
+            if last_space is None:
+                last_space = index
+        elif char == "\\":
+            index += 1
+            if index >= len(line):
+                break
+            last_space = None
+        else:
+            last_space = None
+        index += 1
+    return line if last_space is None else line[:last_space]
 
-    A line matches when, without a leading ``/``, it equals the escaped path
-    (the only spelling git reads as that literal file), or it has no ``/`` at
-    all and matches the file name as a pattern. ``!`` lines undo an earlier
-    match, as in git (the last matching line wins).
+
+def _gitignore_covers(text: str, relpath: str) -> bool:
+    """True only when git certainly ignores ``relpath`` because of this .gitignore.
+
+    When unsure the answer is False: the caller then appends the exact line,
+    which comes last and wins. Lines are read the way git reads them (only a CR
+    before the LF and unescaped trailing spaces are dropped; leading spaces,
+    tabs and other Unicode spaces are part of the pattern). A line is a cover
+    when, without a leading ``/``, it equals the escaped path, or it is a plain
+    name pattern (no ``/``, ``[`` or backslash) that matches the file name. A
+    ``!`` line resets the answer when its last part could match the file name,
+    which includes any pattern git and fnmatch might read differently (``[``,
+    a backslash, ``**``) and a case-insensitive match.
     """
     name = relpath.rsplit("/", 1)[-1]
-    literal = _gitignore_escape(relpath).strip()
+    literal = _gitignore_escape(relpath)
     covered = False
-    for raw in text.replace("\r\n", "\n").split("\n"):
-        line = raw.strip()
+    for raw in text.split("\n"):
+        line = _trim_trailing_spaces(raw[:-1] if raw.endswith("\r") else raw)
         if not line or line.startswith("#"):
             continue
-        negated = line.startswith("!")
-        if negated:
-            line = line[1:].strip()
+        if line.startswith("!"):
+            pattern = line[1:]
+            last = pattern.rsplit("/", 1)[-1]
+            if (
+                "**" in pattern
+                or "[" in last
+                or "\\" in last
+                or fnmatch.fnmatchcase(name.casefold(), last.casefold())
+            ):
+                covered = False
+            continue
         bare = line[1:] if line.startswith("/") else line
-        if bare == literal or ("/" not in line and fnmatch.fnmatch(name, line)):
-            covered = not negated
+        is_name_pattern = not any(ch in line for ch in "/[\\")
+        if bare == literal or (is_name_pattern and fnmatch.fnmatchcase(name, line)):
+            covered = True
     return covered
 
 
@@ -242,25 +281,109 @@ def ensure_project_gitignore(
 
 
 def _run_git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
-    # List argv, no shell, bounded. Literal pathspecs: a "[id]" folder is a name, not a glob.
+    # List argv, no shell, bounded. Literal pathspecs: a "[id]" folder is a name,
+    # not a glob. fsmonitor off: the project's own .git/config may name a command
+    # to run, and the repository-selecting variables of the caller's environment
+    # must not point git at another repository.
+    env = {k: v for k, v in os.environ.items() if k.upper() not in _GIT_ENV_DROPPED}
+    env["GIT_LITERAL_PATHSPECS"] = "1"
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.fsmonitor=false", *args],
         cwd=cwd,
         capture_output=True,
         timeout=_GIT_TIMEOUT_SECONDS,
         check=False,
         stdin=subprocess.DEVNULL,
-        env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"},
+        env=env,
     )
 
 
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def _on_disk_segments(project: str, segments: list[str]) -> tuple[list[str], int]:
+    """Spell ``segments`` the way they are on disk; also count the existing folders.
+
+    NTFS and macOS open one file under any letter case, while git matches
+    paths case-sensitively. Each segment that exists is replaced by the real
+    name of the same file (the entry whose identity equals the given spelling's),
+    until the first segment that does not exist; the rest is kept as given.
+    The count is the number of leading folders (not the leaf) that exist.
+    """
+    folder = Path(project)
+    spelled: list[str] = []
+    existing = 0
+    for index, segment in enumerate(segments):
+        try:
+            wanted = (folder / segment).lstat()
+        except OSError:
+            spelled.extend(segments[index:])
+            break
+        real = segment
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        if segment not in names:
+            for name in names:
+                if _fold(name) != _fold(segment):
+                    continue
+                try:
+                    if os.path.samestat(os.lstat(folder / name), wanted):
+                        real = name
+                        break
+                except OSError:
+                    continue
+        spelled.append(real)
+        folder = folder / real
+        existing = index + 1
+    return spelled, min(existing, len(segments) - 1)
+
+
+def _git_ignores_case(project: str) -> bool:
+    result = _run_git(["-C", project, "config", "--bool", "core.ignorecase"], project)
+    return result.returncode == 0 and result.stdout.strip().lower() == b"true"
+
+
+def _tracked_ignoring_case(project: str, folders: list[str], path: str) -> bool:
+    """Compare ``path`` case-folded with what git tracks below ``folders``.
+
+    Covers a tracked file that is missing from disk, which no on-disk spelling
+    can find.
+    """
+    args = ["-C", project, "ls-files", "-z"]
+    if folders:
+        args += ["--", "/".join(folders)]
+    result = _run_git(args, project)
+    if result.returncode != 0:
+        return False
+    wanted = _fold(path)
+    for raw in result.stdout.split(b"\0"):
+        if raw and _fold(raw.decode("utf-8", errors="surrogateescape")) == wanted:
+            return True
+    return False
+
+
 def is_git_tracked(project: str, relpath: str) -> bool:
-    """True when git already tracks ``relpath``; no git, a timeout or any error is False."""
-    relpath = "/".join(_relative_segments(relpath))
+    """True when git already tracks ``relpath``; no git, a timeout or any error is False.
+
+    The path is first spelled the way it is on disk, so a different letter case
+    cannot slip past git's case-sensitive match; when git itself ignores case
+    (``core.ignorecase``) the path is also compared case-folded with the tracked
+    files, which finds a tracked file that was deleted from disk.
+    """
+    segments = _relative_segments(relpath)
+    spelled, existing = _on_disk_segments(project, segments)
+    path = "/".join(spelled)
     try:
-        result = _run_git(
-            ["-C", project, "ls-files", "--error-unmatch", "--", relpath], project
+        listed = _run_git(
+            ["-C", project, "ls-files", "--error-unmatch", "--", path], project
         )
+        if listed.returncode == 0:
+            return True
+        if not _git_ignores_case(project):
+            return False
+        return _tracked_ignoring_case(project, spelled[:existing], path)
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0

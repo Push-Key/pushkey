@@ -557,6 +557,18 @@ def test_tracked_file_is_found_under_a_different_case_file_name(project):
     assert _tracked(project, ".ENV.local") is True
 
 
+def test_on_disk_spelling_finds_a_tracked_file_when_git_is_set_to_match_case(project):
+    # core.ignorecase=false on a case-insensitive file system (a repository set
+    # up elsewhere): git would miss the variants, the real names on disk do not.
+    if not _filesystem_ignores_case(project):
+        pytest.skip("case-sensitive file system: the variants are different files")
+    _commit_env_files(project, ".env.local", "apps/.env.local")
+    _git(project, "config", "core.ignorecase", "false")
+    for variant in (".env.LOCAL", "Apps/.env.local", "apps/.ENV.LOCAL", "APPS/.env.local"):
+        assert _tracked(project, variant) is True, variant
+    assert _tracked(project, "Apps/.env.other") is False
+
+
 def test_tracked_file_missing_from_disk_is_still_tracked_when_git_ignores_case(project):
     _commit_env_files(project, ".env.local", "apps/.env.local")
     (project / ".env.local").unlink()
@@ -628,6 +640,8 @@ GITIGNORE_ROWS = [
     ("negated name", b".env*\n!.env.local\n", ".env.local"),
     ("negated name in another case", b".env*\n!.ENV.LOCAL\n", ".env.local"),
     ("negation with a class", b".env*\n![.]env.local\n", ".env.local"),
+    ("negation with a negated class", b".env*\n![^x]env.local\n", ".env.local"),
+    ("negation with an escape", b".env*\n!\\.env.local\n", ".env.local"),
     ("negation then pattern", b"!.env.local\n.env*\n", ".env.local"),
 ]
 
@@ -646,6 +660,27 @@ def test_gitignore_cover_decision_agrees_with_git(project, content, relpath):
     ensure_project_gitignore(str(project), relpath, identity)
     assert _git_ignore_status(project, relpath) == 0
     assert ensure_project_gitignore(str(project), relpath, identity) is False
+
+
+def test_gitignore_pattern_in_another_case_is_not_a_cover_for_case_sensitive_git(project):
+    _git(project, "init")
+    _git(project, "config", "core.ignorecase", "false")
+    (project / ".gitignore").write_bytes(b".ENV*\n")
+    (project / ".env.local").write_text("A=1\n")
+    identity = project_identity(project)
+    assert ensure_project_gitignore(str(project), ".env.local", identity) is True
+    assert _git_ignore_status(project, ".env.local") == 0
+    assert (project / ".gitignore").read_bytes() == b".ENV*\n.env.local\n"
+
+
+def test_trailing_spaces_are_trimmed_as_git_does():
+    trim = pushkey_projectfs._trim_trailing_spaces
+    assert trim("a  ") == "a"
+    assert trim(" a b ") == " a b"
+    assert trim("a\t ") == "a\t"
+    assert trim("a\\ ") == "a\\ "
+    assert trim("a\\  ") == "a\\ "
+    assert trim("a\\") == "a\\"
 
 
 # ── the web API keeps its names as thin shims ────────────────────────────────
