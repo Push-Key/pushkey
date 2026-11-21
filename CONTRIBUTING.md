@@ -23,6 +23,10 @@ pip install pytest
 pytest   # make sure everything passes first
 ```
 
+Test temp files go to a per-session directory under `.pytest_tmp/`, so it is safe
+to run a focused test file while a full `pytest` run is still going. Stale
+session directories are pruned automatically after six hours.
+
 ### Adding a provider
 
 1. Open `providers.json`

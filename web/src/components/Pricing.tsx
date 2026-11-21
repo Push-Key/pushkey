@@ -1,7 +1,6 @@
 "use client"
 import { useState } from "react"
 import { Check, Minus, Zap } from "lucide-react"
-import WaitlistDialog from "./WaitlistDialog"
 
 interface Tier {
   key: string
@@ -70,9 +69,9 @@ const TIERS: Tier[] = [
       "3 devices",
       "TOTP MFA",
       "Local encryption",
-      "Cloud encrypted backup",
+      "Encrypted cloud backup beta",
       "Git history scanner",
-      "CI/CD sync (GitHub, Vercel, Railway)",
+      "Encrypted backup",
     ],
   },
   {
@@ -92,9 +91,9 @@ const TIERS: Tier[] = [
       "5 devices per seat",
       "TOTP MFA",
       "Local + team encryption",
-      "Cloud encrypted backup",
+      "Encrypted cloud backup beta",
       "Git history scanner",
-      "CI/CD sync + Team RBAC",
+      "Priority support",
     ],
   },
   {
@@ -132,12 +131,12 @@ const TIERS: Tier[] = [
     features: [
       "Unlimited keys & projects",
       "Unlimited devices",
-      "TOTP + YubiKey MFA",
+      "Admin MFA",
       "All encryption modes",
       "Cloud + on-prem backup",
       "Git history scanner",
-      "CI/CD sync",
-      "RBAC + SSO (SAML/Okta/Azure AD)",
+      "Deployment support",
+      "Custom security review support",
     ],
     extras: ["Dedicated support + SLA", "Custom audit log export"],
   },
@@ -145,7 +144,6 @@ const TIERS: Tier[] = [
 
 export default function Pricing() {
   const [annual, setAnnual] = useState(false)
-  const [waitlistOpen, setWaitlistOpen] = useState(false)
 
   return (
     <section id="pricing" className="py-24" style={{ background: "rgba(13,27,42,0.2)" }}>
@@ -263,37 +261,11 @@ export default function Pricing() {
           ))}
         </div>
 
-        {/* Vault Key USB waitlist */}
-        <div className="mt-8 max-w-lg mx-auto rounded-xl p-5 flex items-center gap-5" style={{ background: "#0D1B2A", border: "1px solid rgba(99,102,241,0.25)" }}>
-          <span className="text-3xl flex-shrink-0">🔌</span>
-          <div className="flex-1 min-w-0">
-            <div className="text-xs font-mono mb-0.5" style={{ color: "#818CF8" }}>VAULT KEY USB — Coming soon</div>
-            <p className="text-xs leading-relaxed" style={{ color: "#64748B" }}>
-              Off-grid hardware vault. Encrypted vault lives on the USB — unplug and keys vanish from memory. Includes Pro for 12 months.
-            </p>
-          </div>
-          <button onClick={() => setWaitlistOpen(true)}
-            className="flex-shrink-0 text-xs font-semibold py-2 px-4 rounded-lg transition-all whitespace-nowrap cursor-pointer"
-            style={{ background: "rgba(99,102,241,0.12)", color: "#818CF8", border: "1px solid rgba(99,102,241,0.25)" }}
-            onMouseEnter={e => { e.currentTarget.style.opacity = "0.8" }}
-            onMouseLeave={e => { e.currentTarget.style.opacity = "1" }}>
-            Join Waitlist
-          </button>
-        </div>
-
         {/* Footnote */}
         <p className="text-center text-xs mt-8" style={{ color: "#64748B" }}>
           All plans include local-first encryption. No keys are stored in our cloud — ever. Enterprise audit logs are end-to-end encrypted.
         </p>
       </div>
-
-      <WaitlistDialog
-        open={waitlistOpen}
-        onClose={() => setWaitlistOpen(false)}
-        source="vault-key-usb"
-        title="Vault Key USB Waitlist"
-        subtitle="Off-grid hardware vault. We'll email you when it's ready to ship."
-      />
     </section>
   )
 }

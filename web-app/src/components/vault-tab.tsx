@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, Fragment } from "react";
+import { useEffect, useState, useMemo, Fragment, useId } from "react";
 import {
   Eye, EyeOff, Search, Copy, Check, Plus, Trash2, RefreshCw, X,
   Layers, ArrowUpCircle, Pencil, FolderTree,
@@ -44,6 +44,9 @@ interface EditForm {
 }
 
 const EMPTY_ADD: AddForm = { name: "", value: "", provider: "", env: "dev" };
+const REVEAL_TIMEOUT_MS = 10_000;
+const CLIPBOARD_CLEAR_TIMEOUT_MS = 30_000;
+const COPIED_INDICATOR_TIMEOUT_MS = 1_500;
 
 export function VaultTab() {
   const [keys, setKeys] = useState<KeySummary[]>([]);
@@ -71,6 +74,8 @@ export function VaultTab() {
   const [editLoading, setEditLoading] = useState<string | null>(null);
 
   const [promoteLoading, setPromoteLoading] = useState<string | null>(null);
+  const searchId = useId();
+  const addFormId = useId();
 
   const refresh = async () => {
     setLoading(true);
@@ -118,7 +123,7 @@ export function VaultTab() {
       setRevealed((p) => ({ ...p, [name]: detail.value }));
       setTimeout(() => {
         setRevealed((p) => { const n = { ...p }; delete n[name]; return n; });
-      }, 30_000);
+      }, REVEAL_TIMEOUT_MS);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "reveal failed");
     }
@@ -138,7 +143,10 @@ export function VaultTab() {
       await navigator.clipboard.writeText(v);
     }
     setCopied(name);
-    setTimeout(() => setCopied(null), 1500);
+    setTimeout(() => setCopied(null), COPIED_INDICATOR_TIMEOUT_MS);
+    setTimeout(() => {
+      navigator.clipboard.writeText("").catch(() => {});
+    }, CLIPBOARD_CLEAR_TIMEOUT_MS);
   };
 
   const handleAdd = async (e: React.FormEvent) => {
@@ -171,12 +179,19 @@ export function VaultTab() {
       await api.deleteKey(name);
       await refresh();
       toast.success("Key deleted");
+      document.getElementById(searchId)?.focus();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "delete failed");
     }
   };
 
   // ── inline row openers (mutually exclusive per row) ─────────────────────────
+  // Return focus to the toggle button that controls an inline row (WCAG: avoid
+  // dropping focus to <body> when the row unmounts).
+  const focusToggleFor = (rowDomId: string) => {
+    document.querySelector<HTMLElement>(`[aria-controls="${rowDomId}"]`)?.focus();
+  };
+
   const closeAllFor = (name: string) => {
     setRotateState((p) => { const n = { ...p }; delete n[name]; return n; });
     setBackupState((p) => { const n = { ...p }; delete n[name]; return n; });
@@ -267,7 +282,12 @@ export function VaultTab() {
   };
 
   // ── row renderer ────────────────────────────────────────────────────────────
-  const renderRow = (k: KeySummary) => (
+  const renderRow = (k: KeySummary) => {
+    const rowId = encodeURIComponent(k.name);
+    const rotateRowId = `rotate-row-${rowId}`;
+    const backupRowId = `backup-row-${rowId}`;
+    const editRowId = `edit-row-${rowId}`;
+    return (
     <Fragment key={k.name}>
       <TableRow>
         <TableCell className="font-mono text-xs">{k.name}</TableCell>
@@ -292,16 +312,19 @@ export function VaultTab() {
         </TableCell>
         <TableCell className="text-right">
           <div className="flex justify-end gap-0.5 flex-wrap">
-            <Button variant="ghost" size="icon" onClick={() => reveal(k.name)} title="Reveal">
+            <Button variant="ghost" size="icon" onClick={() => reveal(k.name)} title="Reveal" aria-label={`Reveal ${k.name}`} aria-pressed={!!revealed[k.name]}>
               {revealed[k.name] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => copy(k.name)} title="Copy">
+            <Button variant="ghost" size="icon" onClick={() => copy(k.name)} title="Copy" aria-label={`Copy ${k.name}`}>
               {copied === k.name ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
               size="icon"
               title="Edit metadata"
+              aria-label={`Edit metadata for ${k.name}`}
+              aria-expanded={editState[k.name] !== undefined}
+              aria-controls={editRowId}
               onClick={() => toggleEdit(k)}
             >
               <Pencil className="h-4 w-4" />
@@ -310,6 +333,9 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Set backup"
+              aria-label={`Set backup for ${k.name}`}
+              aria-expanded={backupState[k.name] !== undefined}
+              aria-controls={backupRowId}
               className="text-cyan-400 hover:text-cyan-300"
               onClick={() => toggleBackup(k.name)}
             >
@@ -320,6 +346,7 @@ export function VaultTab() {
                 variant="ghost"
                 size="icon"
                 title="Promote backup"
+                aria-label={`Promote backup for ${k.name}`}
                 className="text-emerald-400 hover:text-emerald-300"
                 onClick={() => handlePromote(k.name)}
                 disabled={promoteLoading === k.name}
@@ -331,6 +358,9 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Rotate"
+              aria-label={`Rotate ${k.name}`}
+              aria-expanded={rotateState[k.name] !== undefined}
+              aria-controls={rotateRowId}
               className="text-orange-400 hover:text-orange-300"
               onClick={() => toggleRotate(k.name)}
             >
@@ -340,6 +370,7 @@ export function VaultTab() {
               variant="ghost"
               size="icon"
               title="Delete"
+              aria-label={`Delete ${k.name}`}
               className="text-red-400 hover:text-red-300"
               onClick={() => handleDelete(k.name)}
             >
@@ -351,12 +382,13 @@ export function VaultTab() {
 
       {/* Inline rotate row */}
       {rotateState[k.name] !== undefined && (
-        <TableRow className="bg-orange-500/5">
+        <TableRow id={rotateRowId} className="bg-orange-500/5">
           <TableCell colSpan={7} className="py-2 px-4">
             <div className="flex items-center gap-2">
               <span className="text-xs text-orange-400 font-medium whitespace-nowrap">New value for {k.name}</span>
               <Input
                 type="password"
+                aria-label={`New value for ${k.name}`}
                 placeholder="New secret value…"
                 className="font-mono text-xs h-8 max-w-xs"
                 value={rotateState[k.name]}
@@ -372,7 +404,7 @@ export function VaultTab() {
                 <RefreshCw className="h-3 w-3" />
                 {rotateLoading === k.name ? "Rotating…" : "Rotate"}
               </Button>
-              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => closeAllFor(k.name)}>
+              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => { closeAllFor(k.name); focusToggleFor(rotateRowId); }}>
                 Cancel
               </Button>
             </div>
@@ -382,12 +414,13 @@ export function VaultTab() {
 
       {/* Inline backup row */}
       {backupState[k.name] !== undefined && (
-        <TableRow className="bg-cyan-500/5">
+        <TableRow id={backupRowId} className="bg-cyan-500/5">
           <TableCell colSpan={7} className="py-2 px-4">
             <div className="flex items-center gap-2">
               <span className="text-xs text-cyan-400 font-medium whitespace-nowrap">Backup value for {k.name}</span>
               <Input
                 type="password"
+                aria-label={`Backup value for ${k.name}`}
                 placeholder="Stage backup secret…"
                 className="font-mono text-xs h-8 max-w-xs"
                 value={backupState[k.name]}
@@ -403,7 +436,7 @@ export function VaultTab() {
                 <Layers className="h-3 w-3" />
                 {backupLoading === k.name ? "Staging…" : "Stage backup"}
               </Button>
-              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => closeAllFor(k.name)}>
+              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => { closeAllFor(k.name); focusToggleFor(backupRowId); }}>
                 Cancel
               </Button>
             </div>
@@ -413,17 +446,19 @@ export function VaultTab() {
 
       {/* Inline edit metadata row */}
       {editState[k.name] !== undefined && (
-        <TableRow className="bg-[var(--color-muted-foreground)]/5">
+        <TableRow id={editRowId} className="bg-[var(--color-muted-foreground)]/5">
           <TableCell colSpan={7} className="py-2 px-4">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-medium whitespace-nowrap">Edit {k.name}</span>
               <Input
+                aria-label={`Provider for ${k.name}`}
                 placeholder="provider"
                 className="text-xs h-8 max-w-[160px]"
                 value={editState[k.name].provider}
                 onChange={(e) => setEditState((p) => ({ ...p, [k.name]: { ...p[k.name], provider: e.target.value } }))}
               />
               <select
+                aria-label={`Environment for ${k.name}`}
                 value={editState[k.name].env}
                 onChange={(e) => setEditState((p) => ({ ...p, [k.name]: { ...p[k.name], env: e.target.value } }))}
                 className="flex h-8 rounded-md border border-input bg-transparent px-2 py-1 text-xs"
@@ -431,6 +466,7 @@ export function VaultTab() {
                 {ENV_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
               <Input
+                aria-label={`Notes for ${k.name}`}
                 placeholder="notes"
                 className="text-xs h-8 flex-1 min-w-[200px]"
                 value={editState[k.name].notes}
@@ -445,7 +481,7 @@ export function VaultTab() {
                 <Check className="h-3 w-3" />
                 {editLoading === k.name ? "Saving…" : "Save"}
               </Button>
-              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => closeAllFor(k.name)}>
+              <Button variant="ghost" size="sm" className="h-8 text-[var(--color-muted-foreground)]" onClick={() => { closeAllFor(k.name); focusToggleFor(editRowId); }}>
                 Cancel
               </Button>
             </div>
@@ -453,7 +489,8 @@ export function VaultTab() {
         </TableRow>
       )}
     </Fragment>
-  );
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -461,8 +498,10 @@ export function VaultTab() {
         <h1 className="text-2xl font-semibold tracking-tight">Vault</h1>
         <div className="flex items-center gap-2">
           <div className="relative">
+            <Label htmlFor={searchId} className="sr-only">Search keys or providers</Label>
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-[var(--color-muted-foreground)]" />
             <Input
+              id={searchId}
               placeholder="Search keys or providers…"
               className="pl-8 w-64"
               value={filter}
@@ -473,8 +512,11 @@ export function VaultTab() {
             {loading ? "Refreshing…" : "Refresh"}
           </Button>
           <Button
+            type="button"
             size="sm"
             className="gap-1 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20"
+            aria-expanded={showAdd}
+            aria-controls={addFormId}
             onClick={() => { setShowAdd((v) => !v); setAddForm(EMPTY_ADD); }}
           >
             {showAdd ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -491,6 +533,8 @@ export function VaultTab() {
             return (
               <button
                 key={p.id}
+                type="button"
+                aria-pressed={active}
                 onClick={() => setEnvFilter(p.id)}
                 className={
                   "px-3 py-1 text-xs rounded-full border transition-colors " +
@@ -508,6 +552,7 @@ export function VaultTab() {
           variant="outline"
           size="sm"
           className={"gap-1 " + (groupByProvider ? "border-cyan-500/40 text-cyan-300" : "")}
+          aria-pressed={groupByProvider}
           onClick={() => setGroupByProvider((v) => !v)}
         >
           <FolderTree className="h-4 w-4" />
@@ -518,6 +563,7 @@ export function VaultTab() {
       {/* Add key inline form */}
       {showAdd && (
         <form
+          id={addFormId}
           onSubmit={handleAdd}
           className="rounded-md border border-cyan-500/25 bg-[var(--color-card)] p-4 space-y-3"
         >
@@ -580,10 +626,18 @@ export function VaultTab() {
       )}
 
       {err && (
-        <div className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-sm text-[var(--color-destructive)]">
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-sm text-[var(--color-destructive)]"
+        >
           {err}
         </div>
       )}
+
+      <p role="status" aria-live="polite" className="sr-only">
+        {copied ? `Copied ${copied} to clipboard` : ""}
+      </p>
 
       <div className="rounded-md border bg-[var(--color-card)]">
         <Table>

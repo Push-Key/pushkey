@@ -213,3 +213,62 @@ test('watcher closes and reattaches after a live watcher error', () => {
     assert.equal(watchers[1].closed, true);
     assert.equal(timers.size, 0);
 });
+
+test('watcher reattaches after an unexpected close and ignores its own closes', () => {
+    const timers = new Map();
+    let nextTimer = 0;
+    let scheduled = 0;
+    let watchCalls = 0;
+    const watchers = [];
+    const fakeFs = {
+        watch() {
+            const handlers = new Map();
+            // Like fs.FSWatcher, close() emits 'close' synchronously.
+            const watcher = {
+                closed: false,
+                close() { this.closed = true; this.emit('close'); },
+                on(event, handler) { handlers.set(event, handler); },
+                emit(event, arg) { const handler = handlers.get(event); if (handler) handler(arg); },
+            };
+            watchers.push(watcher);
+            watchCalls += 1;
+            return watcher;
+        },
+    };
+    const schedule = callback => { scheduled += 1; const id = ++nextTimer; timers.set(id, callback); return id; };
+    const runTimer = () => {
+        const [id, callback] = timers.entries().next().value;
+        timers.delete(id);
+        callback();
+    };
+    const watcher = new HealthWatcher({
+        healthFile: path.join('pushkey', 'health.json'),
+        fsModule: fakeFs,
+        read: () => ({ state: 'available', keys: {} }),
+        onUpdate() {},
+        setTimeoutFn: schedule,
+        clearTimeoutFn: id => timers.delete(id),
+    });
+    watcher.start();
+    assert.equal(watchCalls, 1);
+
+    // The OS closes the live watcher (for example, the directory was removed).
+    watchers[0].emit('close');
+    assert.equal(scheduled, 1);
+    runTimer();
+    assert.equal(watchCalls, 2);
+
+    // An error closes the watcher itself; that self-close must not schedule a second reattach.
+    watchers[1].emit('error', new Error('watch failed'));
+    assert.equal(watchers[1].closed, true);
+    assert.equal(scheduled, 2);
+    runTimer();
+    assert.equal(watchCalls, 3);
+
+    // Dispose closes the watcher; nothing may reattach afterwards.
+    watcher.dispose();
+    assert.equal(watchers[2].closed, true);
+    assert.equal(scheduled, 2);
+    assert.equal(timers.size, 0);
+    assert.equal(watchCalls, 3);
+});

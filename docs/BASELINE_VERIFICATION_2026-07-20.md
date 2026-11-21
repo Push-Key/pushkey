@@ -117,7 +117,7 @@ setting.
 
 | Validation | Result |
 |---|---|
-| Python compileall for `pushkey*.py` and `server/` | Passed |
+| Python compileall for `pushkey*.py` | Passed |
 | `web-app`: `npm run build` | Passed |
 | `web-app` static integrity generation | Passed, 30 assets |
 | `web-app`: two consecutive `npm run integrity` executions | Passed |

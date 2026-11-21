@@ -1,0 +1,23 @@
+# Gitleaks configuration for Pushkey.
+#
+# Starts from the full default rule set and narrows it only where a match is
+# provably not a secret. Every entry below pins BOTH the file path and the exact
+# literal, so an allowlist can never quietly suppress a real finding in the same
+# file.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Provider-detection test fixtures. These are deliberately shaped like real
+credentials because the tests assert that detect_provider() recognises that
+shape. They are not credentials: AKIA1234567890TEST is not a valid AWS access
+key ID, and the sk- values are literal test strings.
+"""
+paths = ['''tests[\\/]test_provider_detection\.py''']
+regexes = [
+  '''AKIA1234567890TEST''',
+  '''sk-test123''',
+  '''sk-ant-test123''',
+]

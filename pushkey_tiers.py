@@ -76,7 +76,7 @@ def _server_post(path: str, payload: dict, timeout: int = 8) -> dict | None:
         req = urllib.request.Request(url, data=body,
                                      headers={"Content-Type": "application/json"},
                                      method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _s.urlopen_checked(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         try:

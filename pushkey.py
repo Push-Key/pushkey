@@ -17,7 +17,7 @@ Usage:
 """
 
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, simpledialog
 import customtkinter as ctk
 import json
 import os
@@ -78,7 +78,7 @@ from pushkey_shared import (
     LICENSE_FILE, TOKEN_FILE, FIDO2_FILE, SSO_FILE, LEASES_FILE, HEALTH_PORT,
     ACTIVATION_SERVER, _TOKEN_GRACE_DAYS,
     TIERS, UPGRADE_MESSAGES, VAULT_SCHEMA_VERSION, ENV_LEVELS, ENV_COLORS,
-    ensure_vault_dir,
+    ensure_vault_dir, urlopen_checked,
 )
 from pushkey_crypto import (
     AESGCM, Fernet, InvalidToken,
@@ -88,7 +88,7 @@ from pushkey_crypto import (
     generate_recovery_code,
     _aes_encrypt, _aes_decrypt, _legacy_fernet_decrypt,
     encrypt_data, decrypt_data, team_encrypt, team_decrypt,
-    encrypt_data_v3, decrypt_data_v3, rekey_vault, add_recovery_key,
+    encrypt_data_v3, decrypt_data_v3, rekey_vault,
     _migrate_vault, _serialize_vault, _deserialize_vault,
     _LOG_KEY_CACHE, _log_key, _log_encrypt, _log_decrypt_all,
     _log_line_age_days, _migrate_plaintext_log, log_event,
@@ -106,7 +106,7 @@ from pushkey_tiers import (
     maybe_heartbeat, deactivate_device,
     load_license, save_license,
     current_tier, tier_limits, can_do, within_limit,
-    activate_license, generate_license_key,
+    activate_license,
 )
 from pushkey_providers import (
     _BUNDLED_PROVIDERS, _load_providers, update_providers_from_web,
@@ -115,6 +115,30 @@ from pushkey_providers import (
 
 
 
+
+def _start_fresh_local_vault(vault_dir: Path | None = None, now: datetime | None = None) -> Path:
+    vault_dir = Path(vault_dir or VAULT_DIR)
+    if not vault_dir.exists():
+        raise FileNotFoundError(2, "No such file or directory", str(vault_dir))
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    backup_dir = vault_dir.parent / f"{vault_dir.name}-backup-{stamp}"
+    suffix = 2
+    while backup_dir.exists():
+        backup_dir = vault_dir.parent / f"{vault_dir.name}-backup-{stamp}-{suffix}"
+        suffix += 1
+    os.replace(str(vault_dir), str(backup_dir))
+    return backup_dir
+
+
+def _login_card_layout(window_width: int) -> dict[str, int]:
+    window_width = max(0, int(window_width or 0))
+    card_padx = min(240, max(24, (window_width - 752) // 2))
+    compact = window_width <= 900
+    return {
+        "card_padx": card_padx,
+        "form_padx": 20 if compact else 36,
+        "note_wraplength": 240 if compact else 320,
+    }
 
 
 def write_health_sidecar(vault):
@@ -397,7 +421,7 @@ def sso_device_flow_start(client_id: str, device_auth_url: str,
     req = urllib.request.Request(device_auth_url, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen_checked(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 def sso_device_flow_poll(client_id: str, token_url: str, device_code: str) -> dict | None:
@@ -413,7 +437,7 @@ def sso_device_flow_poll(client_id: str, token_url: str, device_code: str) -> di
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_checked(req, timeout=15) as resp:
             result = json.loads(resp.read())
             if "access_token" in result:
                 return result
@@ -492,15 +516,46 @@ def check_expired_leases() -> list:
 # CLOUD SYNC CLIENT  (#28)
 # ═══════════════════════════════════════════════════════════════
 
-def cloud_push(endpoint: str, token: str, vault_bytes: bytes) -> str:
-    """PUT encrypted vault blob. Returns server ETag."""
-    import urllib.request
+class CloudSyncConflict(Exception):
+    """Raised when a push is rejected because the remote vault moved ahead.
+
+    Carries the server's current ETag so the caller can pull and reconcile
+    instead of clobbering another device's newer vault.
+    """
+
+    def __init__(self, current_etag: str = ""):
+        super().__init__("remote vault changed since last sync")
+        self.current_etag = current_etag
+
+
+def cloud_push(endpoint: str, token: str, vault_bytes: bytes, if_match: str = "") -> str:
+    """PUT encrypted vault blob. Returns server ETag.
+
+    When `if_match` is a known ETag, send it as `If-Match` so the server rejects
+    the write (409) if another device pushed a newer vault in the meantime,
+    rather than silently overwriting it. A first-ever push passes no ETag and is
+    unconditional. On 409 this raises CloudSyncConflict carrying the current
+    server ETag.
+    """
+    import urllib.request, urllib.error
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/v1/vault", data=vault_bytes, method="PUT")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/octet-stream")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read()).get("etag", "")
+    if if_match:
+        req.add_header("If-Match", if_match)
+    try:
+        with urlopen_checked(req, timeout=20) as resp:
+            return json.loads(resp.read()).get("etag", "")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            current_etag = ""
+            try:
+                current_etag = json.loads(exc.read()).get("current_etag", "")
+            except Exception:
+                pass
+            raise CloudSyncConflict(current_etag) from exc
+        raise
 
 def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
     """GET vault blob. Returns (bytes, etag) or (None, etag) if unchanged."""
@@ -511,7 +566,7 @@ def cloud_pull(endpoint: str, token: str, current_etag: str = "") -> tuple:
     if current_etag:
         req.add_header("If-None-Match", current_etag)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urlopen_checked(req, timeout=20) as resp:
             etag = resp.headers.get("ETag", "")
             return resp.read(), etag
     except Exception as exc:
@@ -526,7 +581,7 @@ def cloud_login(endpoint: str, email: str, pw: str) -> str:
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}/api/v1/auth/login", data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen_checked(req, timeout=15) as resp:
         return json.loads(resp.read()).get("token", "")
 
 
@@ -605,7 +660,7 @@ def sync_github_actions(owner: str, repo: str, token: str,
         f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/public-key",
         headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urlopen_checked(req, timeout=10) as r:
             pk_data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         return 0, [f"GitHub: failed to fetch public key: {e.code} {e.read().decode()[:200]}"]
@@ -623,7 +678,7 @@ def sync_github_actions(owner: str, repo: str, token: str,
             put_req = urllib.request.Request(
                 f"https://api.github.com/repos/{owner}/{repo}/actions/secrets/{key_name}",
                 data=body, headers=headers, method="PUT")
-            with urllib.request.urlopen(put_req, timeout=10) as r:
+            with urlopen_checked(put_req, timeout=10) as r:
                 if r.status in (201, 204):
                     success += 1
                 else:
@@ -657,7 +712,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                 f"https://api.vercel.com/v10/projects/{project_id}/env",
                 data=body, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=10):
+                with urlopen_checked(req, timeout=10):
                     success += 1
             except urllib.error.HTTPError as e:
                 body_txt = e.read().decode()
@@ -666,7 +721,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                     list_req = urllib.request.Request(
                         f"https://api.vercel.com/v10/projects/{project_id}/env",
                         headers=headers)
-                    with urllib.request.urlopen(list_req, timeout=10) as r:
+                    with urlopen_checked(list_req, timeout=10) as r:
                         envs = json.loads(r.read()).get("envs", [])
                     existing = next((e for e in envs if e["key"] == key_name), None)
                     if existing:
@@ -675,7 +730,7 @@ def sync_vercel(token: str, project_id: str, env_target: str,
                         patch_req = urllib.request.Request(
                             f"https://api.vercel.com/v10/projects/{project_id}/env/{existing['id']}",
                             data=patch_body, headers=headers, method="PATCH")
-                        with urllib.request.urlopen(patch_req, timeout=10):
+                        with urlopen_checked(patch_req, timeout=10):
                             success += 1
                     else:
                         errors.append(f"{key_name}: 409 conflict")
@@ -714,7 +769,7 @@ def sync_railway(token: str, project_id: str, environment_id: str,
     try:
         req = urllib.request.Request("https://backboard.railway.app/graphql/v2",
                                      data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urlopen_checked(req, timeout=15) as r:
             result = json.loads(r.read())
         if result.get("errors"):
             errs = [e.get("message", str(e)) for e in result["errors"]]
@@ -745,7 +800,7 @@ def _rotate_openai(old_key_id, admin_key):
     req = urllib.request.Request("https://api.openai.com/v1/organization/admin_api_keys",
                                   data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urlopen_checked(req, timeout=15) as r:
             new_key_data = json.loads(r.read())
     except urllib.error.HTTPError as e:
         return RotationResult(error=f"OpenAI create failed: {e.code} {e.read().decode()[:200]}")
@@ -763,7 +818,7 @@ def _rotate_openai(old_key_id, admin_key):
             f"https://api.openai.com/v1/organization/admin_api_keys/{old_key_id}",
             headers=headers, method="DELETE")
         try:
-            urllib.request.urlopen(del_req, timeout=15)
+            urlopen_checked(del_req, timeout=15)
         except Exception:
             return RotationResult(new_value=new_value, new_id=new_id, partial=True)
 
@@ -785,7 +840,7 @@ def _deactivate_anthropic(key_id, admin_key):
         f"https://api.anthropic.com/v1/organizations/api_keys/{key_id}",
         data=body, headers=headers, method="POST")
     try:
-        urllib.request.urlopen(req, timeout=15)
+        urlopen_checked(req, timeout=15)
         return RotationResult(partial=True,
                               error="Old key deactivated. Create new key in Anthropic console, then paste it here.")
     except urllib.error.HTTPError as e:
@@ -1070,62 +1125,24 @@ def _ensure_gitignore_env(project_dir: Path) -> None:
 
 def inject_env_file(project_path, vault, key_names=None, target_env="all"):
     """Update .env surgically — only touch keys being written, preserve everything else."""
-    project_dir = Path(project_path)
-    env_path = project_dir / ".env"
+    from pushkey_env import mutate_env_file
 
     def _env_match(key_env):
         return target_env == "all" or key_env == "all" or key_env == target_env
 
     if key_names:
-        keys_to_write = {k: vault[k]["value"] for k in key_names
-                         if k in vault and _env_match(vault[k].get("env", "all"))}
+        names = [k for k in key_names if k in vault and _env_match(vault[k].get("env", "all"))]
     else:
-        keys_to_write = {k: v["value"] for k, v in vault.items()
-                         if _env_match(v.get("env", "all"))}
-
-    if not keys_to_write:
+        names = [k for k, v in vault.items() if _env_match(v.get("env", "all"))]
+    if not names:
         return True
-
-    # Backup existing .env before any changes
-    import shutil
-    if env_path.exists():
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup = env_path.with_name(f".env.pushkey_backup_{ts}")
-        shutil.copy2(str(env_path), str(backup))
-        # Keep only the 5 most recent backups
-        backups = sorted(env_path.parent.glob(".env.pushkey_backup_*"),
-                         key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in backups[5:]:
-            old.unlink(missing_ok=True)
-
-    # Read existing file preserving ALL lines (comments, blanks, structure)
-    existing_lines = []
-    if env_path.exists():
-        existing_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-    # Pass 1: update keys that already exist in the file in-place
-    updated = set()
-    new_lines = []
-    for line in existing_lines:
-        result = _parse_env_line(line)
-        if result and result[0] in keys_to_write:
-            key = result[0]
-            new_lines.append(f"{key}={_format_env_value(keys_to_write[key])}")
-            updated.add(key)
-        else:
-            new_lines.append(line)
-
-    # Pass 2: append new keys that didn't exist yet
-    new_keys = {k: v for k, v in keys_to_write.items() if k not in updated}
-    if new_keys:
-        if new_lines and new_lines[-1].strip() != "":
-            new_lines.append("")
-        new_lines.append("# Managed by Pushkey")
-        for k in sorted(new_keys.keys()):
-            new_lines.append(f"{k}={_format_env_value(new_keys[k])}")
-
-    _atomic_write_text(env_path, "\n".join(new_lines) + "\n")
-    _ensure_gitignore_env(project_dir)
+    mutate_env_file(
+        project_path,
+        vault,
+        key_names=names,
+        update_existing=True,
+        backup_existing=True,
+    )
     return True
 
 
@@ -1441,11 +1458,12 @@ def days_until_rotation(key_info):
 # ═══════════════════════════════════════════════
 
 class LoginFrame(ctk.CTkFrame):
-    def __init__(self, master, on_login):
+    def __init__(self, master, on_login, on_start_fresh=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
         import threading
         threading.Thread(target=_try_load_argon2, daemon=True).start()
         self.on_login = on_login
+        self.on_start_fresh = on_start_fresh
         self.is_new = not VAULT_FILE.exists()
         self._reveal_state = False
 
@@ -1558,12 +1576,13 @@ class LoginFrame(ctk.CTkFrame):
             ctk.CTkLabel(note_inner, text="",
                          image=icon("shield", 12, C["amber"]),
                          width=16).pack(side="left")
-            ctk.CTkLabel(
+            self._new_vault_note_label = ctk.CTkLabel(
                 note_inner,
                 text="This password cannot be recovered. Store it safely.",
                 font=FONT_XS, text_color=C["amber"], anchor="w", justify="left",
                 wraplength=320,
-            ).pack(side="left", padx=(4, 0))
+            )
+            self._new_vault_note_label.pack(side="left", padx=(4, 0))
         else:
             link_row = ctk.CTkFrame(form, fg_color="transparent")
             link_row.pack(pady=(10, 0))
@@ -1584,7 +1603,27 @@ class LoginFrame(ctk.CTkFrame):
         # Bottom spacer (mirrors top spacer for vertical centering)
         ctk.CTkFrame(self, fg_color="transparent").pack(fill="both", expand=True)
 
+        self._card = card
+        self._form = form
+        self._last_layout = None
+        self.bind("<Configure>", self._on_resize, add="+")
+        self.after(0, self._apply_responsive_layout)
+
     # ── helpers ──────────────────────────────────────────────
+
+    def _on_resize(self, _event=None):
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self):
+        layout = _login_card_layout(self.winfo_width())
+        if layout == self._last_layout:
+            return
+        self._card.pack_configure(padx=layout["card_padx"])
+        self._form.pack_configure(padx=layout["form_padx"])
+        note_label = getattr(self, "_new_vault_note_label", None)
+        if note_label is not None:
+            note_label.configure(wraplength=layout["note_wraplength"])
+        self._last_layout = layout
 
     def _pw_label_row(self, parent, text):
         """Row with a small lock icon + uppercase field label."""
@@ -1653,14 +1692,53 @@ class LoginFrame(ctk.CTkFrame):
                     "If you have an exported backup file, copy it to:\n"
                     f"  {VAULT_FILE.parent}\n"
                     "as 'vault.enc', then unlock with the password you\n"
-                    "used when you created that backup."
+                    "used when you created that backup.\n\n"
+                    "If you want to keep using this device without that password,\n"
+                    "you can start fresh and move the current local vault into a\n"
+                    "timestamped backup folder."
                 ),
                 font=FONT_SM, text_color=C["text2"],
                 anchor="w", justify="left",
             ).pack(padx=20, pady=(0, 16), anchor="w")
-            make_btn(win, "Got it", win.destroy,
+
+            def _start_fresh():
+                confirm = simpledialog.askstring(
+                    "Start Fresh",
+                    "This will move your current local Pushkey vault into a backup folder and reset this device.\n\nType RESET to continue:",
+                    parent=win,
+                )
+                if confirm is None:
+                    return
+                if confirm.strip().upper() != "RESET":
+                    messagebox.showwarning("Start Fresh", "Confirmation text did not match. No changes were made.", parent=win)
+                    return
+                try:
+                    backup_dir = _start_fresh_local_vault()
+                    log_event(f"local vault reset: moved to {backup_dir}")
+                except FileNotFoundError:
+                    messagebox.showinfo("Start Fresh", "No local vault folder was found. Pushkey is already ready for a fresh start.", parent=win)
+                    backup_dir = None
+                except OSError as e:
+                    messagebox.showerror("Start Fresh", f"Could not move the local vault folder.\n\n{e}", parent=win)
+                    return
+                win.destroy()
+                if callable(self.on_start_fresh):
+                    self.on_start_fresh()
+                moved_msg = f"\n\nMoved to:\n{backup_dir}" if backup_dir else ""
+                messagebox.showinfo(
+                    "Start Fresh",
+                    "Pushkey is ready for first-time setup on this device." + moved_msg,
+                    parent=self,
+                )
+
+            actions = ctk.CTkFrame(win, fg_color="transparent")
+            actions.pack(padx=20, pady=(0, 16), fill="x")
+            make_btn(actions, "Start Fresh on This Device", _start_fresh,
+                     fg_color=C["amber"], text_color="#111827",
+                     height=34).pack(fill="x", pady=(0, 10))
+            make_btn(actions, "Got it", win.destroy,
                      fg_color=C["accent"], text_color="#FFFFFF",
-                     width=120, height=34).pack(pady=(0, 16))
+                     width=120, height=34).pack()
             return
 
         # V3 vault — show recovery flow
@@ -3092,9 +3170,27 @@ class AppFrame(ctk.CTkFrame):
         vault_bytes = VAULT_FILE.read_bytes() if VAULT_FILE.exists() else b""
         if not vault_bytes:
             return
-        etag = cloud_push(endpoint, token, vault_bytes)
-        self.config.setdefault("cloud", {})["last_synced"] = datetime.now().isoformat()
-        self.config["cloud"]["etag"] = etag
+        last_etag = cfg.get("etag", "")
+        try:
+            etag = cloud_push(endpoint, token, vault_bytes, if_match=last_etag)
+        except CloudSyncConflict as conflict:
+            # Another device pushed a newer vault. Do not overwrite it. Record
+            # the server's current ETag and surface the conflict so the user can
+            # pull and reconcile; staying silent here is exactly the cross-device
+            # write-loss this guards against.
+            cloud_cfg = self.config.setdefault("cloud", {})
+            cloud_cfg["conflict_etag"] = conflict.current_etag
+            save_config(self.config)
+            if not silent:
+                raise RuntimeError(
+                    "Cloud sync conflict: the vault was changed on another "
+                    "device. Pull the latest vault before syncing again."
+                ) from conflict
+            return
+        cloud_cfg = self.config.setdefault("cloud", {})
+        cloud_cfg["last_synced"] = datetime.now().isoformat()
+        cloud_cfg["etag"] = etag
+        cloud_cfg.pop("conflict_etag", None)
         save_config(self.config)
 
     # ── Cloud tab renderer ────────────────────────────────────────
@@ -8490,7 +8586,7 @@ class PushkeyApp:
         self.frame.pack(fill="both", expand=True)
 
     def show_login(self):
-        self.switch(LoginFrame, on_login=self.on_login)
+        self.switch(LoginFrame, on_login=self.on_login, on_start_fresh=self.show_login)
 
     def on_login(self, pw, vault, vault_key=None):
         write_health_sidecar(vault)

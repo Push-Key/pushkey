@@ -1,7 +1,10 @@
 # Pushkey Key Health
 
+Status: beta/deferred until the package/store gates pass.
+
 VS Code gutter decorations for `.env` files. It shows API key rotation health
-from the local Pushkey vault without reading secret values.
+from the local [Pushkey](https://github.com/Push-Key/pushkey) vault without
+reading secret values.
 
 ## What It Does
 

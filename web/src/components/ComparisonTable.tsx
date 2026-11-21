@@ -36,7 +36,7 @@ const FEATURES: Feature[] = [
   },
   {
     category: "Security",
-    label: "Zero-knowledge cloud sync",
+    label: "Encrypted cloud backup beta",
     pushkey: "yes",
     competitors: { Doppler: "no", "1Password Secrets": "no", Infisical: "partial", "dotenv vault": "partial" },
   },

@@ -20,7 +20,7 @@ export default function TermsPage() {
             <ul className="list-disc pl-6 space-y-2">
               <li><strong>Master password:</strong> We cannot recover it. If you lose it, your vault is unrecoverable unless you saved your recovery code.</li>
               <li><strong>Recovery code:</strong> Treat it like a seed phrase. Store offline. We do not retain copies.</li>
-              <li><strong>Cloud sync (Pro+):</strong> We store ciphertext only. We can&apos;t restore data we can&apos;t decrypt.</li>
+              <li><strong>Encrypted backup beta (Starter+):</strong> We store ciphertext only. We can&apos;t restore data we can&apos;t decrypt.</li>
               <li><strong>License keys:</strong> Don&apos;t share them. Each license is tied to your account.</li>
             </ul>
           </section>

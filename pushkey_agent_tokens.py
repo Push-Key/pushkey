@@ -14,12 +14,13 @@ inject : inject_env
 import hashlib
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pushkey_shared as _s
 from pushkey_crypto import AESGCM, get_or_create_salt
 
 VALID_SCOPES = {"read", "write", "inject"}
+DEFAULT_TOKEN_TTL_DAYS = 30
 
 
 # ── Storage helpers ─────────────────────────────────────────────────────────
@@ -115,13 +116,16 @@ def create_token(name: str, scopes: list[str], vault_key: bytes) -> tuple[bool, 
     token_value = f"pk_agent_{secrets.token_hex(24)}"
     token_hash = hashlib.sha256(token_value.encode()).hexdigest()
     token_id = f"at_{secrets.token_hex(6)}"
+    now = datetime.now()
+    expires_at = now + timedelta(days=DEFAULT_TOKEN_TTL_DAYS)
 
     tokens.append({
         "id": token_id,
         "token_hash": token_hash,
         "name": name,
         "scopes": scopes,
-        "created": datetime.now().isoformat(),
+        "created": now.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "last_used": None,
         "wrapped_vault_key": _wrap(vault_key, token_value),
     })
@@ -137,6 +141,7 @@ def list_tokens() -> list[dict]:
             "name": t["name"],
             "scopes": t["scopes"],
             "created": t["created"],
+            "expires_at": t.get("expires_at"),
             "last_used": t["last_used"],
         }
         for t in _load_raw()
@@ -167,6 +172,14 @@ def authenticate_token(token_value: str) -> tuple[bytes | None, list[str], str]:
     tokens = _load_raw()
     for i, t in enumerate(tokens):
         if t.get("token_hash") == token_hash:
+            expires_at = t.get("expires_at")
+            if expires_at is None:
+                return None, [], "token expired or legacy token requires rotation"
+            try:
+                if datetime.fromisoformat(expires_at) <= datetime.now():
+                    return None, [], "token expired"
+            except Exception:
+                return None, [], "token expired or invalid expiry"
             try:
                 vault_key = _unwrap(t["wrapped_vault_key"], token_value)
                 tokens[i]["last_used"] = datetime.now().isoformat()

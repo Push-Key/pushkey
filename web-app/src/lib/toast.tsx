@@ -63,7 +63,13 @@ export function ToastViewport() {
   if (!ctx) return null;
   const { items, dismiss } = ctx;
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2">
+    <div
+      role="region"
+      aria-live="polite"
+      aria-atomic="false"
+      aria-label="Notifications"
+      className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
+    >
       {items.map((t) => {
         const { border, text, Icon } = variantStyles[t.variant];
         return (

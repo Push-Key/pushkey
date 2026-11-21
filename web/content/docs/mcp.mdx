@@ -5,11 +5,13 @@ description: Connect AI agents to your vault via the Model Context Protocol.
 
 PushKey ships a built-in MCP server so AI agents — Claude Code, VS Code Copilot, OpenAI Agents SDK, and any MCP-compatible host — can interact with your vault without secrets appearing in conversation history or logs.
 
+This page covers the shipped MCP integration. Browser and VS Code extensions are beta/deferred and documented separately.
+
 ## Start the server
 
 ```bash
 python pushkey_mcp.py
-# SSE mode (VS Code Copilot, browser clients)
+# SSE mode (VS Code Copilot and other MCP clients with SSE support)
 python pushkey_mcp.py --port 8765
 ```
 

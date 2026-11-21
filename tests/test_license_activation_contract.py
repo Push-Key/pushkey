@@ -191,29 +191,29 @@ def test_admin_revoke_cannot_lose_concurrent_activation(
     client, app_module, monkeypatch
 ):
     key = _issue(client, "pro")
-    save_started = threading.Event()
-    allow_save = threading.Event()
-    original_save = app_module._save_licenses
+    mutate_started = threading.Event()
+    allow_mutate = threading.Event()
+    original_mutate = app_module._STATE_STORE.mutate_document
     first = True
 
-    def controlled_save(licenses):
+    def controlled_mutate(name, default_factory, mutator):
         nonlocal first
-        if first:
+        if first and name == "licenses":
             first = False
-            save_started.set()
-            assert allow_save.wait(5)
-        original_save(licenses)
+            mutate_started.set()
+            assert allow_mutate.wait(5)
+        return original_mutate(name, default_factory, mutator)
 
-    monkeypatch.setattr(app_module, "_save_licenses", controlled_save)
+    monkeypatch.setattr(app_module._STATE_STORE, "mutate_document", controlled_mutate)
     with ThreadPoolExecutor(max_workers=2) as pool:
         activation = pool.submit(
             client.post, "/v1/activate", json=_activation(key)
         )
-        assert save_started.wait(5)
+        assert mutate_started.wait(5)
         revocation = pool.submit(
             client.post, f"/api/admin/licenses/{key}/revoke"
         )
-        allow_save.set()
+        allow_mutate.set()
         assert activation.result().status_code == 200
         assert revocation.result().status_code == 200
 

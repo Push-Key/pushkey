@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-07-21T22:51:42.858931+00:00",
+  "verification_scope": "local alpha-only",
+  "storage_mode": "alpha-encrypted-blob",
+  "restore_type": "destructive restore from local snapshot",
+  "scenario": "destructive restore from volume snapshot after bad deploy mutation",
+  "duration_seconds": 0.192,
+  "restored": true,
+  "checks": [
+    "health",
+    "vault",
+    "activation_heartbeat",
+    "support_ticket",
+    "admin"
+  ],
+  "rpo_seconds": 0,
+  "rto_seconds": 0.192,
+  "residual_risk": "Local alpha-only drill; production backup/PITR, versioned object storage, and live alert delivery still require hosted environment evidence."
+}

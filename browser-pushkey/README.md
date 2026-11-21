@@ -1,5 +1,7 @@
 # Pushkey Browser Extension
 
+Status: beta/deferred until the package/store gates pass.
+
 Displays API key health status from your local Pushkey vault in Chrome or Firefox.
 
 ## How it works

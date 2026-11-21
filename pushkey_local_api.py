@@ -44,9 +44,11 @@ from pushkey_crypto import (
     VaultFormatError,
     VaultIntegrityError,
 )
+from pushkey_env import mutate_env_file, sanitize_env_value
 from pushkey_vault import (
     MAX_VAULT_BYTES,
     load_vault,
+    load_vault_with_key,
     migrate_vault_to_v3,
     replace_v3_recovery_code,
     rekey_v3_password,
@@ -161,6 +163,7 @@ class _Session:
         self.vault_key: Optional[bytes] = None
         self.password: Optional[str] = None
         self.auth_method: str = "none"  # 'password' | 'recovery' | 'agent_token'
+        self.scopes: list[str] = []  # only meaningful when auth_method == 'agent_token'
         self.unlocked_at: float = 0.0
         self.last_activity: float = 0.0
         self.autolock_seconds: int = AUTOLOCK_SECONDS_DEFAULT
@@ -178,11 +181,20 @@ class _Session:
     def can_write(self) -> bool:
         return (not self.locked) and self.auth_method == "password"
 
-    def unlock(self, vault: dict, vault_key: Optional[bytes], password: str, *, method: str) -> None:
+    def unlock(
+        self,
+        vault: dict,
+        vault_key: Optional[bytes],
+        password: Optional[str],
+        *,
+        method: str,
+        scopes: Optional[list[str]] = None,
+    ) -> None:
         self.vault = vault
         self.vault_key = vault_key
         self.password = password
         self.auth_method = method
+        self.scopes = scopes or []
         now = time.time()
         self.unlocked_at = now
         self.last_activity = now
@@ -195,6 +207,7 @@ class _Session:
         self.vault_key = None
         self.password = None
         self.auth_method = "none"
+        self.scopes = []
         self.unlocked_at = 0.0
         self.last_activity = 0.0
 
@@ -460,6 +473,30 @@ def create_app() -> FastAPI:
         sess.touch()
         return sess
 
+    def require_scope(scope: str):
+        """Dependency factory gating an endpoint by agent-token scope.
+
+        Password and recovery sessions are unaffected: read passes for either
+        (matching require_unlocked's existing behavior), and write/inject both
+        still require can_write (password-only), exactly like require_writable
+        today -- an agent token is the only auth method this actually narrows.
+        Mirrors pushkey_mcp.py's _require_scope so MCP, CLI, and the local API
+        enforce the same scope-to-operation mapping.
+        """
+        def _check(sess: _Session = Depends(require_unlocked)) -> _Session:
+            if sess.auth_method == "agent_token":
+                if scope not in sess.scopes:
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN, f"agent token missing required scope: {scope}"
+                    )
+                return sess
+            if scope == "read":
+                return sess
+            if not sess.can_write:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "write requires master-password unlock")
+            return sess
+        return _check
+
     @app.middleware("http")
     async def local_boundary(request: Request, call_next):
         raw_headers = request.scope.get("headers", ())
@@ -566,6 +603,24 @@ def create_app() -> FastAPI:
         if not body.password and not body.recovery_code:
             raise HTTPException(400, "password or recovery_code required")
         sess: _Session = app.state.session
+        if body.password and body.password.startswith("pk_agent_"):
+            import pushkey_agent_tokens as _at
+            vault_key, scopes, err = _at.authenticate_token(body.password)
+            if vault_key is None:
+                raise HTTPException(401, err or "invalid or expired agent token")
+            vault, vk = load_vault_with_key(vault_key)
+            if vault is None:
+                raise HTTPException(
+                    422, "agent token could not decrypt vault (stale after a master password change?)"
+                )
+            sess.unlock(vault, vk, None, method="agent_token", scopes=scopes)
+            return {
+                "locked": False,
+                "key_count": len(vault),
+                "can_write": sess.can_write,
+                "auth_method": "agent_token",
+                "scopes": scopes,
+            }
         try:
             if body.password:
                 vault, vault_key = load_vault(body.password)
@@ -591,7 +646,7 @@ def create_app() -> FastAPI:
         return {"locked": True}
 
     @app.get("/api/keys")
-    def list_keys(sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def list_keys(sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         out = []
         for name, data in sess.vault.items():
             if name.startswith("_"):
@@ -613,7 +668,7 @@ def create_app() -> FastAPI:
         return {"keys": out, "count": len(out)}
 
     @app.get("/api/keys/{name}")
-    def reveal_key(name: str, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def reveal_key(name: str, sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         data = sess.vault[name]
@@ -642,8 +697,16 @@ def create_app() -> FastAPI:
         return sess
 
     def _save(sess: _Session, response: Optional[Response] = None) -> None:
-        from pushkey_vault import save_vault as _save_vault
-        _save_vault(sess.vault, sess.password, vault_key=sess.vault_key)
+        # Re-import at call time (not the module-level `save_vault` binding) so
+        # tests that monkeypatch pushkey_vault.save_vault directly still take
+        # effect here. Agent-token sessions never hold the master password
+        # (mirrors pushkey_mcp.py's _save_session_vault), so they write
+        # through the raw vault-key path instead of the password-reencrypt path.
+        import pushkey_vault as _pv
+        if sess.password is not None:
+            _pv.save_vault(sess.vault, sess.password, vault_key=sess.vault_key)
+        else:
+            _pv.save_vault_with_key(sess.vault, sess.vault_key)
         try:
             publish_saved_vault(sess.vault)
             sess.health_warning = None
@@ -669,18 +732,29 @@ def create_app() -> FastAPI:
             tmp.unlink(missing_ok=True)
 
     def _persist_project_state(sess: _Session, mutate, *, response=None, save_when=lambda _result: True):
-        """Apply a config/vault mutation and roll both encrypted files back on failure."""
+        """Apply a config/vault mutation, rolling our own writes back on failure.
+
+        The vault file is deliberately never restored here. `save_vault` writes
+        atomically (temp file + os.replace) and refuses to write when the
+        on-disk revision moved out from under the in-memory session
+        (VaultConflictError), so a failed `_save` never leaves a partial vault
+        and never overwrote the disk. Restoring the pre-request vault snapshot
+        would therefore only ever clobber a vault another process (CLI, MCP)
+        committed while we held the in-process lock -- the cross-writer secret
+        loss this transaction exists to prevent.
+        """
         from pushkey_vault import load_config, save_config
         with app.state.project_lock:
             cfg = load_config()
             original_cfg = copy.deepcopy(cfg)
             original_vault = copy.deepcopy(sess.vault)
             cfg_bytes = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
-            vault_bytes = _s.VAULT_FILE.read_bytes() if _s.VAULT_FILE.exists() else None
+            config_written = False
             try:
                 result = mutate(cfg, sess.vault)
                 if save_when(result):
                     save_config(cfg)
+                    config_written = True
                     _save(sess, response)
                 return cfg, result
             except Exception:
@@ -688,8 +762,11 @@ def create_app() -> FastAPI:
                 sess.vault.update(original_vault)
                 cfg.clear()
                 cfg.update(original_cfg)
-                _restore_bytes(_s.CONFIG_FILE, cfg_bytes)
-                _restore_bytes(_s.VAULT_FILE, vault_bytes)
+                # Only undo the config we actually wrote. `save_config` is also
+                # atomic, and _save runs last, so if we never reached it there is
+                # nothing on disk to undo.
+                if config_written:
+                    _restore_bytes(_s.CONFIG_FILE, cfg_bytes)
                 raise
 
     def _now_date() -> str:
@@ -697,7 +774,7 @@ def create_app() -> FastAPI:
         return datetime.now().strftime("%Y-%m-%d")
 
     @app.post("/api/keys", status_code=201)
-    def create_key(body: KeyCreate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def create_key(body: KeyCreate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         if body.name.startswith("_"):
             raise HTTPException(400, "key names cannot start with '_'")
@@ -718,7 +795,7 @@ def create_app() -> FastAPI:
         return {"name": body.name, "provider": provider, "env": body.env}
 
     @app.patch("/api/keys/{name}")
-    def update_key(name: str, body: KeyUpdate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def update_key(name: str, body: KeyUpdate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -732,14 +809,14 @@ def create_app() -> FastAPI:
         return {"name": name, "provider": entry.get("provider"), "env": entry.get("env"), "notes": entry.get("notes", "")}
 
     @app.delete("/api/keys/{name}", status_code=204)
-    def delete_key(name: str, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def delete_key(name: str, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         del sess.vault[name]
         _save(sess, response)
 
     @app.post("/api/keys/{name}/rotate")
-    def rotate_key(name: str, body: RotateBody, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def rotate_key(name: str, body: RotateBody, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -752,7 +829,7 @@ def create_app() -> FastAPI:
         return {"name": name, "rotated": entry["rotated"], "history_count": len(entry["history"])}
 
     @app.post("/api/keys/{name}/backup")
-    def set_backup(name: str, body: BackupBody, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def set_backup(name: str, body: BackupBody, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -765,7 +842,7 @@ def create_app() -> FastAPI:
         return {"name": name, "next_added": entry["next_added"], "dual_rotation": True, "provider_supports_multi_key": prov_supports}
 
     @app.post("/api/keys/{name}/promote")
-    def promote_backup(name: str, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def promote_backup(name: str, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
         entry = sess.vault[name]
@@ -784,7 +861,7 @@ def create_app() -> FastAPI:
     # ── projects ──────────────────────────────────────────────────────────
 
     @app.get("/api/projects")
-    def list_projects(response: Response, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def list_projects(response: Response, sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         vault_view = sess.vault
         if sess.can_write:
@@ -814,7 +891,7 @@ def create_app() -> FastAPI:
         return {"projects": result, "count": len(result)}
 
     @app.post("/api/projects", status_code=201)
-    def create_project(body: ProjectCreate, response: Response, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def create_project(body: ProjectCreate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         canonical = _canonical_project_path(body.path)
         def mutate_create(current_cfg, current_vault):
@@ -830,7 +907,7 @@ def create_app() -> FastAPI:
         return {"path": canonical, "name": cfg["projects"][canonical]["name"]}
 
     @app.delete("/api/projects", status_code=204)
-    def delete_project(response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def delete_project(response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         from pushkey_vault import load_config, save_config
         path = _canonical_project_path(path)
         def mutate_delete(current_cfg, current_vault):
@@ -847,7 +924,7 @@ def create_app() -> FastAPI:
         _persist_project_state(sess, mutate_delete, response=response)
 
     @app.post("/api/projects/assign")
-    def assign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def assign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         from pushkey_vault import load_config
         path = _canonical_project_path(path)
         def mutate_assign(current_cfg, current_vault):
@@ -865,7 +942,7 @@ def create_app() -> FastAPI:
         return {"path": path, "assigned": body.keys}
 
     @app.post("/api/projects/unassign")
-    def unassign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def unassign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         path = _canonical_project_path(path)
         from pushkey_vault import load_config
         def mutate_unassign(current_cfg, current_vault):
@@ -883,7 +960,7 @@ def create_app() -> FastAPI:
         return {"path": path, "unassigned": body.keys}
 
     @app.post("/api/projects/inject")
-    def inject_project(body: InjectBody, response: Response, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+    def inject_project(body: InjectBody, response: Response, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_scope("inject")), _: None = Depends(require_token)):
         from pushkey_vault import load_config
         path = _canonical_project_path(path)
         cfg, _ = _persist_project_state(
@@ -913,35 +990,34 @@ def create_app() -> FastAPI:
         env_path = proj / ".env"
         if env_path.is_symlink():
             raise HTTPException(400, "refusing to write through .env symlink")
-        existing_lines: list[str] = []
-        existing_keys: set[str] = set()
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                existing_lines.append(line)
-                if "=" in line and not line.startswith("#"):
-                    existing_keys.add(line.split("=", 1)[0].strip())
+        safe_entries = {
+            k: {**sess.vault[k], "value": sanitize_env_value(sess.vault[k]["value"])}
+            for k in keys
+        }
 
-        new_lines = [f"{k}={sess.vault[k]['value']}" for k in keys if k not in existing_keys]
-        skipped = [k for k in keys if k in existing_keys]
-
+        identity = _project_identity(proj)
         if write:
-            identity = _project_identity(proj)
             gitignore = proj / ".gitignore"
             _assert_project_target(proj, path, env_path, identity)
             _assert_project_target(proj, path, gitignore, identity)
-            content = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-            if ".env" not in content.splitlines():
-                _atomic_project_write(
-                    path,
-                    ".gitignore",
-                    (content.rstrip("\n") + "\n.env\n").encode("utf-8"),
-                    identity,
-                )
-            all_lines = existing_lines + new_lines
-            _atomic_project_write(
-                path, ".env", ("\n".join(all_lines) + "\n").encode("utf-8"), identity
-            )
-        return {"injected": new_lines, "skipped_existing": skipped, "env_file": str(env_path), "wrote": write}
+
+        def atomic_write(filename: str, data: bytes) -> None:
+            _atomic_project_write(path, filename, data, identity)
+
+        result = mutate_env_file(
+            proj,
+            safe_entries,
+            key_names=keys,
+            update_existing=False,
+            write=write,
+            atomic_write=atomic_write if write else None,
+        )
+        return {
+            "injected": result.injected_names,
+            "skipped_existing": result.skipped_existing,
+            "env_file": result.env_file,
+            "wrote": write,
+        }
 
     # ── providers ─────────────────────────────────────────────────────────
 
@@ -982,7 +1058,7 @@ def create_app() -> FastAPI:
     # ── Phase 3: advanced ops ────────────────────────────────────────────
 
     @app.get("/api/health")
-    def get_health(threshold_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_health(threshold_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         from datetime import datetime
         now = datetime.now()
@@ -1022,7 +1098,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/forecast")
-    def get_forecast(window_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_forecast(window_days: int = Query(default=90, ge=1, le=3650), sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         from datetime import datetime, timedelta
         now = datetime.now()
@@ -1053,7 +1129,7 @@ def create_app() -> FastAPI:
         return {"upcoming": upcoming, "count": len(upcoming), "window_days": window_days}
 
     @app.get("/api/lifecycle/{name}")
-    def get_lifecycle(name: str, sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_lifecycle(name: str, sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         from datetime import datetime, timedelta
         if name.startswith("_") or name not in sess.vault:
@@ -1089,7 +1165,7 @@ def create_app() -> FastAPI:
     # ── audit ─────────────────────────────────────────────────────────────
 
     @app.get("/api/audit")
-    def get_audit(limit: int = Query(default=200, ge=1, le=1000), sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def get_audit(limit: int = Query(default=200, ge=1, le=1000), sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         from pushkey_crypto import _log_decrypt_all
         lines = _log_decrypt_all()
         if limit > 0:
@@ -1172,7 +1248,7 @@ def create_app() -> FastAPI:
     # ── backup export / import ───────────────────────────────────────────
 
     @app.post("/api/backup/export")
-    def backup_export(sess: _Session = Depends(require_unlocked), _: None = Depends(require_token)):
+    def backup_export(sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
         if not _s.VAULT_FILE.exists():
             raise HTTPException(404, "no vault")
         import base64

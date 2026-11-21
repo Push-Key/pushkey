@@ -5,6 +5,8 @@ Conftest auto-fixture redirects all vault paths to tmp_path, so tokens
 written here never touch the real ~/.pushkey directory.
 """
 import secrets
+from datetime import datetime, timedelta
+
 import pytest
 
 import pushkey_agent_tokens as at
@@ -73,6 +75,7 @@ def test_list_tokens_omits_secrets(pro_tier):
     assert "token_hash" not in t
     assert t["name"] == "t1"
     assert t["scopes"] == ["read", "write"]
+    assert t["expires_at"] is not None
 
 
 def test_list_tokens_empty_on_fresh_vault():
@@ -100,6 +103,46 @@ def test_authenticate_returns_vault_key_and_scopes(pro_tier):
     assert err == ""
     assert unwrapped == vk
     assert scopes == ["read", "inject"]
+
+
+def test_authenticate_accepts_non_expired_token(pro_tier):
+    vk = _fake_vault_key()
+    _, value, _ = at.create_token("t1", ["read"], vk)
+    token = at._load_raw()[0]
+    token["expires_at"] = (datetime.now() + timedelta(days=1)).isoformat()
+    at._save_raw([token])
+
+    unwrapped, scopes, err = at.authenticate_token(value)
+
+    assert err == ""
+    assert unwrapped == vk
+    assert scopes == ["read"]
+
+
+def test_authenticate_rejects_expired_token(pro_tier):
+    _, value, _ = at.create_token("t1", ["read"], _fake_vault_key())
+    token = at._load_raw()[0]
+    token["expires_at"] = (datetime.now() - timedelta(seconds=1)).isoformat()
+    at._save_raw([token])
+
+    unwrapped, scopes, err = at.authenticate_token(value)
+
+    assert unwrapped is None
+    assert scopes == []
+    assert "expired" in err
+
+
+def test_authenticate_rejects_legacy_token_without_expiry(pro_tier):
+    _, value, _ = at.create_token("t1", ["read"], _fake_vault_key())
+    token = at._load_raw()[0]
+    token.pop("expires_at")
+    at._save_raw([token])
+
+    unwrapped, scopes, err = at.authenticate_token(value)
+
+    assert unwrapped is None
+    assert scopes == []
+    assert "legacy" in err or "expired" in err
 
 
 def test_authenticate_rejects_non_pk_agent_prefix():

@@ -1,6 +1,26 @@
 # Pushkey
 
-> Pushkey is a local encrypted API key vault with a built-in MCP server for Claude Code and VS Code Copilot. Agents can unlock the vault, retrieve keys, inject .env files, check rotation health, and rotate secrets — all without secrets leaving the machine or appearing in conversation history.
+> Pushkey is a local encrypted API key vault for autonomous coding agents. Agents authenticate with scoped, expiring, revocable tokens — never the master password — and can list keys, retrieve values, inject `.env` files, check rotation health, and rotate secrets across three interchangeable surfaces: an MCP server, a CLI, and a loopback-only local HTTP API. Full master-password sessions get unrestricted access; agent tokens are capped to exactly the scopes they were minted with.
+
+## Three surfaces, one auth model
+
+| Surface | Best for | Auth |
+|---|---|---|
+| MCP server | Claude Code, VS Code Copilot, OpenAI Agents SDK — anything speaking MCP | `unlock_vault(password)` — master password or `pk_agent_...` token |
+| CLI (`pushkey`) | Shell scripts, CI/CD pipelines, cron jobs | `--token`, `PUSHKEY_AGENT_TOKEN` env var, or `--password pk_agent_...` |
+| Local API (loopback only) | Custom agent runtimes, non-Python/non-MCP clients | `POST /api/unlock` with `password` = master password or `pk_agent_...` token |
+
+All three enforce the same three scopes: `read`, `write`, `inject`. A token minted with one scope cannot perform actions gated to another, on any surface.
+
+## Agent tokens (`pk_agent_...`)
+
+Scoped, expiring, revocable credentials that wrap the vault's raw encryption key at mint time — never the master password. Requires Pro tier or higher.
+
+- **Scopes**: `read` (list/view keys, health, projects), `write` (add/rotate/assign keys), `inject` (write `.env` files) — independent, combine as needed.
+- **TTL**: optional expiry set at creation; expired tokens are rejected on every surface.
+- **Revocation**: instant, from any surface with an active master-password session; revoked tokens are rejected immediately everywhere.
+- **Minting/revoking tokens itself always requires a master-password session** — a token can never mint or revoke another token, on any surface.
+- If the vault is rekeyed (master password changed), tokens minted against the old key stop working — mint new ones after a rekey.
 
 ## MCP Server
 
@@ -58,33 +78,62 @@ Add to `.vscode/mcp.json` in your workspace:
 }
 ```
 
-## Available MCP Tools
+### Available MCP Tools
 
 Call `unlock_vault` first — all other tools require an active session.
 
-| Tool | Signature | Description |
-|------|-----------|-------------|
-| `unlock_vault` | `(password: str)` | Unlock vault; required before all other tools |
-| `lock_vault` | `()` | Clear in-memory session |
-| `list_keys` | `(env?, provider?, project?)` | List all keys (metadata only, no values) |
-| `get_key` | `(name: str)` | Retrieve a key's plaintext value |
-| `add_key` | `(name, value, provider?, env?, notes?, overwrite?)` | Store a new key |
-| `inject_env` | `(project_path, keys?)` | Write keys to `.env` and add `.env` to `.gitignore` |
-| `check_health` | `(rotation_threshold_days?=90)` | Report stale/expiring keys |
-| `rotate_key` | `(name, new_value)` | Update value + rotation timestamp |
-| `list_projects` | `()` | List all projects with assigned keys |
-| `assign_key` | `(key_name, project_path)` | Link a key to a project path |
+| Tool | Signature | Scope | Description |
+|------|-----------|-------|-------------|
+| `unlock_vault` | `(password: str)` | — | Unlock with master password or `pk_agent_...` token; required before all other tools |
+| `lock_vault` | `()` | — | Clear in-memory session |
+| `list_keys` | `(env?, provider?, project?)` | read | List all keys (metadata only, no values) |
+| `get_key` | `(name: str)` | read | Retrieve a key's plaintext value |
+| `check_health` | `(rotation_threshold_days?=90)` | read | Report stale/expiring keys |
+| `list_projects` | `()` | read | List all projects with assigned keys |
+| `add_key` | `(name, value, provider?, env?, notes?, overwrite?)` | write | Store a new key |
+| `rotate_key` | `(name, new_value)` | write | Update value + rotation timestamp |
+| `set_backup_key` | `(name, backup_value)` | write | Stage a backup value for dual-key rotation (Pro+, master password only) |
+| `rotate_to_backup` | `(name)` | write | Promote staged backup to active (Pro+, master password only) |
+| `assign_key` | `(key_name, project_path)` | write | Link a key to a project path |
+| `inject_env` | `(project_path, keys?)` | inject | Write keys to `.env` and add `.env` to `.gitignore` |
+| `create_agent_token` | `(name, scopes)` | master password only | Mint a scoped `pk_agent_...` token |
+| `list_agent_tokens` | `()` | — | List token metadata (no values) |
+| `revoke_agent_token` | `(token_id)` | master password only | Revoke a token immediately |
+
+## CLI (`pushkey`)
+
+```bash
+pushkey --token pk_agent_... add STRIPE_KEY sk_live_...      # write scope
+pushkey --token pk_agent_... list --json                      # read scope
+PUSHKEY_AGENT_TOKEN=pk_agent_... pushkey inject /path/to/repo  # inject scope
+```
+
+`--password pk_agent_...` also works — the CLI detects the `pk_agent_` prefix and routes through token auth automatically. Commands and their required scope: `get`/`list`/`status` → read; `add`/`rotate`/`set-backup`/`delete`/`import` → write; `inject` → inject. A token missing the required scope exits non-zero without touching the vault.
+
+## Local API (loopback only)
+
+Bearer-token gated, binds to `127.0.0.1` only — not reachable off-machine.
+
+```bash
+curl -X POST http://127.0.0.1:<port>/api/unlock \
+  -H "Authorization: Bearer <local-api-token>" \
+  -d '{"password": "pk_agent_..."}'
+```
+
+Response includes `auth_method: "agent_token"` and the token's `scopes`. Every subsequent endpoint in that session is gated to those scopes — `GET /api/keys`, `GET /api/keys/{name}` (read); `POST/DELETE /api/keys/*`, `/api/keys/{name}/rotate`, `/api/projects*` writes (write); `POST /api/projects/inject` (inject). `POST /api/agents` (create token) and `DELETE /api/agents/{id}` (revoke) always require a master-password session, matching MCP.
 
 ## Typical Agent Workflow
 
 ```
-1. unlock_vault("master-password")
-2. list_keys()                              # see what's available
-3. get_key("OPENAI_API_KEY")               # retrieve a specific value
+1. unlock_vault("pk_agent_...")             # or a master password
+2. list_keys()                              # see what's available (read)
+3. get_key("OPENAI_API_KEY")                # retrieve a specific value (read)
 4. inject_env("/path/to/project",
-     keys=["OPENAI_API_KEY", "STRIPE_KEY"]) # populate .env
-5. check_health()                           # flag stale keys before deploy
+     keys=["OPENAI_API_KEY", "STRIPE_KEY"]) # populate .env (inject)
+5. check_health()                           # flag stale keys before deploy (read)
 ```
+
+Scope a token to exactly the steps an agent needs — a CI pipeline that only injects `.env` files at build time needs `inject` alone, not `write`.
 
 ## Claude Code Skill
 
@@ -99,10 +148,16 @@ The skill guides Claude through the correct tool call sequence without manual lo
 ## Security Model
 
 - Vault encrypted with AES-256-GCM + Argon2id KDF (600k PBKDF2 fallback)
+- Agent tokens wrap the raw vault encryption key at mint time — the master password is never derivable from a token, and a token session can never mint or revoke other tokens
 - Cloud sync is zero-knowledge — server only stores ciphertext
-- Key values never appear in conversation history or logs
-- `.env` files automatically added to `.gitignore` on `inject_env`
+- Key values never appear in conversation history or logs when accessed via `inject_env`/CLI `inject`
+- `.env` files automatically added to `.gitignore` on injection
 - Master password never stored; decrypted in-memory only
+- Local API binds to loopback only and requires its own bearer token independent of vault auth
+
+## What's not built yet
+
+Multi-machine token distribution and a hosted broker/execution layer for remote agent fleets are designed but not implemented — today's scoped delegation model covers agents running on the same machine as the vault (MCP, CLI, or local API), not remote orchestration.
 
 ## Machine-Readable MCP Manifest
 

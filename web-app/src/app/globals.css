@@ -16,7 +16,17 @@
   --color-accent: #7c3aed;
   --color-accent-foreground: #e6edf3;
   --color-destructive: #ef4444;
+  /* Solid-fill red for filled surfaces (buttons, count badges). #ef4444 as a
+     background only reaches 3.18:1 against --color-destructive-foreground and
+     3.76:1 against white, both below the WCAG 2.2 AA 4.5:1 minimum for normal
+     text. #b91c1c reaches 5.48:1 and 6.47:1 respectively. --color-destructive
+     itself stays as-is because it is used as *foreground* text on the dark
+     background, where it already passes. */
+  --color-destructive-strong: #b91c1c;
   --color-destructive-foreground: #e6edf3;
+  /* Same rationale for the overdue badge: Tailwind's orange-500 (#f97316)
+     behind white text is only 2.8:1. */
+  --color-warning-strong: #b45309;
   --color-ring: #00d9ff;
   --radius: 0.5rem;
 }

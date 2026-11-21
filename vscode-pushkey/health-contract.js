@@ -209,6 +209,14 @@ class HealthWatcher {
                 this.closeWatcher();
                 this.schedule(() => this.attach(), this.retryMs);
             });
+            // An unexpected close (e.g. the directory was removed) also needs a
+            // reattach. Our own closeWatcher() clears fileWatcher before calling
+            // close(), so self-initiated closes fail the identity check and are ignored.
+            watcher.on('close', () => {
+                if (this.disposed || this.fileWatcher !== watcher) return;
+                this.fileWatcher = null;
+                this.schedule(() => this.attach(), this.retryMs);
+            });
             this.fileWatcher = watcher;
         } catch (_) {
             this.schedule(() => this.attach(), this.retryMs);
