@@ -520,6 +520,134 @@ def test_git_timeout_means_not_tracked(project, monkeypatch):
     assert _tracked(project, ".env") is False
 
 
+def _commit_env_files(project, *relpaths):
+    _git(project, "init")
+    for relpath in relpaths:
+        target = project / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("A=1\n")
+    _git(project, "add", "--", *relpaths)
+    _git(project, "commit", "-m", "x")
+
+
+def _filesystem_ignores_case(folder):
+    probe = folder / "CaseProbe"
+    probe.write_text("x")
+    try:
+        return (folder / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_tracked_file_is_found_under_a_different_case_folder(project):
+    if not _filesystem_ignores_case(project):
+        pytest.skip("case-sensitive file system: Apps and apps are different folders")
+    _commit_env_files(project, "apps/.env.local")
+    assert _tracked(project, "apps/.env.local") is True
+    for variant in ("Apps/.env.local", "APPS/.ENV.LOCAL"):
+        assert _tracked(project, variant) is True, variant
+    assert _tracked(project, "Apps/.env.other") is False
+
+
+def test_tracked_file_is_found_under_a_different_case_file_name(project):
+    if not _filesystem_ignores_case(project):
+        pytest.skip("case-sensitive file system: .env.LOCAL and .env.local are different files")
+    _commit_env_files(project, ".env.local")
+    assert _tracked(project, ".env.LOCAL") is True
+    assert _tracked(project, ".ENV.local") is True
+
+
+def test_tracked_file_missing_from_disk_is_still_tracked_when_git_ignores_case(project):
+    _commit_env_files(project, ".env.local", "apps/.env.local")
+    (project / ".env.local").unlink()
+    (project / "apps" / ".env.local").unlink()
+    (project / "apps").rmdir()
+    _git(project, "config", "core.ignorecase", "true")
+    for variant in (".env.local", ".env.LOCAL", "apps/.env.local", "Apps/.env.Local"):
+        assert _tracked(project, variant) is True, variant
+    assert _tracked(project, ".env.other") is False
+    assert _tracked(project, "Apps/.env.other") is False
+
+
+def test_tracked_file_missing_from_disk_is_matched_case_sensitively_when_git_is_not(project):
+    _commit_env_files(project, ".env.local")
+    (project / ".env.local").unlink()
+    _git(project, "config", "core.ignorecase", "false")
+    assert _tracked(project, ".env.local") is True
+    assert _tracked(project, ".env.LOCAL") is False
+
+
+def test_git_does_not_run_a_core_fsmonitor_command_from_the_project_config(project):
+    _commit_env_files(project, ".env.local")
+    _git(project, "config", "core.fsmonitor", "echo ran > FSM_RAN.txt; true")
+    assert _tracked(project, ".env.local") is True
+    assert not (project / "FSM_RAN.txt").exists()
+
+
+def test_git_runs_with_fsmonitor_off_and_without_repository_overrides(project, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"], seen["env"] = argv, kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS"):
+        monkeypatch.setenv(name, "elsewhere")
+    monkeypatch.setattr(pushkey_projectfs.subprocess, "run", fake_run)
+    assert _tracked(project, ".env.local") is True
+    assert seen["argv"][:3] == ["git", "-c", "core.fsmonitor=false"]
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_PARAMETERS"):
+        assert name not in {key.upper() for key in seen["env"]}, name
+    assert seen["env"]["GIT_LITERAL_PATHSPECS"] == "1"
+    assert seen["env"]["PATH"] == os.environ["PATH"]
+
+
+# ── .gitignore coverage must agree with git ──────────────────────────────────
+
+# (label, .gitignore bytes, env file). Whatever ensure_project_gitignore answers,
+# git itself must report the file ignored afterwards: "covered" may only be said
+# when git really ignores it, and an appended exact line (last, so it wins) must
+# fix every other case.
+GITIGNORE_ROWS = [
+    ("pattern", b".env*\n", "apps/.env.local"),
+    ("exact line", b"apps/.env.local\n", "apps/.env.local"),
+    ("anchored line", b"/.env.local\n", ".env.local"),
+    ("crlf", b".env.local\r\n", ".env.local"),
+    ("trailing spaces", b".env.local   \n", ".env.local"),
+    ("negation with a space is another pattern", b".env*\n! .env.local\n", ".env.local"),
+    ("leading spaces", b"  .env.local\n", ".env.local"),
+    ("trailing tab", b".env.local\t\n", ".env.local"),
+    ("trailing no-break space", ".env.local \n".encode(), ".env.local"),
+    ("negated class", b".env.[^l]ocal\n", ".env.local"),
+    ("class", b".env.[l]ocal\n", ".env.local"),
+    ("escaped trailing space", b".env.local\\ \n", ".env.local"),
+    ("upper-case pattern", b".ENV*\n", ".env.local"),
+    ("comment", b"#.env.local\n", ".env.local"),
+    ("negated wildcard in a folder", b".env*\n!apps/.env.*\n", "apps/.env.local"),
+    ("negated double star", b".env*\n!**/.env.local\n", "apps/.env.local"),
+    ("negated name", b".env*\n!.env.local\n", ".env.local"),
+    ("negated name in another case", b".env*\n!.ENV.LOCAL\n", ".env.local"),
+    ("negation with a class", b".env*\n![.]env.local\n", ".env.local"),
+    ("negation then pattern", b"!.env.local\n.env*\n", ".env.local"),
+]
+
+
+@pytest.mark.parametrize(
+    "content,relpath",
+    [pytest.param(c, r, id=label.replace(" ", "-")) for label, c, r in GITIGNORE_ROWS],
+)
+def test_gitignore_cover_decision_agrees_with_git(project, content, relpath):
+    _git(project, "init")
+    (project / ".gitignore").write_bytes(content)
+    target = project / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("A=1\n")
+    identity = project_identity(project)
+    ensure_project_gitignore(str(project), relpath, identity)
+    assert _git_ignore_status(project, relpath) == 0
+    assert ensure_project_gitignore(str(project), relpath, identity) is False
+
+
 # ── the web API keeps its names as thin shims ────────────────────────────────
 
 
