@@ -1,16 +1,24 @@
 """Shared .env mutation helpers for CLI, MCP, and the local API."""
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
+import pushkey_shared as _s
+
 
 _ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+#: Backups older Pushkey versions wrote into the project folder.
+LEGACY_BACKUP_GLOB = ".env.pushkey_backup_*"
+
+_BACKUP_KEEP = 3
+_BACKUP_STAMP_FORMAT = "%Y%m%d_%H%M%S_%f"
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,101 @@ def sanitize_env_value(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
 
 
+def project_id(project: Path) -> str:
+    """Stable 16-hex-char id of a project folder, used to group its backups."""
+    resolved = str(Path(project).resolve())
+    return hashlib.sha256(resolved.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _private_chmod(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass  # best effort, as for the vault files; some filesystems ignore modes
+
+
+def _backup_stamps(directory: Path, safe_name: str) -> list[tuple[str, Path]]:
+    """Backups of one file in `directory`, oldest first.
+
+    The match is exact so that backing up `.env` never touches the backups of
+    `.env.local` (`.env.local.<stamp>.bak` would also fit a `.env.*.bak` glob).
+    """
+    pattern = re.compile(r"^" + re.escape(safe_name) + r"\.(\d{8}_\d{6}_\d{6})\.bak$")
+    found: list[tuple[str, Path]] = []
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        match = pattern.match(entry.name)
+        if match:
+            found.append((match.group(1), entry))
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def backup_env_file(project: Path, relpath: str, data: bytes) -> Path:
+    """Save `data` (the old contents of `<project>/<relpath>`) under ~/.pushkey.
+
+    Backups never go into the project folder: they hold secrets and a project
+    folder is usually under version control. Only the newest three backups of
+    each file are kept. Raises on failure so the caller does not overwrite the
+    original without a backup.
+    """
+    safe_name = relpath.replace("\\", "/").replace("/", "__")
+    if not safe_name:
+        raise ValueError("relpath must not be empty")
+
+    root = Path(_s.ENV_BACKUPS_DIR)
+    target_dir = root / project_id(project)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target_dir.mkdir(mode=0o700, exist_ok=True)
+    _private_chmod(root, 0o700)
+    _private_chmod(target_dir, 0o700)
+
+    existing = _backup_stamps(target_dir, safe_name)
+    moment = datetime.now()
+    if existing:
+        # The clock is coarse on Windows (about 15 ms): keep names strictly
+        # increasing so quick successive backups neither collide nor misorder.
+        try:
+            newest = datetime.strptime(existing[-1][0], _BACKUP_STAMP_FORMAT)
+        except ValueError:
+            newest = None
+        if newest is not None and moment <= newest:
+            moment = newest + timedelta(microseconds=1)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    for _ in range(1000):
+        path = target_dir / f"{safe_name}.{moment.strftime(_BACKUP_STAMP_FORMAT)}.bak"
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            moment += timedelta(microseconds=1)  # another process won this name
+            continue
+        break
+    else:
+        raise OSError(f"could not pick a free backup name in {target_dir}")
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    _private_chmod(path, 0o600)
+
+    for _stamp, old in _backup_stamps(target_dir, safe_name)[:-_BACKUP_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return path
+
+
 def ensure_gitignore_env(
     project_dir: Path,
     *,
@@ -52,9 +155,16 @@ def ensure_gitignore_env(
 ) -> bool:
     gitignore = project_dir / ".gitignore"
     content = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".env" in content.splitlines():
+    lines = content.splitlines()
+    missing: list[str] = []
+    if ".env" not in lines:
+        missing.append(".env")
+    # Backups from older versions sit in the project and hold secrets.
+    if LEGACY_BACKUP_GLOB not in lines and any(project_dir.glob(LEGACY_BACKUP_GLOB)):
+        missing.append(LEGACY_BACKUP_GLOB)
+    if not missing:
         return False
-    new_content = (content.rstrip("\n") + "\n.env\n").lstrip("\n")
+    new_content = (content.rstrip("\n") + "\n" + "\n".join(missing) + "\n").lstrip("\n")
     if write:
         if atomic_write:
             atomic_write(".gitignore", new_content.encode("utf-8"))
@@ -108,8 +218,7 @@ def mutate_env_file(
     if write:
         ensure_gitignore_env(project, write=True, atomic_write=atomic_write)
         if backup_existing and env_path.exists():
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(str(env_path), str(env_path.with_name(f".env.pushkey_backup_{ts}")))
+            backup_env_file(project, ".env", env_path.read_bytes())
         data = ("\n".join(new_lines) + "\n").encode("utf-8")
         if atomic_write:
             atomic_write(".env", data)
