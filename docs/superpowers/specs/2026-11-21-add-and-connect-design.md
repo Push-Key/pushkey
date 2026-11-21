@@ -349,6 +349,29 @@ Needs a transport that does not exist yet (no relay route in
 encrypts the key end-to-end to the computer's key; the computer shows an
 approval with the same preview; nothing is saved or written before approval.
 
+Scan with the camera (owner request, 2026-11-21). Besides pasting, the phone
+app offers "Scan key": point the camera at a key and the app reads it as text.
+Requirements fixed now:
+
+- Text recognition runs on the phone. The camera image is never saved (not to
+  the gallery, not to app storage) and never uploaded; it is dropped as soon as
+  the text is read.
+- The app shows what it read in small groups, easy to compare with the source,
+  and the user confirms or corrects it before anything else happens.
+- Misreads are expected (`0`/`O`, `l`/`1`/`I`). The app checks the result
+  against what Pushkey knows about the provider (prefix, length, allowed
+  characters) and flags a mismatch instead of sending it.
+- The scan screen carries one line of warning: a key on screen can be seen by
+  people nearby and by screen recordings.
+- After confirmation the flow is the normal phone flow: choose the computer and
+  project, send end-to-end encrypted, approve on the computer.
+
+Open for the phone spec: where the key usually is when the user photographs it
+(another computer, a screen share, paper). If it is mostly on the user's own
+computer, the browser extension or paste is faster and cannot misread. Also
+open: an optional test call to the provider before saving, which would be
+Pushkey's first network call to a provider.
+
 ### 5.7 Safety rules for every entry point
 
 - A preview before every write. CLI `--yes` and MCP `connect_key` skip the
