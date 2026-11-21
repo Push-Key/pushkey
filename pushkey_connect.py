@@ -19,12 +19,13 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Iterable, Literal, Optional, TypeVar
 
 import pushkey_health
 import pushkey_projectfs
 import pushkey_tiers
 import pushkey_vault
+from pushkey_crypto import log_event
 from pushkey_vault import VaultData
 
 T = TypeVar("T")
@@ -306,3 +307,151 @@ def unregister_project(
 
     pushkey_vault.update_config(remove)
     return result
+
+
+# -- connect, sync, status, suggestions (stubs until the implementation lands) ------
+
+
+def is_migrated(config: dict) -> bool:
+    return False
+
+
+@dataclass
+class Preview:
+    key: str
+    project: str
+    project_name: str
+    file: str
+    var: str
+    environment: str
+    line: str
+    change: Literal["add", "replace", "none"]
+    gitignore_change: bool
+    needs_confirm: list[str]
+    conflict_key: Optional[str]
+
+
+@dataclass
+class ConnectResult:
+    key: str
+    project: str
+    file: str
+    var: str
+    written: bool
+    reason: Optional[str]
+    change: str
+    gitignore_changed: bool
+    health_warning: Optional[str]
+
+
+@dataclass
+class ConnectionStatus:
+    key: str
+    project: str
+    project_name: str
+    file: str
+    var: str
+    state: Literal[
+        "up_to_date", "out_of_date", "not_in_file", "file_missing",
+        "folder_missing", "not_ignored", "not_written",
+    ]
+    reason: Optional[str]
+
+
+@dataclass
+class Suggestion:
+    projects: list[tuple[str, str]]
+    files: list[tuple[str, str]]
+    vars: list[tuple[str, str]]
+
+
+def preview(
+    vault: dict,
+    config: dict,
+    *,
+    key_name: str,
+    project: str,
+    file: Optional[str] = None,
+    var: Optional[str] = None,
+    replace_source: bool = False,
+) -> Preview:
+    return Preview(
+        key=key_name, project=project, project_name="", file=file or "", var=var or "",
+        environment="", line="", change="none", gitignore_change=False,
+        needs_confirm=[], conflict_key=None,
+    )
+
+
+def connect(
+    *,
+    key_name: str,
+    project: str,
+    file: Optional[str] = None,
+    var: Optional[str] = None,
+    value: Optional[str] = None,
+    replace: bool = False,
+    provider: Optional[str] = None,
+    env: Optional[str] = None,
+    notes: str = "",
+    write: bool = True,
+    confirmed: Iterable[str] = (),
+    replace_source: bool = False,
+    vault_key: Optional[bytes],
+    password: Optional[str],
+    target: Optional[dict] = None,
+    actor: str,
+) -> ConnectResult:
+    return ConnectResult(
+        key=key_name, project=project, file=file or "", var=var or key_name,
+        written=False, reason=None, change="none", gitignore_changed=False,
+        health_warning=None,
+    )
+
+
+def sync(
+    *,
+    key_name: Optional[str] = None,
+    project: Optional[str] = None,
+    vault_key: Optional[bytes],
+    password: Optional[str],
+    target: Optional[dict] = None,
+    actor: str,
+) -> list[ConnectResult]:
+    return []
+
+
+def status(
+    vault: dict,
+    config: dict,
+    *,
+    key_name: Optional[str] = None,
+    project: Optional[str] = None,
+) -> list[ConnectionStatus]:
+    return []
+
+
+def disconnect(
+    *,
+    key_name: str,
+    project: str,
+    file: str,
+    var: str,
+    remove_line: bool = False,
+    vault_key: Optional[bytes],
+    password: Optional[str],
+    target: Optional[dict] = None,
+    actor: str,
+) -> CommitResult:
+    return CommitResult(None, VaultData(), None)
+
+
+def suggest(
+    vault: dict,
+    config: dict,
+    *,
+    key_name: str,
+    value: Optional[str] = None,
+    cwd: Optional[str] = None,
+    project: Optional[str] = None,
+) -> Suggestion:
+    return Suggestion([], [], [])
