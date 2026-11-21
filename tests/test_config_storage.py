@@ -457,6 +457,10 @@ def test_update_config_inside_mutate_fails_busy_instead_of_hanging(monkeypatch):
 def test_two_threads_do_not_lose_each_others_updates():
     update_config = _api("update_config")
     pushkey_vault.save_config({"projects": {}})
+    # Create .config.lock first: two threads creating a brand-new lock file at the
+    # same instant can hit a PermissionError inside pushkey_locking itself (a
+    # separate defect), which would make this test flaky for the wrong reason.
+    update_config(lambda cfg: None)
     errors = []
 
     def worker(tag):

@@ -565,20 +565,18 @@ def load_config(*, strict: bool = False):
     first half of a read-modify-write, because saving the empty default over a
     damaged file silently wipes every project.
 
-    strict=True: only a missing file gives the empty default. An existing file
-    that cannot be read, does not decrypt, or does not hold a JSON object raises
-    ConfigUnreadableError("config_unreadable") and is left untouched.
+    strict=True: only a missing file (FileNotFoundError) gives the empty
+    default. An existing file that cannot be read, does not decrypt, does not
+    hold a JSON object, or whose "projects" is not a dict raises
+    ConfigUnreadableError("config_unreadable") and is left untouched. A strict
+    read never writes, so it is safe outside config_lock; a legacy plaintext
+    file is returned as parsed and re-encrypted by update_config's own save.
     """
+    if strict:
+        return _load_config_strict()
     if not _s.CONFIG_FILE.exists():
         return {"projects": {}}
-    try:
-        raw = _s.CONFIG_FILE.read_bytes()
-    except OSError as error:
-        if strict:
-            raise ConfigUnreadableError("config_unreadable") from error
-        raise
-    if strict:
-        return _strict_config_from_bytes(raw)
+    raw = _s.CONFIG_FILE.read_bytes()
     # Encrypted configs are a random 12-byte nonce plus AES-GCM ciphertext, so
     # about 1 save in 250 starts with "{" (optionally after whitespace). Try
     # decryption first; only a file that does not decrypt is treated as a
@@ -597,12 +595,21 @@ def load_config(*, strict: bool = False):
     return {"projects": {}}
 
 
-def _strict_config_from_bytes(raw):
-    """Return the config dict held in raw, or raise ConfigUnreadableError.
+def _load_config_strict():
+    """Return the config dict from disk, or raise ConfigUnreadableError.
 
+    "Missing" is decided by the read itself, not by exists(): exists() is also
+    False for ENOTDIR, ELOOP and WinError 123/1921, and treating those as an
+    empty registry would let the next save wipe a config we could not see.
     The decision to raise is made after the try blocks: ConfigUnreadableError is
     a RuntimeError and must not be swallowed by their broad excepts.
     """
+    try:
+        raw = _s.CONFIG_FILE.read_bytes()
+    except FileNotFoundError:
+        return {"projects": {}}
+    except OSError as error:
+        raise ConfigUnreadableError("config_unreadable") from error
     data = None
     try:
         data = json.loads(_decrypt_config(raw))
@@ -610,39 +617,44 @@ def _strict_config_from_bytes(raw):
         pass
     if data is None and raw.lstrip()[:1] == b"{":
         try:
-            data = json.loads(raw)
+            data = json.loads(raw)  # legacy plaintext; update_config re-encrypts it
         except ValueError:
             data = None
-        else:
-            if isinstance(data, dict):
-                try:
-                    save_config(data)  # re-encrypt the legacy file
-                except Exception:
-                    # Best effort: the parsed dict is valid, and a real disk
-                    # problem surfaces again in update_config's own save.
-                    pass
     if not isinstance(data, dict):
+        raise ConfigUnreadableError("config_unreadable")
+    if not isinstance(data.setdefault("projects", {}), dict):
         raise ConfigUnreadableError("config_unreadable")
     return data
 
 
 def save_config(config):
-    """Encrypt config and replace config.json atomically.
+    """Encrypt config and replace config.json atomically and durably.
 
-    Takes no lock: callers that read first must use update_config. The temp file
-    name carries the pid so two processes never share it, and it is removed if
-    the write fails before the replace.
+    Takes no lock: callers that read first must use update_config. Each call
+    writes its own uniquely named temp file next to config.json (the pid is in
+    the name for humans; mkstemp makes it unique per call, so threads of one
+    process never share it). The temp file is synced before the replace and the
+    folder after it, and is removed if anything fails.
     """
     _s.ensure_vault_dir()
     key = _config_key()
     nonce = secrets.token_bytes(12)
     ct = AESGCM(key).encrypt(nonce, json.dumps(config, indent=2).encode(), None)
-    tmp = _s.CONFIG_FILE.with_suffix(f".{os.getpid()}.tmp")
+    config_dir = _s.CONFIG_FILE.parent
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(config_dir), prefix=f"config.{os.getpid()}.", suffix=".tmp"
+    )
+    tmp = type(_s.CONFIG_FILE)(tmp_name)
     try:
-        tmp.write_bytes(nonce + ct)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(nonce + ct)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(str(tmp), str(_s.CONFIG_FILE))
-    finally:
+    except BaseException:
         tmp.unlink(missing_ok=True)
+        raise
+    _fsync_parent(config_dir)
 
 
 @contextmanager
