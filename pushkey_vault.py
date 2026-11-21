@@ -7,8 +7,9 @@ import secrets
 import shutil
 import threading
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
+from typing import Callable, TypeVar
 
 import pushkey_shared as _s
 from pushkey_locking import FileLockTimeout, bounded_file_lock
@@ -538,19 +539,52 @@ def save_vault_with_key(vault, vault_key: bytes, *, expected_revision=None):
             tmp.unlink(missing_ok=True)
 
 
-def load_config():
+class ConfigUnreadableError(RuntimeError):
+    """config.json cannot be safely read or locked.
+
+    The message is the reason: "config_unreadable" (the file exists but is not a
+    readable config) or "config_busy" (another writer holds the config lock).
+    """
+
+
+_T = TypeVar("_T")
+
+#: How long update_config waits for another writer. Read at call time.
+_CONFIG_LOCK_TIMEOUT_SECONDS = 5.0
+
+
+def _decrypt_config(raw):
+    return AESGCM(_config_key()).decrypt(raw[:12], raw[12:], None)
+
+
+def load_config(*, strict: bool = False):
+    """Load config.json.
+
+    Lenient (the default, used by every read-only caller): a missing file and a
+    file that cannot be read both give {"projects": {}}. That is unsafe as the
+    first half of a read-modify-write, because saving the empty default over a
+    damaged file silently wipes every project.
+
+    strict=True: only a missing file gives the empty default. An existing file
+    that cannot be read, does not decrypt, or does not hold a JSON object raises
+    ConfigUnreadableError("config_unreadable") and is left untouched.
+    """
     if not _s.CONFIG_FILE.exists():
         return {"projects": {}}
-    raw = _s.CONFIG_FILE.read_bytes()
+    try:
+        raw = _s.CONFIG_FILE.read_bytes()
+    except OSError as error:
+        if strict:
+            raise ConfigUnreadableError("config_unreadable") from error
+        raise
+    if strict:
+        return _strict_config_from_bytes(raw)
     # Encrypted configs are a random 12-byte nonce plus AES-GCM ciphertext, so
     # about 1 save in 250 starts with "{" (optionally after whitespace). Try
     # decryption first; only a file that does not decrypt is treated as a
     # legacy plaintext JSON config and migrated.
     try:
-        key = _config_key()
-        nonce, ct = raw[:12], raw[12:]
-        plaintext = AESGCM(key).decrypt(nonce, ct, None)
-        return json.loads(plaintext)
+        return json.loads(_decrypt_config(raw))
     except Exception:
         pass
     if raw.lstrip()[:1] == b"{":
@@ -563,11 +597,87 @@ def load_config():
     return {"projects": {}}
 
 
+def _strict_config_from_bytes(raw):
+    """Return the config dict held in raw, or raise ConfigUnreadableError.
+
+    The decision to raise is made after the try blocks: ConfigUnreadableError is
+    a RuntimeError and must not be swallowed by their broad excepts.
+    """
+    data = None
+    try:
+        data = json.loads(_decrypt_config(raw))
+    except Exception:
+        pass
+    if data is None and raw.lstrip()[:1] == b"{":
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        else:
+            if isinstance(data, dict):
+                try:
+                    save_config(data)  # re-encrypt the legacy file
+                except Exception:
+                    # Best effort: the parsed dict is valid, and a real disk
+                    # problem surfaces again in update_config's own save.
+                    pass
+    if not isinstance(data, dict):
+        raise ConfigUnreadableError("config_unreadable")
+    return data
+
+
 def save_config(config):
+    """Encrypt config and replace config.json atomically.
+
+    Takes no lock: callers that read first must use update_config. The temp file
+    name carries the pid so two processes never share it, and it is removed if
+    the write fails before the replace.
+    """
     _s.ensure_vault_dir()
     key = _config_key()
     nonce = secrets.token_bytes(12)
     ct = AESGCM(key).encrypt(nonce, json.dumps(config, indent=2).encode(), None)
-    tmp = _s.CONFIG_FILE.with_suffix(".tmp")
-    tmp.write_bytes(nonce + ct)
-    os.replace(str(tmp), str(_s.CONFIG_FILE))
+    tmp = _s.CONFIG_FILE.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(nonce + ct)
+        os.replace(str(tmp), str(_s.CONFIG_FILE))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def config_lock():
+    """Hold the cross-process config write lock (VAULT_DIR/.config.lock).
+
+    Not reentrant: nesting it, or calling update_config inside it, waits out the
+    timeout and then raises ConfigUnreadableError("config_busy"). Only a timeout
+    while acquiring is relabelled; anything raised in the body passes through.
+    """
+    _s.ensure_vault_dir()
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                bounded_file_lock(
+                    _s.VAULT_DIR / ".config.lock",
+                    timeout_seconds=_CONFIG_LOCK_TIMEOUT_SECONDS,
+                )
+            )
+        except FileLockTimeout:
+            raise ConfigUnreadableError("config_busy") from None
+        yield
+
+
+def update_config(mutate: Callable[[dict], _T]) -> _T:
+    """Read-modify-write config.json under config_lock and return mutate's result.
+
+    mutate receives the strictly loaded config dict and changes it in place. If
+    the file exists but cannot be read, ConfigUnreadableError is raised and
+    nothing is written. If mutate raises, nothing is written and the exception
+    propagates. mutate must not call update_config or config_lock: the lock is
+    held for the whole call and is not reentrant.
+    """
+    with config_lock():
+        config = load_config(strict=True)
+        result = mutate(config)
+        save_config(config)
+        return result

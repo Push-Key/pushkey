@@ -79,6 +79,15 @@ def _leftover_temp_files():
     return sorted(p.name for p in pushkey_shared.CONFIG_FILE.parent.glob("config*.tmp"))
 
 
+def _catch(fn, *args, **kwargs):
+    """Return what fn raised (or None). Lets a missing raise fail on a plain assert."""
+    try:
+        fn(*args, **kwargs)
+    except BaseException as exc:
+        return exc
+    return None
+
+
 def _run_in_thread(fn):
     outcome = {}
 
@@ -103,9 +112,9 @@ def test_strict_load_raises_on_garbage():
     _strict_loading_exists()
     _write_raw(GARBAGE)
 
-    with pytest.raises(error) as excinfo:
-        pushkey_vault.load_config(strict=True)
-    assert str(excinfo.value) == "config_unreadable"
+    caught = _catch(pushkey_vault.load_config, strict=True)
+    assert isinstance(caught, error), caught
+    assert str(caught) == "config_unreadable"
     # Every existing caller keeps the old, lenient behaviour.
     assert pushkey_vault.load_config() == {"projects": {}}
     assert pushkey_shared.CONFIG_FILE.read_bytes() == GARBAGE
@@ -129,9 +138,9 @@ def test_strict_load_refuses_a_file_that_is_not_a_config_dict(raw):
     _strict_loading_exists()
     _write_raw(raw)
 
-    with pytest.raises(error) as excinfo:
-        pushkey_vault.load_config(strict=True)
-    assert str(excinfo.value) == "config_unreadable"
+    caught = _catch(pushkey_vault.load_config, strict=True)
+    assert isinstance(caught, error), caught
+    assert str(caught) == "config_unreadable"
     assert pushkey_shared.CONFIG_FILE.read_bytes() == raw
 
 
@@ -141,9 +150,9 @@ def test_strict_load_refuses_an_encrypted_payload_that_is_not_a_dict():
     pushkey_vault.save_config(["not", "a", "dict"])
     before = pushkey_shared.CONFIG_FILE.read_bytes()
 
-    with pytest.raises(error) as excinfo:
-        pushkey_vault.load_config(strict=True)
-    assert str(excinfo.value) == "config_unreadable"
+    caught = _catch(pushkey_vault.load_config, strict=True)
+    assert isinstance(caught, error), caught
+    assert str(caught) == "config_unreadable"
     # Lenient loading is unchanged for existing callers.
     assert pushkey_vault.load_config() == ["not", "a", "dict"]
     assert pushkey_shared.CONFIG_FILE.read_bytes() == before
@@ -199,10 +208,10 @@ def test_registry_refuses_unreadable_config():
         calls.append(cfg)
         cfg["projects"]["/p"] = {"name": "p"}
 
-    with pytest.raises(error) as excinfo:
-        update_config(mutate)
+    caught = _catch(update_config, mutate)
 
-    assert str(excinfo.value) == "config_unreadable"
+    assert isinstance(caught, error), caught
+    assert str(caught) == "config_unreadable"
     assert calls == []
     assert pushkey_shared.CONFIG_FILE.read_bytes() == GARBAGE
     assert _leftover_temp_files() == []
@@ -217,9 +226,9 @@ def test_update_config_writes_nothing_when_mutate_raises():
         cfg["projects"].clear()
         raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        update_config(mutate)
+    caught = _catch(update_config, mutate)
 
+    assert isinstance(caught, RuntimeError) and str(caught) == "boom", caught
     assert pushkey_shared.CONFIG_FILE.read_bytes() == before
     assert pushkey_vault.load_config() == CONFIG
     assert update_config(lambda cfg: "lock was released") == "lock was released"
@@ -237,10 +246,14 @@ def test_a_held_config_lock_makes_update_config_in_another_thread_busy(monkeypat
     before = pushkey_shared.CONFIG_FILE.read_bytes()
 
     with config_lock():
+        started = time.monotonic()
         outcome = _run_in_thread(lambda: update_config(lambda cfg: cfg["projects"].clear()))
+        waited = time.monotonic() - started
 
     assert isinstance(outcome.get("error"), error), outcome
     assert str(outcome["error"]) == "config_busy"
+    # The patched 0.2 s timeout is the one honoured, not the 5 s default.
+    assert waited < 2.5, waited
     assert pushkey_shared.CONFIG_FILE.read_bytes() == before
     assert update_config(lambda cfg: "free again") == "free again"
 
@@ -250,9 +263,12 @@ def test_config_lock_only_relabels_its_own_acquisition_timeout():
 
     # A FileLockTimeout raised by the body (say, a nested vault lock) is not a
     # busy config: it must reach the caller unchanged.
-    with pytest.raises(FileLockTimeout):
+    def body():
         with config_lock():
             raise FileLockTimeout()
+
+    caught = _catch(body)
+    assert type(caught) is FileLockTimeout, caught
 
 
 def test_update_config_inside_mutate_fails_busy_instead_of_hanging(monkeypatch):
@@ -266,10 +282,13 @@ def test_update_config_inside_mutate_fails_busy_instead_of_hanging(monkeypatch):
         # The lock is not reentrant: mutate must never call update_config.
         update_config(lambda inner: None)
 
-    with pytest.raises(error) as excinfo:
-        update_config(mutate)
+    started = time.monotonic()
+    caught = _catch(update_config, mutate)
+    waited = time.monotonic() - started
 
-    assert str(excinfo.value) == "config_busy"
+    assert isinstance(caught, error), caught
+    assert str(caught) == "config_busy"
+    assert waited < 2.5, waited
     assert pushkey_shared.CONFIG_FILE.read_bytes() == before
 
 
