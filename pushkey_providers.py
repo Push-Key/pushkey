@@ -101,6 +101,18 @@ def provider_supports_multi_key(provider_name: str) -> bool:
     return bool(prov.get("multi_key", True))  # default True — optimistic for unknown providers
 
 
+# tzinfo used to read timezone-less datetimes; None means this machine's local time.
+# Tests pin a zone here because time.tzset does not exist on Windows.
+LOCAL_TZ = None
+
+
+def as_utc(value):
+    """RED stub: still reads naive values as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def days_since_at(date_str, now):
     """Return whole elapsed days with naive datetimes interpreted as UTC."""
     if not date_str or not isinstance(now, datetime):

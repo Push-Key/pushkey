@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import pushkey_providers
 from pushkey_health import (
     HealthSchemaError,
     HealthPathError,
@@ -165,6 +166,35 @@ def test_v1_unhashable_status_raises_schema_error(status):
 def test_build_marks_invalid_or_future_source_dates_unknown(source):
     document = build_health_document({"KEY": {"created": source, "provider": "OpenAI"}}, generated_at=NOW)
     assert document["keys"]["KEY"] == {"status": "unknown", "days_old": None, "provider": "OpenAI"}
+
+
+def test_build_reads_a_naive_stamp_as_local_time_east_of_utc(monkeypatch):
+    zone = timezone(timedelta(hours=10))
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", zone)
+    rotated = NOW.astimezone(zone).strftime("%Y-%m-%dT%H:%M:%S")  # what every writer stamps
+    assert rotated == "2026-01-10T22:00:00"
+    record = build_health_document({"KEY": {"rotated": rotated}}, generated_at=NOW)["keys"]["KEY"]
+    assert record["status"] != "unknown"
+    assert record["days_old"] == 0
+
+
+def test_build_reads_a_date_only_stamp_as_local_date_east_of_utc(monkeypatch):
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", timezone(timedelta(hours=10)))
+    generated = datetime(2026, 1, 9, 22, 0, 0, tzinfo=timezone.utc)  # 08:00 on 2026-01-10 locally
+    record = build_health_document({"KEY": {"created": "2026-01-10"}}, generated_at=generated)["keys"]["KEY"]
+    assert record["status"] != "unknown"
+    assert record["days_old"] == 0
+
+
+def test_build_reads_a_naive_stamp_as_local_time_west_of_utc(monkeypatch):
+    zone = timezone(timedelta(hours=-8))
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", zone)
+    true_age = timedelta(days=60, hours=20)  # under the 60.3 day warning line; 61 days when misread as UTC
+    created = (NOW - true_age).astimezone(zone).strftime("%Y-%m-%dT%H:%M:%S")
+    assert created == "2025-11-10T08:00:00"
+    record = build_health_document({"KEY": {"created": created, "provider": None}}, generated_at=NOW)["keys"]["KEY"]
+    assert record["status"] == "healthy"
+    assert record["days_old"] == 60
 
 
 @pytest.mark.parametrize("document", [
