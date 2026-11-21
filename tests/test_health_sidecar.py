@@ -390,6 +390,9 @@ def test_two_process_publishers_leave_a_complete_document(tmp_path):
         "from pushkey_health import write_health_sidecar",
         "s.VAULT_DIR = Path(sys.argv[1])",
         "s.VAULT_FILE = s.VAULT_DIR / 'vault.enc'",
+        # ensure_vault_dir() also creates IMPORT_DIR; leaving it at the default
+        # would write into the real ~/.pushkey (and fail where it does not exist).
+        "s.IMPORT_DIR = s.VAULT_DIR / 'import'",
         "Path(sys.argv[4]).touch()",
         "while not Path(sys.argv[5]).exists():",
         "    time.sleep(0.005)",
