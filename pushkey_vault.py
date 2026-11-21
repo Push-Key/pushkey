@@ -520,6 +520,17 @@ def load_config():
     if not _s.CONFIG_FILE.exists():
         return {"projects": {}}
     raw = _s.CONFIG_FILE.read_bytes()
+    # Encrypted configs are a random 12-byte nonce plus AES-GCM ciphertext, so
+    # about 1 save in 250 starts with "{" (optionally after whitespace). Try
+    # decryption first; only a file that does not decrypt is treated as a
+    # legacy plaintext JSON config and migrated.
+    try:
+        key = _config_key()
+        nonce, ct = raw[:12], raw[12:]
+        plaintext = AESGCM(key).decrypt(nonce, ct, None)
+        return json.loads(plaintext)
+    except Exception:
+        pass
     if raw.lstrip()[:1] == b"{":
         try:
             data = json.loads(raw)
@@ -527,14 +538,7 @@ def load_config():
             return data
         except Exception:
             pass
-        return {"projects": {}}
-    try:
-        key = _config_key()
-        nonce, ct = raw[:12], raw[12:]
-        plaintext = AESGCM(key).decrypt(nonce, ct, None)
-        return json.loads(plaintext)
-    except Exception:
-        return {"projects": {}}
+    return {"projects": {}}
 
 
 def save_config(config):
