@@ -52,6 +52,32 @@ def sanitize_env_value(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
 
 
+@dataclass(frozen=True)
+class EnvLine:
+    index: int
+    name: str
+    value_text: str
+    export: bool
+
+
+def parse_env_lines(text: str) -> list[EnvLine]:
+    return []
+
+
+def decode_env_value(value_text: str) -> str:
+    return ""
+
+
+def render_connected_value(value: object) -> str:
+    return ""
+
+
+def apply_env_assignments(
+    text: str, assignments: Mapping[str, str]
+) -> tuple[str, list[str], list[str]]:
+    return "", [], []
+
+
 def project_id(project: Path) -> str:
     """Stable 16-hex-char id of a project folder, used to group its backups."""
     resolved = str(Path(project).resolve())
