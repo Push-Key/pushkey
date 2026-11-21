@@ -18,7 +18,6 @@ import threading
 import hashlib
 import base64
 import tempfile
-import stat
 import copy
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import json
 
 import pushkey_shared as _s
+import pushkey_projectfs as _pfs
 from pushkey_crypto import (
     _V3_MAGIC,
     _deserialize_vault,
@@ -287,83 +287,47 @@ def _verify_static_manifest(static: str) -> dict:
         raise RuntimeError("bundled web app integrity verification failed") from exc
 
 
+def _http_error(err: "_pfs.ProjectPathError") -> HTTPException:
+    return HTTPException(err.status, err.reason)
+
+
 def _canonical_project_path(raw: str, *, must_exist: bool = True) -> str:
     """Return a canonical absolute project directory, rejecting ambiguous paths."""
-    if not raw or "\x00" in raw or any(ord(ch) < 32 for ch in raw):
-        raise HTTPException(400, "invalid project path")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise HTTPException(400, "project path must be absolute")
     try:
-        resolved = path.resolve(strict=must_exist)
-    except (OSError, RuntimeError):
-        raise HTTPException(400, "invalid project path") from None
-    if must_exist and not resolved.is_dir():
-        raise HTTPException(400, "project directory not found")
-    return str(resolved)
+        return _pfs.canonical_project_path(raw, must_exist=must_exist)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    attrs = getattr(info, "st_file_attributes", 0)
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(info.st_mode) or bool(attrs & reparse)
+    return _pfs.is_link_or_reparse(path)
 
 
 def _project_identity(project: Path) -> tuple[int, int]:
-    info = project.stat()
-    return (info.st_dev, info.st_ino)
+    return _pfs.project_identity(project)
 
 
 def _assert_project_target(
     project: Path, registered: str, target: Path, expected_identity: tuple[int, int]
 ) -> None:
-    if _canonical_project_path(str(project)) != registered:
-        raise HTTPException(409, "project path changed during write")
-    if _is_link_or_reparse(project) or _is_link_or_reparse(target):
-        raise HTTPException(400, "refusing link or reparse-point project target")
-    if target.parent.resolve(strict=True) != Path(registered):
-        raise HTTPException(400, "project target escapes registered directory")
-    if _project_identity(project) != expected_identity:
-        raise HTTPException(409, "project directory identity changed during write")
+    try:
+        relpath = target.relative_to(project).as_posix()
+    except ValueError:
+        raise HTTPException(400, "project target escapes registered directory") from None
+    try:
+        _pfs.resolve_project_target(registered, relpath, expected_identity)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _atomic_project_write(
     registered: str, filename: str, data: bytes, expected_identity: Optional[tuple[int, int]] = None
 ) -> None:
-    """Write a fixed project file without following links or exposing partial data."""
-    project = Path(registered)
-    target = project / filename
-    identity = expected_identity or _project_identity(project)
-    _assert_project_target(project, registered, target, identity)
-    fd, temporary = tempfile.mkstemp(prefix=f".{filename}.pushkey-", dir=project)
-    temp_path = Path(temporary)
+    """Write a project file without following links or exposing partial data."""
     try:
-        with os.fdopen(fd, "wb", closefd=True) as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _assert_project_target(project, registered, target, identity)
-        if _is_link_or_reparse(temp_path):
-            raise HTTPException(409, "temporary project target changed")
-        os.replace(temp_path, target)
-        _assert_project_target(project, registered, target, identity)
-        try:
-            directory_fd = os.open(
-                str(project),
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
-    finally:
-        temp_path.unlink(missing_ok=True)
+        _pfs.atomic_project_write(registered, filename, data, expected_identity)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _canonicalize_registered_projects(cfg: dict, vault: Optional[dict] = None) -> bool:

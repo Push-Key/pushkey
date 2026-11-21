@@ -20,6 +20,7 @@ SUBMODULES = [
     "pushkey_agent_tokens",
     "pushkey_locking",
     "pushkey_health",
+    "pushkey_projectfs",
 ]
 
 

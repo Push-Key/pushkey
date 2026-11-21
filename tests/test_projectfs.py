@@ -44,16 +44,32 @@ def project(tmp_path):
 
 
 def _error(call, *args, **kwargs):
-    """The ProjectPathError a call raises; a missing error is an assertion failure."""
+    """The ProjectPathError a call raises; anything else is an assertion failure."""
     try:
         call(*args, **kwargs)
     except ProjectPathError as err:
         return err
+    except Exception as exc:
+        raise AssertionError(f"{call.__name__} raised {exc!r}, not ProjectPathError") from exc
     raise AssertionError(f"{call.__name__} did not raise ProjectPathError")
 
 
 def _reason(call, *args, **kwargs):
     return _error(call, *args, **kwargs).reason
+
+
+def _normalised(relpath):
+    try:
+        return validate_env_relpath(relpath)
+    except ProjectPathError as err:
+        return f"refused: {err.reason}"
+
+
+def _tracked(project, relpath):
+    try:
+        return is_git_tracked(str(project), relpath)
+    except Exception as exc:
+        return f"raised {exc!r}"
 
 
 def _read(path):
@@ -82,7 +98,11 @@ def test_canonical_project_path_rules(tmp_path, project):
     assert _reason(canonical_project_path, "") == "invalid project path"
     assert _reason(canonical_project_path, str(project) + "\x01") == "invalid project path"
     assert _reason(canonical_project_path, "relative/dir") == "project path must be absolute"
-    assert _reason(canonical_project_path, str(tmp_path / "missing")) == "project directory not found"
+    # A path that does not exist cannot be resolved strictly ("invalid project
+    # path"); "not found" is for an existing path that is not a directory.
+    assert _reason(canonical_project_path, str(tmp_path / "missing")) == "invalid project path"
+    (tmp_path / "a-file").write_text("x")
+    assert _reason(canonical_project_path, str(tmp_path / "a-file")) == "project directory not found"
     assert canonical_project_path(str(tmp_path / "missing"), must_exist=False).endswith("missing")
 
 
@@ -90,8 +110,8 @@ def test_canonical_project_path_rules(tmp_path, project):
 
 
 def test_relpath_normalises_backslashes():
-    assert validate_env_relpath("apps\\web\\.env.local") == "apps/web/.env.local"
-    assert validate_env_relpath("./apps/./web/.env") == "apps/web/.env"
+    assert _normalised("apps\\web\\.env.local") == "apps/web/.env.local"
+    assert _normalised("./apps/./web/.env") == "apps/web/.env"
 
 
 def test_relpath_rejects_parent_segments():
@@ -107,7 +127,7 @@ def test_relpath_rejects_other_names_and_templates():
     for template in (".env.example", ".env.sample", ".env.template", "apps/.env.EXAMPLE", ".env.local.example"):
         assert _reason(validate_env_relpath, template) == "env template files are read-only"
     for fine in (".env", ".env.local", "apps/web/.env.development.local"):
-        assert validate_env_relpath(fine) == fine
+        assert _normalised(fine) == fine
 
 
 def test_relpath_rejects_invalid_paths():
@@ -233,6 +253,69 @@ def test_link_refusal_has_status_400(project, tmp_path):
     assert (err.status, err.reason) == (400, LINK_REASON)
 
 
+def test_identity_change_after_the_temp_write_is_caught_before_the_replace(project, monkeypatch):
+    (project / ".env").write_bytes(b"OLD=1\n")
+    identity = project_identity(project)
+    real_identity, real_fsync = pushkey_projectfs.project_identity, os.fsync
+    moved = []
+
+    def fsync_then_move(fd):
+        real_fsync(fd)
+        moved.append(True)
+
+    monkeypatch.setattr(pushkey_projectfs.os, "fsync", fsync_then_move)
+    monkeypatch.setattr(
+        pushkey_projectfs, "project_identity",
+        lambda path: (0, 0) if moved else real_identity(path),
+    )
+    err = _error(atomic_project_write, str(project), ".env", b"NEW=1\n", identity)
+    assert (err.status, err.reason) == (409, "project directory identity changed during write")
+    assert (project / ".env").read_bytes() == b"OLD=1\n"
+    assert _temp_files(project) == []
+
+
+def test_identity_change_after_the_replace_is_still_reported(project, monkeypatch):
+    identity = project_identity(project)
+    real_identity, real_replace = pushkey_projectfs.project_identity, os.replace
+    replaced = []
+
+    def replace_then_move(source, target):
+        real_replace(source, target)
+        replaced.append(True)
+
+    monkeypatch.setattr(pushkey_projectfs.os, "replace", replace_then_move)
+    monkeypatch.setattr(
+        pushkey_projectfs, "project_identity",
+        lambda path: (0, 0) if replaced else real_identity(path),
+    )
+    err = _error(atomic_project_write, str(project), ".env", b"A=1\n", identity)
+    assert (err.status, err.reason) == (409, "project directory identity changed during write")
+    assert _temp_files(project) == []
+
+
+def test_temp_file_that_turns_into_a_link_is_refused(project, monkeypatch):
+    (project / ".env").write_bytes(b"OLD=1\n")
+    real_check = pushkey_projectfs.is_link_or_reparse
+    monkeypatch.setattr(
+        pushkey_projectfs, "is_link_or_reparse",
+        lambda path: path.name.startswith(".pushkey-") or real_check(path),
+    )
+    err = _error(atomic_project_write, str(project), ".env", b"NEW=1\n")
+    assert (err.status, err.reason) == (409, "temporary project target changed")
+    assert (project / ".env").read_bytes() == b"OLD=1\n"
+    assert _temp_files(project) == []
+
+
+def test_escape_guard_catches_a_link_the_link_check_missed(project, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _link_directory(project / "apps", outside)
+    monkeypatch.setattr(pushkey_projectfs, "is_link_or_reparse", lambda path: False)
+    reason = _reason(atomic_project_write, str(project), "apps/.env.local", b"A=1\n")
+    assert reason == "project target escapes registered directory"
+    assert not (outside / ".env.local").exists()
+
+
 def test_resolve_project_target_returns_the_path_without_creating_anything(project):
     (project / "apps" / "web").mkdir(parents=True)
     target = resolve_project_target(str(project), "apps\\web\\.env.local", project_identity(project))
@@ -344,16 +427,16 @@ def test_tracked_file_is_refused(project, monkeypatch):
     (project / ".env").write_text("B=2\n")
     _git(project, "add", ".env.local")
     _git(project, "commit", "-m", "x")
-    assert is_git_tracked(str(project), ".env.local") is True
-    assert is_git_tracked(str(project), ".env") is False
-    assert is_git_tracked(str(project), "apps/web/.env.local") is False
+    assert _tracked(project, ".env.local") is True
+    assert _tracked(project, ".env") is False
+    assert _tracked(project, "apps/web/.env.local") is False
 
     def missing_git(args, cwd):
         raise FileNotFoundError("git")
 
     with monkeypatch.context() as m:
         m.setattr(pushkey_projectfs, "_run_git", missing_git)
-        assert is_git_tracked(str(project), ".env.local") is False
+        assert _tracked(project, ".env.local") is False
 
 
 def test_a_folder_that_is_not_a_repository_has_nothing_tracked(project, monkeypatch):
@@ -361,7 +444,7 @@ def test_a_folder_that_is_not_a_repository_has_nothing_tracked(project, monkeypa
         return subprocess.CompletedProcess(args, 128, b"", b"fatal: not a git repository")
 
     monkeypatch.setattr(pushkey_projectfs, "_run_git", not_a_repo)
-    assert is_git_tracked(str(project), ".env") is False
+    assert _tracked(project, ".env") is False
 
 
 def test_git_is_run_with_list_argv_a_timeout_and_no_shell(project, monkeypatch):
@@ -372,9 +455,10 @@ def test_git_is_run_with_list_argv_a_timeout_and_no_shell(project, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     monkeypatch.setattr(pushkey_projectfs.subprocess, "run", fake_run)
-    assert is_git_tracked(str(project), "apps/web/.env.local") is True
+    assert _tracked(project, "apps/web/.env.local") is True
     argv = seen["argv"]
     assert isinstance(argv, list) and argv[0] == "git"
+    assert "-C" in argv and "ls-files" in argv
     assert argv[argv.index("ls-files"):] == ["ls-files", "--error-unmatch", "--", "apps/web/.env.local"]
     assert argv[argv.index("-C") + 1] == str(project)
     assert seen["kwargs"]["timeout"] == 5
@@ -386,7 +470,7 @@ def test_git_timeout_means_not_tracked(project, monkeypatch):
         raise subprocess.TimeoutExpired(argv, 5)
 
     monkeypatch.setattr(pushkey_projectfs.subprocess, "run", slow)
-    assert is_git_tracked(str(project), ".env") is False
+    assert _tracked(project, ".env") is False
 
 
 # ── the web API keeps its names as thin shims ────────────────────────────────
