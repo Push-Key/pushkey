@@ -50,12 +50,21 @@ def _conn(project, file=".env", var="A"):
 
 
 def _raised(call, exc_type):
-    """The exception `call` raises, or None. Any other exception type propagates."""
+    """The exception `call` raises, or None. An exception of another type fails the test."""
     try:
         call()
-    except exc_type as exc:
+    except Exception as exc:
+        assert isinstance(exc, exc_type), f"expected {exc_type.__name__}, got {exc!r}"
         return exc
     return None
+
+
+def _ok(call):
+    """The result of `call`; an exception is a failed assertion, not a test error."""
+    try:
+        return call()
+    except Exception as exc:
+        raise AssertionError(f"unexpected {exc!r}") from exc
 
 
 def _folder(tmp_path, name):
@@ -70,6 +79,11 @@ def _canon(folder):
 
 def _registered():
     return pushkey_connect.registered_projects(load_config(strict=True))
+
+
+def _respelled(path):
+    """The same folder spelled with forward slashes and a trailing separator."""
+    return path.replace("\\", "/") + "/"
 
 
 @pytest.fixture
@@ -137,7 +151,7 @@ def test_commit_saves_and_adopts(mode):
         vault["A"]["notes"] = "x"
         return "done"
 
-    result = pushkey_connect.commit(mutate, target=target, **s.kwargs())
+    result = _ok(lambda: pushkey_connect.commit(mutate, target=target, **s.kwargs()))
 
     assert isinstance(result, pushkey_connect.CommitResult)
     assert result.value == "done"
@@ -173,7 +187,7 @@ def test_commit_retries_once_after_conflict(mode):
         if len(calls) == 1:
             s.external_save(lambda other: other["B"].update(notes="theirs"))
 
-    result = pushkey_connect.commit(mutate, **s.kwargs())
+    result = _ok(lambda: pushkey_connect.commit(mutate, **s.kwargs()))
 
     assert len(calls) == 2
     assert result.vault["A"]["notes"] == "mine"
@@ -244,9 +258,9 @@ def test_commit_reports_a_health_publication_failure(monkeypatch, error):
 
     monkeypatch.setattr(pushkey_health, "publish_saved_vault", failing)
 
-    result = pushkey_connect.commit(
+    result = _ok(lambda: pushkey_connect.commit(
         lambda vault: vault["A"].update(notes="x"), target=target, **s.kwargs()
-    )
+    ))
 
     assert result.health_warning == "health_publication_failed"
     assert s.current()["A"]["notes"] == "x"
@@ -264,7 +278,7 @@ def test_commit_publishes_the_vault_it_just_saved(monkeypatch):
 
     monkeypatch.setattr(pushkey_health, "publish_saved_vault", recording)
 
-    result = pushkey_connect.commit(lambda vault: vault["A"].update(notes="x"), **s.kwargs())
+    result = _ok(lambda: pushkey_connect.commit(lambda vault: vault["A"].update(notes="x"), **s.kwargs()))
 
     assert published == [("x", True)]
     assert result.health_warning is None
@@ -361,7 +375,7 @@ def test_replace_value_keeps_connections():
     assert entry.get("rotation_count") == 1
     for kept in ("projects", "connections", "next_value", "next_added", "dual_rotation",
                  "env", "provider", "notes", "created"):
-        assert entry[kept] == snapshot[kept], kept
+        assert entry.get(kept) == snapshot[kept], kept
     assert set(entry) - set(snapshot) == {"history", "previous", "rotation_count"}
 
 
@@ -451,6 +465,16 @@ def test_register_project_stores_the_canonical_path(pro_tier, tmp_path):
     assert again is not None and again.code == "project_exists"
 
 
+def test_register_project_recognises_the_same_folder_spelled_differently(pro_tier, tmp_path):
+    p1 = _folder(tmp_path, "p1")
+    save_config({"projects": {_respelled(_canon(p1)): {"name": "p1"}}})
+
+    error = _raised(lambda: pushkey_connect.register_project(str(p1)), pushkey_connect.ConnectError)
+
+    assert error is not None and error.code == "project_exists"
+    assert len(load_config(strict=True)["projects"]) == 1
+
+
 def test_register_project_takes_a_display_name(pro_tier, tmp_path):
     named_path, named = pushkey_connect.register_project(str(_folder(tmp_path, "p1")), name="Acme Web")
     _, unnamed = pushkey_connect.register_project(str(_folder(tmp_path, "p2")), name="  ")
@@ -464,7 +488,7 @@ def test_register_project_counts_only_absolute_path_projects(tmp_path):
     save_config({"projects": {"desktop-name": {"name": "legacy"}}, "sso_settings": {"on": True}})
     p1 = _folder(tmp_path, "p1")
 
-    path, _ = pushkey_connect.register_project(str(p1))
+    path, _ = _ok(lambda: pushkey_connect.register_project(str(p1)))
 
     config = load_config(strict=True)
     assert path in config["projects"]
@@ -513,7 +537,7 @@ def test_unregister_removes_connections(mode, pro_tier, tmp_path):
     target, _ = load_vault(PASSWORD)
     before_c = copy.deepcopy(s.current()["C"])
 
-    result = pushkey_connect.unregister_project(str(p1), target=target, **s.kwargs())
+    result = _ok(lambda: pushkey_connect.unregister_project(str(p1), target=target, **s.kwargs()))
 
     vault = s.current()
     assert isinstance(result, pushkey_connect.CommitResult)
@@ -566,7 +590,7 @@ def test_unregister_works_after_the_folder_was_deleted(pro_tier, tmp_path):
     p1, c1, c2, s = _seed_two_projects("v2_password", tmp_path)
     p1.rmdir()
 
-    pushkey_connect.unregister_project(str(p1), **s.kwargs())
+    _ok(lambda: pushkey_connect.unregister_project(str(p1), **s.kwargs()))
 
     assert list(_registered()) == [c2]
     assert s.current()["B"]["connections"] == []
@@ -590,3 +614,20 @@ def test_unregister_with_an_unreadable_config_changes_nothing(pro_tier, tmp_path
 
     assert error is not None and str(error) == "config_unreadable"
     assert pushkey_shared.VAULT_FILE.read_bytes() == before
+
+
+def test_unregister_matches_links_and_records_spelled_differently(pro_tier, tmp_path):
+    p1 = _folder(tmp_path, "p1")
+    c1 = _canon(p1)
+    save_config({"projects": {_respelled(c1): {"name": "p1"}}})
+    s = _Open(
+        "v2_password",
+        {"A": _entry(projects=[_respelled(c1)], connections=[_conn(c1 + os.sep)])},
+    )
+
+    pushkey_connect.unregister_project(str(p1), **s.kwargs())
+
+    vault = s.current()
+    assert vault["A"]["projects"] == []
+    assert vault["A"]["connections"] == []
+    assert _registered() == {}
