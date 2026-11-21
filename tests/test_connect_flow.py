@@ -5,6 +5,7 @@ value), and one registered project, tmp_path/"acme-web" (tmp_path itself is the
 vault directory). No test passes a real secret. A test that asserts "nothing was
 written" also asserts one thing the operation did do, so it cannot pass vacuously.
 """
+import hashlib
 import re
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from unittest.mock import ANY
 import pytest
 
 import pushkey_connect
+import pushkey_crypto
 import pushkey_projectfs
 import pushkey_shared
 import pushkey_tiers
@@ -147,6 +149,20 @@ class _World:
 
     def read(self, relpath, folder=None):
         return ((folder or self.folder) / relpath).read_bytes().decode("utf-8")
+
+
+@pytest.fixture(autouse=True)
+def cheap_key_derivation(monkeypatch):
+    """Derive vault keys with one SHA-256 instead of Argon2id (64 MB, 3 passes).
+
+    Every `load_vault`/`save_vault` of a password vault derives a key, and these tests
+    make dozens of them. Nothing here is about the KDF; tests/test_vault_crypto.py
+    covers the real one.
+    """
+    monkeypatch.setattr(
+        pushkey_crypto, "_derive_key_argon2",
+        lambda password, salt: hashlib.sha256(salt + password.encode()).digest(),
+    )
 
 
 @pytest.fixture
@@ -810,7 +826,28 @@ def test_one_unwritable_file_does_not_stop_the_other_connections(world):
     assert (world.folder / ".env.local").read_bytes() == b"A=1\rB=2\r"
 
 
-def test_sync_returns_its_results_when_recording_them_fails(world, monkeypatch):
+def test_a_variable_that_is_not_a_valid_name_fails_alone(world):
+    # A migrated assignment can carry a key name that is not an environment variable name.
+    world.set_vault(
+        lambda vault: vault[KEY].update(
+            projects=[world.project],
+            connections=[_conn(world.project, ".env", "my-dashed-key"), _conn(world.project, ".env", "GOOD")],
+        )
+    )
+
+    results = _ok(lambda: world.sync())
+
+    assert [(r.var, r.written, r.reason) for r in results] == [
+        ("my-dashed-key", False, "invalid_var"),
+        ("GOOD", True, None),
+    ]
+    assert world.read(".env").count("=") == 1 and f"GOOD={VALUE}\n" in world.read(".env")
+
+
+@pytest.mark.parametrize(
+    "error", [ConnectError("vault_changed"), pushkey_vault.VaultBusyError("vault_lock_failed")]
+)
+def test_sync_returns_its_results_when_recording_them_fails(world, monkeypatch, error):
     (world.folder / ".env").write_bytes(b"A=1\rB=2\r")
     world.set_vault(
         lambda vault: vault[KEY].update(
@@ -819,7 +856,7 @@ def test_sync_returns_its_results_when_recording_them_fails(world, monkeypatch):
     )
 
     def busy(mutate, **kw):
-        raise ConnectError("vault_changed")
+        raise error
 
     monkeypatch.setattr(pushkey_connect, "commit", busy)
 
