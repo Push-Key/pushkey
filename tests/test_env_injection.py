@@ -16,7 +16,7 @@ def test_inject_env_file_merges_existing_and_quotes_values(tmp_path: Path):
         "FOO": {"value": "bar baz"},
     }
 
-    pushkey.inject_env_file(tmp_path, vault)
+    pushkey.inject_env_file(tmp_path, vault, key_names=list(vault))
 
     content = _read_text(tmp_path / ".env")
     assert "# Managed by Pushkey" in content
@@ -32,8 +32,8 @@ def test_inject_env_file_does_not_duplicate_gitignore_entry(tmp_path: Path):
     (tmp_path / ".gitignore").write_text("node_modules/\n.env\n", encoding="utf-8", newline="\n")
     vault = {"A": {"value": "1"}}
 
-    pushkey.inject_env_file(tmp_path, vault)
-    pushkey.inject_env_file(tmp_path, vault)
+    pushkey.inject_env_file(tmp_path, vault, key_names=["A"])
+    pushkey.inject_env_file(tmp_path, vault, key_names=["A"])
 
     gitignore = _read_text(tmp_path / ".gitignore")
     assert gitignore.splitlines().count(".env") == 1

@@ -52,7 +52,7 @@ def _raised(call):
     """The exception `call` raises, or None."""
     try:
         call()
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         return exc
     return None
 
@@ -127,6 +127,7 @@ _BOUND = (
     "save", "_save_config", "_reload_after_conflict", "_reload_config", "_core_args", "_run_sync",
     "_auto_inject_key", "_auto_inject_keys_bulk", "_stamp_keys_used", "add_key", "add_project",
     "remove_project", "sync_project", "_apply_project_assignment", "_save_ci_fields",
+    "_update_project_record", "import_vault", "_inline_inject",
     "_run_scan", "_run_git_scan",
 )
 
@@ -266,6 +267,7 @@ def test_auto_inject_key_reports_connected_projects_and_errors(world, box):
     first = world.register("first")
     second = world.register("second")
     world.connect(STRIPE, first, write=False)
+    world.connect(OPENAI, first, write=False)  # connected too, but not the key being synced
     world.connect(STRIPE, second, write=False)
     (Path(second) / ".env").mkdir()  # an env file that cannot be written
 
@@ -273,14 +275,31 @@ def test_auto_inject_key_reports_connected_projects_and_errors(world, box):
 
     assert count == 1
     assert _env_text(first) is not None and STRIPE in _env_text(first)
+    assert OPENAI not in _env_text(first)
     assert len(errors) == 1 and "second" in errors[0] and OLD not in errors[0]
+
+
+def test_inline_inject_button_explains_a_key_with_no_connections(world, box):
+    project = world.register("acme")
+
+    _ok(lambda: world.app._inline_inject(STRIPE))
+
+    assert _env_text(project) is None
+    assert "not connected to any project" in box.text() and "Assign Keys" in box.text()
+
+    world.connect(STRIPE, project, write=False)
+    box.calls.clear()
+    _ok(lambda: world.app._inline_inject(STRIPE))
+    assert STRIPE + "=" + OLD in _env_text(project)
+    assert "synced" in box.text().lower() or "written" in box.text().lower()
 
 
 def test_bulk_inject_writes_only_connected_keys(world, box):
     project = world.register("acme")
     world.connect(STRIPE, project, write=False)
+    world.connect(OPENAI, project, write=False)  # connected, but not in the list given
 
-    count, errors = _ok(lambda: world.app._auto_inject_keys_bulk([STRIPE, OPENAI]))
+    count, errors = _ok(lambda: world.app._auto_inject_keys_bulk([STRIPE, "NOT_IN_THE_VAULT"]))
 
     assert (count, errors) == (1, [])
     text = _env_text(project)
@@ -337,6 +356,31 @@ def test_add_project_registers_through_the_core_and_writes_nothing(world, box):
     assert _env_text(folder) is None and not (folder / ".gitignore").exists()
     assert pushkey_connect.registered_projects(world.app.config) == registered
     assert world.app.rendered >= 1 and box.of("info")
+
+
+def test_add_project_does_not_connect_keys_by_name_prefix(world, box):
+    folder = world.folder("stripe")  # the folder name is a prefix of STRIPE_SECRET_KEY
+    world.app.proj_name.set("stripe")
+    world.app.proj_path_var.set(str(folder))
+
+    _ok(world.app.add_project)
+
+    assert len(pushkey_connect.registered_projects(load_config(strict=True))) == 1
+    assert _connections(world.disk_vault(), STRIPE, str(folder)) == []
+    assert world.disk_vault()[STRIPE]["projects"] == []
+    assert _env_text(folder) is None
+
+
+def test_add_project_refreshes_the_in_memory_config(world, box):
+    folder = world.folder("acme-web")
+    world.app.proj_name.set("Acme Web")
+    world.app.proj_path_var.set(str(folder))  # the default environment: no extra record update
+
+    _ok(world.app.add_project)
+
+    assert list(pushkey_connect.registered_projects(world.app.config)) == list(
+        pushkey_connect.registered_projects(load_config(strict=True)))
+    assert len(pushkey_connect.registered_projects(world.app.config)) == 1
 
 
 def test_register_project_gate_message_when_limit_reached(world, box, monkeypatch):
@@ -482,6 +526,29 @@ def test_assign_dialog_source_calls_the_core_helper():
     assert "_auto_match_keys" not in source
 
 
+# -- import a backup -------------------------------------------------------------------
+
+
+def test_import_vault_keeps_local_connections_and_skips_the_backups_projects(world, box, monkeypatch, tmp_path):
+    project = world.register("acme")
+    world.connect(STRIPE, project, write=False)
+    backup_vault = {STRIPE: _entry(NEW, projects=["elsewhere"]), "NEW_ONE": _entry(OTHER)}
+    legacy = {"projects": {"legacy-name": {"path": "x", "keys": [STRIPE]}}}
+    backup = tmp_path / "backup.pushkey-backup"
+    backup.write_bytes(pushkey.encrypt_data(json.dumps({"vault": backup_vault, "config": legacy}), PASSWORD))
+    monkeypatch.setattr(pushkey.filedialog, "askopenfilename", lambda **kwargs: str(backup))
+
+    _ok(world.app.import_vault)
+
+    for vault in (world.app.vault, world.disk_vault()):
+        assert vault[STRIPE]["value"] == NEW  # the backup's value was merged in
+        assert len(_connections(vault, STRIPE, project)) == 1  # this computer's link survived
+        assert vault[STRIPE]["projects"] == [project]
+        assert "NEW_ONE" in vault
+    assert "legacy-name" not in world.app.config["projects"]
+    assert "legacy-name" not in load_config(strict=True)["projects"]
+
+
 # -- scans -----------------------------------------------------------------------------
 
 
@@ -508,6 +575,7 @@ def test_scan_roots_ignore_unregistered_names(world, box):
     legacy = world.folder("legacy")
     (legacy / "settings.py").write_text(f'TOKEN = "{OLD}"\n', encoding="utf-8")
     world.app.config["projects"]["legacy-name"] = {"path": str(legacy), "keys": [], "added": "x"}
+    _git(project, "init")  # the project is its own repository: not the Pushkey checkout around tmp
 
     assert pushkey._project_scan_roots(world.app.config) == {project}
     assert _ok(world.app._run_scan) == []  # the registered folder is clean

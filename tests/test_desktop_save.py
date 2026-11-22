@@ -321,13 +321,12 @@ def test_no_direct_save_config_calls_left(frame, tmp_path, monkeypatch):
     assert load_config(strict=True)["theme"] == "light"
 
     # The closures (tray toggles, SSO settings, cloud settings) cannot run without Tk:
-    # prove from source that every AppFrame method calls only the helper, except the
-    # one project-credentials site that belongs to Task 12.
+    # prove from source that every AppFrame method calls only the helper.
     offenders = []
     for name, member in inspect.getmembers(pushkey.AppFrame, inspect.isfunction):
         if re.search(r"\bsave_config\(self\.config\)", inspect.getsource(member)):
             offenders.append(name)
-    assert offenders == ["ci_sync_project"]
+    assert offenders == []
 
 
 def test_desktop_cloud_sync_conflict_goes_through_the_helper(frame, tmp_path, monkeypatch):
