@@ -1549,3 +1549,72 @@ def test_unregister_sweeps_links_to_a_path_that_is_not_registered(world):
     assert entry["projects"] == [] and entry["connections"] == []
     assert result.value == [KEY]
     assert list(pushkey_connect.registered_projects(world.config())) == [world.project]
+
+
+def test_sync_of_several_named_keys_writes_their_file_once(world):
+    names = ["FIRST_KEY", "SECOND_KEY", "THIRD_KEY", "FOURTH_KEY"]
+    for name in (*names, "UNRELATED"):
+        world.add_key(name, value=f"{name}-v1")
+        _ok(lambda name=name: world.connect(key_name=name, var=name))
+        world.rotate(name, f"{name}-v2")
+    old = (world.folder / ".env").read_bytes()
+    shutil.rmtree(pushkey_shared.ENV_BACKUPS_DIR, ignore_errors=True)
+
+    results = _ok(lambda: world.sync(key_names=iter(names)))
+
+    assert [(r.key, r.written, r.change) for r in results] == [(n, True, "replace") for n in names]
+    text = world.read(".env")
+    assert all(f"{name}={name}-v2\n" in text for name in names)
+    assert "UNRELATED=UNRELATED-v1\n" in text
+    backups = _backups()
+    assert len(backups) == 1 and backups[0].read_bytes() == old
+
+
+def test_sync_of_named_keys_honours_the_project_filter(world):
+    second, second_path = world.add_project("beta-app")
+    world.add_key("OTHER", value="other-value")
+    for key in (KEY, "OTHER"):
+        _ok(lambda key=key: world.connect(key_name=key, var=key))
+        _ok(lambda key=key: world.connect(key_name=key, project=second_path, var=key))
+    world.rotate(KEY, "sb_publishable_y")
+    world.rotate("OTHER", "other-value-2")
+
+    results = _ok(lambda: world.sync(key_names=[KEY, "OTHER"], project=second_path))
+
+    assert sorted((r.key, r.project) for r in results) == sorted(
+        [(KEY, second_path), ("OTHER", second_path)]
+    )
+    assert f"{KEY}=sb_publishable_y\n" in world.read(".env", second)
+    assert f"{KEY}={VALUE}\n" in world.read(".env")
+
+
+def test_sync_of_no_named_keys_does_nothing(world):
+    _ok(lambda: world.connect())
+    world.rotate(KEY, "sb_publishable_y")
+    before = (world.folder / ".env").read_bytes()
+
+    assert _ok(lambda: world.sync(key_names=[])) == []
+    assert (world.folder / ".env").read_bytes() == before
+
+
+def test_sync_refuses_a_key_name_and_key_names_together(world):
+    _ok(lambda: world.connect())
+    world.rotate(KEY, "sb_publishable_y")
+    before = (world.folder / ".env").read_bytes()
+
+    error = _raised(lambda: world.sync(key_name=KEY, key_names=[KEY]), ValueError)
+
+    assert error is not None
+    assert (world.folder / ".env").read_bytes() == before
+
+
+def test_sync_of_named_keys_refuses_an_unknown_key_before_it_writes(world):
+    _ok(lambda: world.connect())
+    world.rotate(KEY, "sb_publishable_y")
+    before = (world.folder / ".env").read_bytes()
+
+    error = _raised(lambda: world.sync(key_names=[KEY, "NOPE"]), ConnectError)
+
+    assert error is not None and error.code == "key_not_found"
+    assert error.detail == {"key": "NOPE"}
+    assert (world.folder / ".env").read_bytes() == before

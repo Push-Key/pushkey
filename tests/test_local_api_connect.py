@@ -9,8 +9,10 @@ none passes on a status code alone.
 import hashlib
 import importlib
 import json
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,13 +22,16 @@ import pushkey_connect
 import pushkey_connect_migrate
 import pushkey_crypto
 import pushkey_health
+import pushkey_projectfs
 import pushkey_shared as _s
 import pushkey_tiers
 import pushkey_vault
 from pushkey_connect import ConnectError
 from pushkey_crypto import encrypt_data_v3
 from pushkey_projectfs import ProjectPathError
-from pushkey_vault import ConfigUnreadableError, load_config, load_vault, save_config
+from pushkey_vault import (
+    ConfigUnreadableError, VaultBusyError, load_config, load_vault, save_config, save_vault,
+)
 
 PASSWORD = "master-pw"
 RECOVERY = "PUSH-AAAA-BBBB-CCCC-DDDD"
@@ -869,3 +874,199 @@ def test_unlock_without_a_vault_file_creates_none(fresh_app):
     client.post("/api/unlock", headers=headers, json={"password": PASSWORD})
 
     assert not _s.VAULT_FILE.exists()
+
+
+# -- fix round 1 ---------------------------------------------------------------------------------
+
+
+def _canonical(folder):
+    return pushkey_projectfs.canonical_project_path(str(folder))
+
+
+def _edit_vault(api, change):
+    """Change the vault on disk behind the session's back, then unlock again to reload it."""
+    vault, vault_key = load_vault(PASSWORD)
+    change(vault)
+    save_vault(vault, PASSWORD, vault_key=vault_key)
+    api.unlock()
+
+
+def test_inject_of_named_keys_keeps_the_backup_taken_before_the_inject(api, tmp_path):
+    names = [KEY, OTHER, "THIRD_KEY", "FOURTH_KEY"]
+    _seed_vault({
+        KEY: _entry(), OTHER: _entry(OTHER_VALUE, provider="Stripe"),
+        "THIRD_KEY": _entry("third-value"), "FOURTH_KEY": _entry("fourth-value"),
+    })
+    api.unlock()
+    folder = _project(tmp_path)
+    path = api.register(folder)
+    for name in names:
+        api.connect(path, name)
+    hand_set = "".join(f"{name}=hand-set-{index}\n" for index, name in enumerate(names)).encode()
+    (folder / ".env").write_bytes(hand_set)
+    shutil.rmtree(_s.ENV_BACKUPS_DIR, ignore_errors=True)
+
+    response = api.post("/api/projects/inject", params={"path": path}, json={"keys": names})
+
+    assert response.status_code == 200, response.text
+    assert sorted(response.json()["injected"]) == sorted(names)
+    env = _env(folder)
+    assert f"{KEY}={VALUE}" in env and "THIRD_KEY=third-value" in env and "hand-set" not in env
+    backups = sorted(Path(_s.ENV_BACKUPS_DIR).rglob("*.bak"))
+    assert [backup.read_bytes() for backup in backups] == [hand_set]
+
+
+@pytest.mark.parametrize("error, code", [
+    (ConnectError("migration_pending"), "migration_pending"),
+    (ConfigUnreadableError("config_busy"), "config_busy"),
+    (VaultBusyError("sk-leaked-detail"), "VaultBusyError"),
+    (OSError("sk-leaked-detail"), "OSError"),
+    (ValueError("sk-leaked-detail"), "ValueError"),
+])
+def test_rotate_reports_any_follow_up_sync_failure_as_a_code(api, tmp_path, monkeypatch, error, code):
+    api.unlock()
+    api.connect(api.register(_project(tmp_path)))
+
+    def fail(**kwargs):
+        raise error
+
+    monkeypatch.setattr(pushkey_connect, "sync", fail)
+    response = api.post(f"/api/keys/{KEY}/rotate", json={"new_value": "sk-rotated"})
+
+    assert response.status_code == 200, response.text
+    assert response.json().get("synced") == []
+    assert response.json().get("sync_error") == code
+    assert "sk-leaked-detail" not in response.text
+    assert _stored()["value"] == "sk-rotated"
+
+
+def test_unassign_drops_the_allowlist_entry_of_a_key_with_no_connection(api, tmp_path):
+    api.unlock()
+    folder, other = _project(tmp_path, "proj"), _project(tmp_path, "other")
+    path, other_path = api.register(folder), api.register(other)
+    api.connect(other_path, KEY)
+    api.connect(path, OTHER)
+
+    def allow_without_connection(vault):
+        vault[KEY]["projects"] = [path, other_path]
+        vault[PROD]["projects"] = [path]
+
+    _edit_vault(api, allow_without_connection)
+
+    response = api.post("/api/projects/unassign", params={"path": path}, json={"keys": [KEY]})
+
+    assert response.status_code == 200, response.text
+    assert _stored(KEY)["projects"] == [other_path]
+    assert [c["project"] for c in _stored(KEY)["connections"]] == [other_path]
+    assert _stored(OTHER)["projects"] == [path]
+    assert [c["project"] for c in _stored(OTHER)["connections"]] == [path]
+    assert _stored(PROD)["projects"] == [path]
+
+
+def test_unassign_of_a_key_with_connections_drops_them_and_the_allowlist_entry(api, tmp_path):
+    api.unlock()
+    path = api.register(_project(tmp_path))
+    api.connect(path, KEY)
+    api.connect(path, KEY, file=".env.local", var="OPENAI_ALT")
+
+    response = api.post("/api/projects/unassign", params={"path": path}, json={"keys": [KEY]})
+
+    assert response.status_code == 200, response.text
+    assert _stored(KEY)["connections"] == []
+    assert _stored(KEY)["projects"] == []
+
+
+def test_preview_with_a_value_or_env_needs_a_session_that_can_write(api, tmp_path):
+    api.unlock()
+    path = api.register(_project(tmp_path))
+    plain = {"key": KEY, "project": path}
+    refusal = {"detail": "agent token missing required scope: write"}
+
+    api.token(["read"])
+    without_value = api.post("/api/connections/preview", json=plain)
+    with_value = api.post("/api/connections/preview", json={**plain, "value": "sk-unsaved"})
+    with_env = api.post("/api/connections/preview", json={**plain, "env": "dev"})
+
+    assert without_value.status_code == 200, without_value.text
+    assert (with_value.status_code, with_value.json()) == (403, refusal)
+    assert (with_env.status_code, with_env.json()) == (403, refusal)
+
+    api.token(["read", "write"])
+    assert api.post("/api/connections/preview", json={**plain, "value": "sk-unsaved"}).status_code == 200
+    api.unlock()
+    assert api.post("/api/connections/preview", json={**plain, "value": "sk-unsaved"}).status_code == 200
+
+
+def test_preview_with_a_value_is_refused_for_a_recovery_session(api, tmp_path):
+    api.unlock()
+    path = api.register(_project(tmp_path))
+    api.recovery()
+
+    plain = api.post("/api/connections/preview", json={"key": KEY, "project": path})
+    with_value = api.post(
+        "/api/connections/preview", json={"key": KEY, "project": path, "value": "sk-unsaved"}
+    )
+
+    assert plain.status_code == 200, plain.text
+    assert (with_value.status_code, with_value.json()) == (
+        403, {"detail": "write requires master-password unlock"}
+    )
+
+
+def test_underscore_vault_entries_are_never_listed_or_injected(api, tmp_path):
+    folder = _project(tmp_path)
+    path = _canonical(folder)
+    meta = _entry("meta-secret-value")
+    meta["connections"] = [
+        {"project": path, "file": ".env", "var": "META_VAR", "added": "2026-11-21T10:00:00"}
+    ]
+    _seed_vault({KEY: _entry(), "_meta": meta})
+    api.unlock()
+    assert api.register(folder) == path
+    api.connect(path, KEY)
+
+    listed = api.get("/api/connections")
+    injected = api.post("/api/projects/inject", params={"path": path}, json={})
+
+    assert listed.status_code == 200, listed.text
+    assert [row["key"] for row in listed.json()["connections"]] == [KEY]
+    assert injected.status_code == 200, injected.text
+    assert {r["key"] for r in injected.json()["results"]} == {KEY}
+    assert "meta-secret-value" not in _env(folder) and "META_VAR" not in _env(folder)
+
+
+def test_canonicalising_a_legacy_project_key_keeps_its_connections(api, tmp_path, monkeypatch):
+    api.unlock()
+    folder = _project(tmp_path)
+    path = api.register(folder)
+    api.connect(path)
+    # A spelling of the folder that resolves to `path` but that no path normalisation
+    # can see through (a link or short name), faked at the one resolver both sides use.
+    legacy = str(tmp_path / "legacy-spelling")
+    real = pushkey_projectfs.canonical_project_path
+    monkeypatch.setattr(
+        pushkey_projectfs, "canonical_project_path",
+        lambda raw, **kw: path if raw == legacy else real(raw, **kw),
+    )
+    config = load_config(strict=True)
+    config["projects"][legacy] = config["projects"].pop(path)
+    save_config(config)
+
+    def spell_legacy(vault):
+        vault[KEY]["projects"] = [legacy]
+        for conn in vault[KEY]["connections"]:
+            conn["project"] = legacy
+
+    _edit_vault(api, spell_legacy)
+
+    listing = api.get("/api/projects")
+
+    assert listing.status_code == 200, listing.text
+    assert [(p["path"], p["keys"], p["connections"]) for p in listing.json()["projects"]] == [
+        (path, [KEY], 1)
+    ]
+    stored = _stored()
+    assert [c["project"] for c in stored["connections"]] == [path]
+    assert stored["projects"] == [path]
+    states = api.get("/api/connections", params={"key": KEY}).json()["connections"]
+    assert [(row["project"], row["state"]) for row in states] == [(path, "up_to_date")]
