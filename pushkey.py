@@ -96,6 +96,9 @@ from pushkey_crypto import (
 )
 from pushkey_vault import migrate_vault_to_v3
 from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes, VaultBusyError
+from pushkey_vault import update_config, ConfigUnreadableError, VaultConflictError
+import pushkey_connect
+import pushkey_connect_migrate
 from pushkey_health import HealthSidecarError, HealthUnavailableError, read_health_sidecar, encode_health_document, publish_saved_vault
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
@@ -2163,6 +2166,10 @@ class RecoverySetupDialog(ctk.CTkToplevel):
         self._on_confirmed(self._password, {}, vault_key)
 
 
+#: Config keys the shared project store owns; the desktop's own saves never write them.
+_PROJECT_OWNED_CONFIG_KEYS = ("projects", "projects_legacy", "connect_schema", "connect_notice", "last_project")
+
+
 class AppFrame(ctk.CTkFrame):
     def __init__(self, master, password, vault, on_lock, app=None, vault_key=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
@@ -2369,8 +2376,69 @@ class AppFrame(ctk.CTkFrame):
             delay += 250
 
     def save(self):
-        save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
-        save_config(self.config)
+        """Save the vault, then the desktop's own settings. True when the vault was saved.
+
+        Another Pushkey window or tool may have saved the vault since this one loaded
+        it. That is a conflict, not an error: the vault is reloaded from disk, the user
+        is told to repeat the last change, and nothing is written (False).
+        """
+        try:
+            save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+        except VaultConflictError:
+            self._reload_after_conflict()
+            return False
+        self._save_config()
+        return True
+
+    def _reload_after_conflict(self):
+        """Replace this window's vault with what is on disk (same dict, new revision)."""
+        try:
+            loaded = load_vault(self.password)
+            if not loaded:
+                raise RuntimeError("vault_reload_failed")
+            fresh, key = loaded
+            pushkey_connect.adopt_vault(self.vault, fresh)
+            self.vault_key = key
+        except Exception:
+            messagebox.showwarning(
+                "Pushkey", "The vault could not be reloaded. Please lock and unlock Pushkey.")
+            return
+        messagebox.showwarning(
+            "Pushkey",
+            "The vault changed in another Pushkey window or tool. "
+            "It has been reloaded; please repeat your last change.")
+        try:
+            self._invalidate_tabs("keys", "projects", "dashboard")
+        except Exception:
+            pass  # the vault is already reloaded; a stale screen is the lesser problem
+
+    def _save_config(self, *, quiet=False):
+        """Write the desktop's own settings without touching the project store.
+
+        Every key except the project-owned ones is copied into a fresh read of
+        config.json under the config lock, so projects registered by another Pushkey
+        tool survive. The project-owned keys of ``self.config`` are then refreshed from
+        what is on disk. True when saved; False (config in memory unchanged, one
+        warning unless ``quiet``) when config.json is unreadable or busy.
+        """
+        owned = _PROJECT_OWNED_CONFIG_KEYS
+        own = {k: v for k, v in self.config.items() if k not in owned}
+
+        def mutate(on_disk):
+            on_disk.update(own)
+            return {k: on_disk[k] for k in owned if k in on_disk}
+
+        try:
+            from_disk = update_config(mutate)
+        except ConfigUnreadableError as error:
+            if not quiet:
+                messagebox.showwarning(
+                    "Pushkey", f"Settings could not be saved: {error or 'config_unreadable'}")
+            return False
+        for k in owned:
+            self.config.pop(k, None)
+        self.config.update(from_disk)
+        return True
 
     def _schedule_health_refresh(self):
         if not self.winfo_exists():
@@ -2443,7 +2511,7 @@ class AppFrame(ctk.CTkFrame):
         new_mode = "light" if _CURRENT_THEME == "dark" else "dark"
         set_theme(new_mode)
         self.config["theme"] = new_mode
-        save_config(self.config)
+        self._save_config()
         if self.app is not None:
             # Full rebuild on theme switch. The earlier in-place recolor
             # only re-skinned the major chrome containers and left every
@@ -2615,7 +2683,7 @@ class AppFrame(ctk.CTkFrame):
 
             def _on_toggle():
                 self.config[cfg_key] = var.get()
-                save_config(self.config)
+                self._save_config()
 
             ctk.CTkSwitch(row, text="", variable=var, command=_on_toggle,
                           width=44, height=22,
@@ -3103,7 +3171,7 @@ class AppFrame(ctk.CTkFrame):
             # Persist non-secret settings
             self.config.setdefault("sso_settings", {}).update(
                 {"provider": p, "client_id": client_id, "issuer": issuer})
-            save_config(self.config)
+            self._save_config()
 
             status_lbl.configure(text="Starting device flow…", text_color=C["amber"])
             win.update()
@@ -3180,7 +3248,7 @@ class AppFrame(ctk.CTkFrame):
             # write-loss this guards against.
             cloud_cfg = self.config.setdefault("cloud", {})
             cloud_cfg["conflict_etag"] = conflict.current_etag
-            save_config(self.config)
+            self._save_config(quiet=silent)
             if not silent:
                 raise RuntimeError(
                     "Cloud sync conflict: the vault was changed on another "
@@ -3191,7 +3259,7 @@ class AppFrame(ctk.CTkFrame):
         cloud_cfg["last_synced"] = datetime.now().isoformat()
         cloud_cfg["etag"] = etag
         cloud_cfg.pop("conflict_etag", None)
-        save_config(self.config)
+        self._save_config(quiet=silent)
 
     # ── Cloud tab renderer ────────────────────────────────────────
     def render_cloud(self):
@@ -3267,7 +3335,7 @@ class AppFrame(ctk.CTkFrame):
                 "endpoint": entries["endpoint"].get().strip(),
                 "token":    entries["token"].get().strip(),
             })
-            save_config(self.config)
+            self._save_config()
             status_lbl.configure(text="Settings saved.", text_color=C["green"])
 
         btn_row = ctk.CTkFrame(pad, fg_color="transparent")
@@ -8315,6 +8383,39 @@ def _check_crypto_deps():
 # APP
 # ═══════════════════════════════════════════════
 
+def _connect_notice_text(notice) -> str:
+    """The migration notice as plain text (key names, project names and paths only), or ""."""
+    if not isinstance(notice, dict):
+        return ""
+    nl = "\n"
+
+    def items(name):
+        value = notice.get(name)
+        return value if isinstance(value, list) else []
+
+    def pair(item):
+        return " / ".join(str(part) for part in item) if isinstance(item, (list, tuple)) else str(item)
+
+    paragraphs = []
+    if items("every_key_projects"):
+        paragraphs.append(
+            "These projects had no keys chosen, so every key of theirs is now connected "
+            "(review them in the Projects tab):" + nl + nl.join(str(p) for p in items("every_key_projects")))
+    if items("env_skipped"):
+        paragraphs.append(
+            "These keys were not connected because their environment did not match "
+            "the project's (project / key):" + nl + nl.join(pair(i) for i in items("env_skipped")))
+    if items("unusable"):
+        paragraphs.append(
+            "These projects have no usable folder and were not moved:"
+            + nl + nl.join(str(p) for p in items("unusable")))
+    if items("unregistered"):
+        paragraphs.append(
+            "These keys allow a folder that is not a registered project (key / folder):"
+            + nl + nl.join(pair(i) for i in items("unregistered")))
+    return (nl + nl).join(paragraphs)
+
+
 class PushkeyApp:
     def __init__(self):
         _check_crypto_deps()
@@ -8589,9 +8690,48 @@ class PushkeyApp:
         self.switch(LoginFrame, on_login=self.on_login, on_start_fresh=self.show_login)
 
     def on_login(self, pw, vault, vault_key=None):
+        self._migrate_at_login(pw, vault, vault_key)
         write_health_sidecar(vault)
         self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self, vault_key=vault_key)
+        self._show_connect_notice()
         self._start_clip_watcher(vault)
+
+    def _migrate_at_login(self, pw, vault, vault_key):
+        """Run the one-time project migration for this master-password login.
+
+        Never blocks the login: an unreadable or busy config.json, or any other
+        failure, is one warning and the desktop carries on. ``vault`` is brought up
+        to date in place, so the first save from this window is not a conflict.
+        """
+        try:
+            pushkey_connect_migrate.ensure_migrated(vault_key=vault_key, password=pw, target=vault)
+        except ConfigUnreadableError:
+            messagebox.showwarning(
+                "Pushkey",
+                "Projects could not be migrated: your Pushkey settings file is unreadable "
+                "or busy. Everything else works.")
+        except Exception as error:
+            reason = error.code if isinstance(error, pushkey_connect.ConnectError) else type(error).__name__
+            messagebox.showwarning(
+                "Pushkey", f"Projects could not be migrated ({reason}). Everything else works.")
+
+    def _show_connect_notice(self):
+        """Tell the user, once, what the migration could not carry over (names only)."""
+        try:
+            notice = load_config().get("connect_notice")
+        except Exception:
+            return
+        text = _connect_notice_text(notice)
+        if not text:
+            return
+        messagebox.showinfo("Projects were updated", text)
+        if not messagebox.askyesno("Pushkey", "Hide this notice from now on?"):
+            return
+        try:
+            pushkey_connect_migrate.dismiss_notice()
+        except Exception:
+            messagebox.showwarning(
+                "Pushkey", "The notice could not be hidden. It will show again next time.")
 
     def reload_app(self, pw, vault):
         self.root.configure(fg_color=C["bg"])

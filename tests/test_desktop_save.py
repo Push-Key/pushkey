@@ -102,6 +102,7 @@ class FakeFrame:
         self.theme_button_text = None
         self.save = types.MethodType(pushkey.AppFrame.save, self)
         self._save_config = types.MethodType(pushkey.AppFrame._save_config, self)
+        self._reload_after_conflict = types.MethodType(pushkey.AppFrame._reload_after_conflict, self)
         self._toggle_theme = types.MethodType(pushkey.AppFrame._toggle_theme, self)
         self._cloud_sync_once = types.MethodType(pushkey.AppFrame._cloud_sync_once, self)
         self._theme_btn = types.SimpleNamespace(configure=self._set_theme_text)
@@ -192,6 +193,16 @@ def test_desktop_save_conflict_returns_false_and_skips_config(frame, box, monkey
     assert "keys" in frame.invalidated
 
 
+def test_desktop_save_conflict_keeps_the_reloaded_vault_key(frame, box, monkeypatch):
+    _external_vault_change()
+    real = pushkey.load_vault
+    monkeypatch.setattr(pushkey, "load_vault", lambda password: (real(password)[0], b"k" * 32))
+
+    assert _ok(frame.save) is False
+
+    assert frame.vault_key == b"k" * 32
+
+
 def test_desktop_save_reload_failure_says_so(frame, box, monkeypatch):
     _external_vault_change()
     monkeypatch.setattr(pushkey, "load_vault", lambda password: None)
@@ -226,7 +237,7 @@ def test_desktop_save_keeps_projects_added_elsewhere(frame, tmp_path):
     on_disk = load_config(strict=True)
     assert canonical in on_disk["projects"]
     assert on_disk["theme"] == "light"
-    assert canonical in frame.config["projects"]  # refreshed for the project-owned keys
+    assert canonical in frame.config.get("projects", {})  # refreshed for the project-owned keys
 
 
 def test_desktop_save_theme_keeps_projects_added_elsewhere(frame, tmp_path, monkeypatch):
@@ -249,7 +260,7 @@ def test_desktop_theme_toggle_without_app_updates_button(frame, tmp_path, monkey
 
     assert load_config(strict=True)["theme"] == "light"
     assert frame.config["theme"] == "light"
-    assert frame.theme_button_text == "\u263e" or frame.theme_button_text is not None
+    assert frame.theme_button_text == "\u263e"  # moon: the next click goes back to dark
 
 
 def test_desktop_save_never_writes_project_owned_keys(frame, tmp_path):
@@ -442,7 +453,7 @@ def test_desktop_login_other_migration_error_warns_with_the_class_name(box, monk
     monkeypatch.setattr(pushkey_connect_migrate, "ensure_migrated", boom)
     app = FakeApp()
 
-    app._migrate_at_login(PASSWORD, {}, None)
+    _ok(lambda: app._migrate_at_login(PASSWORD, {}, None))
 
     assert box.calls == [(
         "warning", "Pushkey", "Projects could not be migrated (Odd). Everything else works.",
@@ -456,7 +467,7 @@ def test_desktop_login_migration_conflict_does_not_block(box, monkeypatch):
     monkeypatch.setattr(pushkey_connect_migrate, "ensure_migrated", boom)
     app = FakeApp()
 
-    app._migrate_at_login(PASSWORD, {}, None)
+    _ok(lambda: app._migrate_at_login(PASSWORD, {}, None))
 
     assert len(box.of("warning")) == 1
     assert "vault_changed" in box.of("warning")[0][2]
@@ -504,6 +515,20 @@ def test_desktop_login_notice_kept_on_no(tmp_path, box):
 
     assert len(box.of("info")) == 1 and len(box.of("askyesno")) == 1
     assert load_config(strict=True)["connect_notice"] == NOTICE
+
+
+def test_desktop_login_shows_the_notice_once_the_frame_is_built(tmp_path, box, monkeypatch):
+    monkeypatch.setattr(pushkey, "write_health_sidecar", lambda vault: True)
+    _notice_world(tmp_path)
+    vault, key = load_vault(PASSWORD)
+    app = FakeApp()
+    shown_before_switch = []
+    app.switch = lambda cls, **kw: shown_before_switch.append(len(box.calls))
+
+    app.on_login(PASSWORD, vault, key)
+
+    assert shown_before_switch == [0]  # nothing was shown while the frame was still unbuilt
+    assert len(box.of("info")) == 1 and len(box.of("askyesno")) == 1
 
 
 def test_desktop_login_no_notice_means_no_dialog(tmp_path, box):
