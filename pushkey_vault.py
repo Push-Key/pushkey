@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import pushkey_shared as _s
+from pushkey_locking import FileLockTimeout, bounded_file_lock
 from pushkey_crypto import (
     AESGCM,
     _V2_MAGIC,
@@ -55,36 +56,53 @@ class VaultBusyError(RuntimeError):
 @contextmanager
 def _cross_process_lock():
     _s.ensure_vault_dir()
-    lock_path = _s.VAULT_DIR / ".vault.lock"
-    handle = lock_path.open("a+b")
     try:
-        if os.fstat(handle.fileno()).st_size == 0:
-            handle.seek(0)
-            handle.write(b"\0")
-            handle.flush()
-            os.fsync(handle.fileno())
-        handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except OSError as exc:
-            raise VaultBusyError("vault_lock_failed") from exc
+        with bounded_file_lock(_s.VAULT_DIR / ".vault.lock"):
+            yield
+    except FileLockTimeout as exc:
+        raise VaultBusyError("vault_lock_failed") from exc
+
+
+@contextmanager
+def _vault_write_guard():
+    """Acquire the process and cross-process vault locks in global order."""
+    with _VAULT_WRITE_LOCK, _cross_process_lock():
         yield
-    finally:
+
+
+def _current_encrypted_vault_revision() -> bytes:
+    """Return the SHA-256 revision of the current encrypted vault bytes."""
+    import hashlib
+    return hashlib.sha256(_read_vault_bytes()).digest()
+
+
+def _invalidate_health_under_vault_lock(expected_revision: bytes) -> None:
+    """Invalidate the public snapshot without reacquiring `.vault.lock`."""
+    from pushkey_health import invalidate_health_sidecar_under_vault_lock
+    invalidate_health_sidecar_under_vault_lock(expected_vault_revision=expected_revision)
+
+
+def replace_encrypted_vault_bytes(replacement: bytes) -> None:
+    """Durably replace encrypted vault bytes and invalidate its public sidecar."""
+    import hashlib
+    with _vault_write_guard():
+        _s.ensure_vault_dir()
+        fd, tmp_name = tempfile.mkstemp(prefix=".vault.", suffix=".tmp", dir=str(_s.VAULT_DIR))
+        tmp = type(_s.VAULT_FILE)(tmp_name)
         try:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(replacement)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(str(tmp), str(_s.VAULT_FILE))
+            _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
         finally:
-            handle.close()
+            tmp.unlink(missing_ok=True)
 
 
 def _read_vault_bytes() -> bytes:
@@ -287,7 +305,7 @@ def replace_v3_recovery_code(password: str, recovery_code: str, *, expected_revi
 
 def rekey_v3_password(recovery_code: str, new_password: str) -> None:
     """Atomically replace only the password slot, validating both unlock paths."""
-    with _VAULT_WRITE_LOCK, _cross_process_lock():
+    with _vault_write_guard():
         existing = _read_vault_bytes()
         if not existing.startswith(_V3_MAGIC):
             raise VaultFormatError("not_v3")
@@ -310,6 +328,8 @@ def rekey_v3_password(recovery_code: str, new_password: str) -> None:
             _create_rolling_backup(existing)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            import hashlib
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
             _prune_rolling_backups()
         finally:
             tmp.unlink(missing_ok=True)
@@ -386,7 +406,7 @@ def load_vault_with_key(vault_key: bytes) -> tuple:
 
 def save_vault(vault, password, *, vault_key=None, recovery_code=None, expected_revision=None):
     """Save vault. For V3: pass vault_key (preserve existing key) or recovery_code (create new V3)."""
-    with _VAULT_WRITE_LOCK, _cross_process_lock():
+    with _vault_write_guard():
         _s.ensure_vault_dir()
         existing_raw = _read_vault_bytes() if _s.VAULT_FILE.exists() else b""
         import hashlib
@@ -461,6 +481,7 @@ def save_vault(vault, password, *, vault_key=None, recovery_code=None, expected_
                 _create_rolling_backup(existing_raw)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(written).digest())
             _prune_rolling_backups()
             if isinstance(vault, VaultData):
                 vault._pushkey_revision = hashlib.sha256(written).digest()
@@ -473,7 +494,7 @@ def save_vault(vault, password, *, vault_key=None, recovery_code=None, expected_
 
 def save_vault_with_key(vault, vault_key: bytes, *, expected_revision=None):
     """Update only a V3 body using an authenticated raw vault key."""
-    with _VAULT_WRITE_LOCK, _cross_process_lock():
+    with _vault_write_guard():
         existing = _read_vault_bytes()
         if not existing.startswith(_V3_MAGIC):
             raise VaultFormatError("raw_key_requires_v3")
@@ -509,6 +530,7 @@ def save_vault_with_key(vault, vault_key: bytes, *, expected_revision=None):
             _create_rolling_backup(existing)
             os.replace(str(tmp), str(_s.VAULT_FILE))
             _fsync_parent(_s.VAULT_DIR)
+            _invalidate_health_under_vault_lock(hashlib.sha256(replacement).digest())
             _prune_rolling_backups()
             if isinstance(vault, VaultData):
                 vault._pushkey_revision = hashlib.sha256(replacement).digest()

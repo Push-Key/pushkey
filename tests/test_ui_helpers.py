@@ -29,6 +29,97 @@ def test_log_line_age_days_invalid_date_returns_inf():
 import types
 
 
+def test_gui_health_publication_failure_records_sanitized_audit(monkeypatch):
+    from pushkey_health import HealthBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(HealthBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
+def test_gui_health_unsafe_path_records_sanitized_audit(monkeypatch):
+    from pushkey_health import HealthPathError
+
+    events = []
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(HealthPathError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
+def test_gui_health_vault_lock_timeout_records_sanitized_audit(monkeypatch):
+    from pushkey_vault import VaultBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "publish_saved_vault", lambda *args, **kwargs: (_ for _ in ()).throw(VaultBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    class Vault(dict):
+        _pushkey_revision = b"revision"
+
+    assert pushkey.write_health_sidecar(Vault()) is False
+    assert events == ["health_publication_failed"]
+
+
+def test_recovery_reset_vault_lock_timeout_is_sanitized(monkeypatch):
+    from pushkey_vault import VaultBusyError
+
+    events = []
+    monkeypatch.setattr(pushkey, "replace_encrypted_vault_bytes", lambda *args: (_ for _ in ()).throw(VaultBusyError()))
+    monkeypatch.setattr(pushkey, "log_event", events.append)
+
+    assert pushkey._replace_recovered_vault(b"replacement") is True
+    assert events == ["master password reset via recovery key; health_publication_failed"]
+
+
+def test_shutdown_cancels_active_health_refresh():
+    cancelled = []
+    app = type("App", (), {"frame": type("Frame", (), {"_cancel_health_refresh": lambda self: cancelled.append(True)})()})()
+    pushkey.PushkeyApp._cancel_active_health_refresh(app)
+    assert cancelled == [True]
+
+
+def test_tray_quit_cancels_health_refresh_before_exit_and_destroy():
+    events = []
+
+    class Root:
+        def after(self, _delay, callback):
+            events.append("after")
+            callback()
+
+        def destroy(self):
+            events.append("destroy")
+
+    class App:
+        root = Root()
+        frame = None
+        _tray_icon = None
+        _clip_watcher_running = True
+
+        def _cancel_active_health_refresh(self):
+            events.append("cancel")
+
+        def _on_exit(self):
+            events.append("exit")
+
+    app = App()
+    # This helper is the callback scheduled by the actual tray Quit menu item.
+    pushkey.PushkeyApp._quit_from_tray(app)
+
+    assert app._clip_watcher_running is False
+    assert events == ["cancel", "exit", "destroy"]
+
+
 def test_toggle_expand_opens_key():
     class FakeApp:
         _expanded_key = None

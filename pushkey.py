@@ -95,7 +95,8 @@ from pushkey_crypto import (
     _CONFIG_KEY_CACHE, _config_key,
 )
 from pushkey_vault import migrate_vault_to_v3
-from pushkey_vault import load_vault, save_vault, load_config, save_config
+from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes, VaultBusyError
+from pushkey_health import HealthSidecarError, HealthUnavailableError, read_health_sidecar, encode_health_document, publish_saved_vault
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
     get_machine_fingerprint,
@@ -141,39 +142,38 @@ def _login_card_layout(window_width: int) -> dict[str, int]:
 
 
 def write_health_sidecar(vault):
+    """Compatibility wrapper for legacy GUI call sites."""
     try:
-        ensure_vault_dir()
-        health = {}
-        for name, info in vault.items():
-            age = days_since(info.get("rotated") or info.get("created"))
-            use_age = days_since(info.get("first_used"))
-            effective_age = min(age, use_age) if use_age != float("inf") else age
-            provider = info.get("provider")
-            threshold = 90
-            if provider and provider in PROVIDERS:
-                threshold = PROVIDERS[provider].get("rotation_days", 90)
-            if effective_age > threshold:
-                status = "critical"
-            elif effective_age > threshold * 0.67:
-                status = "warning"
-            else:
-                status = "healthy"
-            health[name] = {
-                "status": status,
-                "days_old": effective_age if effective_age != float("inf") else None,
-                "provider": provider,
-                "category": info.get("category", "General"),
-                "first_used": info.get("first_used"),
-                "last_used": info.get("last_used"),
-                "created": info.get("created"),
-                "rotated": info.get("rotated"),
-                "rotation_count": info.get("rotation_count", 0),
-            }
-        tmp = HEALTH_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(health, indent=2), encoding="utf-8")
-        os.replace(str(tmp), str(HEALTH_FILE))
-    except Exception:
-        pass
+        publish_saved_vault(vault)
+        return True
+    except (HealthSidecarError, VaultBusyError):
+        # The vault save remains valid; never include sidecar details in the audit log.
+        try:
+            log_event("health_publication_failed")
+        except Exception:
+            pass
+        return False
+
+
+def save_vault_and_publish(vault, password, *, vault_key=None, recovery_code=None):
+    """Save a plaintext-aware GUI mutation and best-effort publish its public view."""
+    save_vault(vault, password, vault_key=vault_key, recovery_code=recovery_code)
+    write_health_sidecar(vault)
+
+
+def _replace_recovered_vault(new_token: bytes) -> bool:
+    """Replace a recovery-reset vault and report only a safe refresh warning."""
+    try:
+        replace_encrypted_vault_bytes(new_token)
+        log_event("master password reset via recovery key")
+        return False
+    except (HealthUnavailableError, VaultBusyError):
+        # The password reset may be committed before sidecar invalidation fails.
+        try:
+            log_event("master password reset via recovery key; health_publication_failed")
+        except Exception:
+            pass
+        return True
 
 
 
@@ -596,28 +596,38 @@ def _start_health_server(port: int = HEALTH_PORT) -> None:
             if self.path != "/health":
                 self.send_response(404); self.end_headers(); return
             try:
-                data = HEALTH_FILE.read_bytes() if HEALTH_FILE.exists() else b"{}"
+                # Re-encode normalized v1 input so bytes served are canonical.
+                data = encode_health_document(read_health_sidecar(HEALTH_FILE, allow_legacy=False))
             except Exception:
-                data = b"{}"
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
+                data = b'{"error":"health_unavailable"}\n'
+                self.send_response(503)
+            else:
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        def do_OPTIONS(self):
-            self.send_response(200)
-            self.send_header("Access-Control-Allow-Origin", "*")
+        def _method_not_allowed(self):
+            self.send_response(405)
+            self.send_header("Allow", "GET")
+            self.send_header("Content-Length", "0")
             self.end_headers()
+        def do_HEAD(self): self._method_not_allowed()
+        def do_POST(self): self._method_not_allowed()
+        def do_PUT(self): self._method_not_allowed()
+        def do_PATCH(self): self._method_not_allowed()
+        def do_DELETE(self): self._method_not_allowed()
+        def do_OPTIONS(self): self._method_not_allowed()
         def log_message(self, *_): pass
 
-    def _serve():
-        try:
-            srv = http.server.HTTPServer(("127.0.0.1", port), _Handler)
-            srv.serve_forever()
-        except Exception:
-            pass
-
-    threading.Thread(target=_serve, daemon=True).start()
+    try:
+        srv = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+    except OSError:
+        return None
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 
 
@@ -1795,24 +1805,24 @@ class LoginFrame(ctk.CTkFrame):
             if new_pw != new_pw2:
                 err_lbl.configure(text="Passwords don't match")
                 return
+            health_warning = False
             try:
                 raw = VAULT_FILE.read_bytes()
                 new_token = rekey_vault(raw, rec_code, new_pw)
-                tmp = VAULT_FILE.with_suffix('.tmp')
-                tmp.write_bytes(new_token)
-                os.replace(str(tmp), str(VAULT_FILE))
-                log_event("master password reset via recovery key")
-                win.destroy()
-                self.err.configure(
-                    text="Password reset — unlock with your new password",
-                    text_color=C["green"],
-                )
-                self.pw.delete(0, "end")
+                health_warning = _replace_recovered_vault(new_token)
             except (ValueError, OSError) as e:
                 if "wrong_recovery_code" in str(e):
                     err_lbl.configure(text="Recovery key incorrect — check your written copy")
                 else:
                     err_lbl.configure(text=f"Error: {e}")
+                return
+            win.destroy()
+            self.err.configure(
+                text=("Password reset. Health status needs refresh" if health_warning
+                      else "Password reset — unlock with your new password"),
+                text_color=C["amber"] if health_warning else C["green"],
+            )
+            self.pw.delete(0, "end")
 
         make_btn(form, "Reset Password", _submit,
                  fg_color=C["accent"], text_color="#FFFFFF",
@@ -2143,7 +2153,7 @@ class RecoverySetupDialog(ctk.CTkToplevel):
 
     def _submit(self):
         ensure_vault_dir()
-        save_vault({}, self._password, recovery_code=self._code)
+        save_vault_and_publish({}, self._password, recovery_code=self._code)
         vault, vault_key = load_vault(self._password)
         if vault is None or vault_key is None:
             if hasattr(self, '_err_lbl'):
@@ -2239,6 +2249,7 @@ class AppFrame(ctk.CTkFrame):
         # Auto-lock
         self._lock_timeout = 5 * 60 * 1000
         self._lock_timer_id = None
+        self._health_refresh_id = None
         self._reset_lock_timer()
         self.master.bind("<Key>", lambda e: self._reset_lock_timer(), add="+")
         self.master.bind("<Button>", lambda e: self._reset_lock_timer(), add="+")
@@ -2331,6 +2342,7 @@ class AppFrame(ctk.CTkFrame):
         self.after(600, self._check_rotation_schedule)
         # Start local health HTTP server for browser extension
         _start_health_server()
+        self._schedule_health_refresh()
         # Start cloud auto-sync background thread
         self._start_cloud_sync()
         # Background pre-render — eliminates first-visit lag on every tab.
@@ -2357,9 +2369,22 @@ class AppFrame(ctk.CTkFrame):
             delay += 250
 
     def save(self):
-        save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+        save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
         save_config(self.config)
+
+    def _schedule_health_refresh(self):
+        if not self.winfo_exists():
+            return
         write_health_sidecar(self.vault)
+        self._health_refresh_id = self.after(6 * 60 * 60 * 1000, self._schedule_health_refresh)
+
+    def _cancel_health_refresh(self):
+        if self._health_refresh_id is not None:
+            try:
+                self.after_cancel(self._health_refresh_id)
+            except Exception:
+                pass
+            self._health_refresh_id = None
 
     # ── Nav + theme ───────────────────────────────────────────
 
@@ -2721,6 +2746,7 @@ class AppFrame(ctk.CTkFrame):
                      fg_color=C["bg3"], text_color=C["text3"], width=160, height=34).pack(side="left", padx=4)
 
     def lock(self):
+        self._cancel_health_refresh()
         self.revealed.clear()
         if self._lock_timer_id:
             self.after_cancel(self._lock_timer_id)
@@ -6644,7 +6670,7 @@ class AppFrame(ctk.CTkFrame):
                 err.configure(text="New passwords don't match")
                 return
             self.password = new_pw
-            save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+            save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
             win.destroy()
             messagebox.showinfo("Done", "Master password changed. Vault re-encrypted.")
 
@@ -8253,7 +8279,7 @@ class AppFrame(ctk.CTkFrame):
                 added += 1
 
             if added:
-                save_vault(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+                save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
                 log_event(f"imported {added} keys from {filename}")
                 dlg.destroy()
                 self.render_keys()
@@ -8345,6 +8371,24 @@ class PushkeyApp:
         try: self.root.clipboard_clear()
         except: pass
 
+    def _cancel_active_health_refresh(self):
+        cancel = getattr(self.frame, "_cancel_health_refresh", None)
+        if callable(cancel):
+            cancel()
+
+    def _quit_from_tray(self):
+        """Finish the tray Quit action on the Tk event loop."""
+        self._clip_watcher_running = False
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        self._cancel_active_health_refresh()
+        self._on_exit()
+        self.root.destroy()
+
     def _on_close(self):
         # Check config for tray_on_close; default ON if vault/config available
         cfg = {}
@@ -8360,6 +8404,7 @@ class PushkeyApp:
             if self._tray_icon is None:
                 self._start_tray()
         else:
+            self._cancel_active_health_refresh()
             self._on_exit()
             if self._tray_icon is not None:
                 try:
@@ -8398,17 +8443,7 @@ class PushkeyApp:
             self.root.after(0, _do)
 
         def _quit(_icon=None, _item=None):
-            def _do():
-                self._clip_watcher_running = False
-                if self._tray_icon is not None:
-                    try:
-                        self._tray_icon.stop()
-                    except Exception:
-                        pass
-                    self._tray_icon = None
-                self._on_exit()
-                self.root.destroy()
-            self.root.after(0, _do)
+            self.root.after(0, self._quit_from_tray)
 
         menu = pystray.Menu(
             pystray.MenuItem("Open Pushkey", _restore, default=True),
@@ -8668,7 +8703,7 @@ def _cli_main(args):
         info["value"] = new_val
         info["rotated"] = now
         info["rotation_count"] = info.get("rotation_count", 0) + 1
-        save_vault(vault, pw, vault_key=_vault_key)
+        save_vault_and_publish(vault, pw, vault_key=_vault_key)
         print(f"OK  {ns.key} rotated")
 
 

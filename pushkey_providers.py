@@ -3,8 +3,11 @@ Pushkey — provider database, detection, and key health utilities.
 No tkinter dependency — safe to import from CLI and tests.
 """
 import json
+import math
 import os
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from numbers import Real
 
 import pushkey_shared as _s
 from pushkey_crypto import log_event
@@ -98,6 +101,27 @@ def provider_supports_multi_key(provider_name: str) -> bool:
     return bool(prov.get("multi_key", True))  # default True — optimistic for unknown providers
 
 
+def days_since_at(date_str, now):
+    """Return whole elapsed days with naive datetimes interpreted as UTC."""
+    if not date_str or not isinstance(now, datetime):
+        return float("inf")
+    try:
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        if dt > now:
+            return float("inf")
+        return (now - dt).days
+    except Exception:
+        return float("inf")
+
+
 def days_since(date_str):
     if not date_str:
         return float("inf")
@@ -106,6 +130,26 @@ def days_since(date_str):
         return (datetime.now() - dt).days
     except Exception:
         return float("inf")
+
+
+def health_status_at(key_info, now):
+    age = days_since_at(key_info.get("rotated") or key_info.get("created"), now)
+    provider = key_info.get("provider")
+    threshold = 90
+    if provider and provider in PROVIDERS:
+        metadata = PROVIDERS[provider]
+        if isinstance(metadata, Mapping):
+            candidate = metadata.get("rotation_days", 90)
+            if (isinstance(candidate, Real) and not isinstance(candidate, bool)
+                    and math.isfinite(candidate) and candidate > 0):
+                threshold = candidate
+    use_age = days_since_at(key_info.get("first_used"), now)
+    effective_age = min(age, use_age) if use_age != float("inf") else age
+    if effective_age > threshold:
+        return "critical"
+    if effective_age > threshold * 0.67:
+        return "warning"
+    return "healthy"
 
 
 def health_status(key_info):

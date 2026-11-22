@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 API_TS = ROOT / "web-app" / "src" / "lib" / "api.ts"
 LOCAL_API = ROOT / "pushkey_local_api.py"
-PUSHKEY_PY = ROOT / "pushkey.py"
 LOCAL_API_DOC = ROOT / "docs" / "local-api-v1.md"
 HEALTH_DOC = ROOT / "docs" / "health-sidecar-v1.md"
 PRODUCTION_ENTRYPOINTS = (
@@ -65,23 +64,42 @@ def test_local_api_contract_doc_lists_every_client_path():
 
 
 def test_health_sidecar_contract_matches_written_fields():
-    pushkey_source = PUSHKEY_PY.read_text(encoding="utf-8")
-    doc = HEALTH_DOC.read_text(encoding="utf-8")
-    fields = {
-        "status",
-        "days_old",
-        "provider",
-        "category",
-        "first_used",
-        "last_used",
-        "created",
-        "rotated",
-        "rotation_count",
-    }
+    import json
+    from datetime import datetime, timezone
 
-    for field in fields:
-        assert f'"{field}"' in pushkey_source
-        assert f"`{field}`" in doc
+    from pushkey_health import build_health_document
+
+    doc = HEALTH_DOC.read_text(encoding="utf-8")
+    vault = {
+        "OPENAI_API_KEY": {
+            "value": "sk-live-secret-value",
+            "backup_value": "sk-backup-secret-value",
+            "notes": "private operator note",
+            "provider": "OpenAI",
+            "category": "AI",
+            "created": "2026-07-01T12:00:00Z",
+            "rotated": "2026-07-10T12:00:00Z",
+            "first_used": "2026-07-02T12:00:00Z",
+            "last_used": "2026-07-19T12:00:00Z",
+            "rotation_count": 3,
+        }
+    }
+    document = build_health_document(
+        vault, generated_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    )
+
+    # The written document carries exactly the documented root and record fields.
+    assert set(document) == {"schema_version", "generated_at", "keys"}
+    record = document["keys"]["OPENAI_API_KEY"]
+    assert set(record) == {"status", "days_old", "provider"}
+    for field in set(document) | set(record):
+        assert f"- `{field}`:" in doc, f"{field} is not defined in {HEALTH_DOC.name}"
+
+    # Nothing outside the contract leaks into the serialized sidecar.
+    encoded = json.dumps(document)
+    for leaked in ("sk-live-secret-value", "sk-backup-secret-value", "private operator note",
+                   "category", "2026-07-01", "2026-07-10", "rotation_count"):
+        assert leaked not in encoded
 
 
 def test_health_sidecar_contract_forbids_secret_fields():
