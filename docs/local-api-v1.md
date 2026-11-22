@@ -36,16 +36,16 @@ used by that file must have a matching route in `pushkey_local_api.py`.
 | GET | `/api/keys/{name}` | Reveal one key's detail. |
 | PATCH | `/api/keys/{name}` | Update key metadata. |
 | DELETE | `/api/keys/{name}` | Delete a key. |
-| POST | `/api/keys/{name}/rotate` | Rotate a key to a new value [write]; the response lists the connected files rewritten (`synced`), or for an agent token without the inject scope the connections not rewritten (`not_synced`). |
+| POST | `/api/keys/{name}/rotate` | Rotate a key to a new value [write]; the response lists the connected files rewritten (`synced`), or for an agent token without the inject scope the connections not rewritten (`not_synced`). A follow-up sync that cannot run leaves the rotation done and sets `sync_error` to a code. |
 | POST | `/api/keys/{name}/backup` | Stage a backup key value. |
 | POST | `/api/keys/{name}/promote` | Promote a staged backup value [write]; `synced` / `not_synced` as for rotate. |
 | GET | `/api/projects` | List registered projects [read], with the keys connected to each and the connection count. |
 | POST | `/api/projects` | Register a project path (master-password session only; the plan's project limit answers 402). |
 | DELETE | `/api/projects` | Delete a project registration selected by query parameter, and every key's connections to it (master-password session only). |
 | POST | `/api/projects/assign` | Connect keys to a project selected by query parameter [write], using the project's default file and the key name as variable; no file is written. An environment mismatch or browser-bundled name needs `confirmed`. |
-| POST | `/api/projects/unassign` | Disconnect keys from a project selected by query parameter [write]. |
-| POST | `/api/projects/inject` | Preview or write the project's connected variables [inject]; connected values are replaced, other variables are left alone, and explicit `keys` must be connected. |
-| POST | `/api/connections/preview` | Preview a connection [read]: the confirmation line, what would change and what needs confirming. |
+| POST | `/api/projects/unassign` | Disconnect keys from a project selected by query parameter [write]; a named key also loses its allowlist entry for the project. |
+| POST | `/api/projects/inject` | Preview or write the project's connected variables [inject]; connected values are replaced, other variables are left alone, and explicit `keys` must be connected. Named keys are written in one pass (one backup per file). |
+| POST | `/api/connections/preview` | Preview a connection [read]: the confirmation line, what would change and what needs confirming. A body with `value` or `env` (a key not saved yet) also needs [write]. |
 | POST | `/api/connections` | Connect a key to a variable in a registered project's env file and write it [write and inject]. |
 | DELETE | `/api/connections` | Remove one connection, selected by key, project, file and variable in the body [write]. |
 | GET | `/api/connections` | List connections with their state, optionally for one `key` and/or `project` [read]. |

@@ -1049,6 +1049,7 @@ def connect(
 def sync(
     *,
     key_name: Optional[str] = None,
+    key_names: Optional[Iterable[str]] = None,
     project: Optional[str] = None,
     vault_key: Optional[bytes],
     password: Optional[str],
@@ -1056,6 +1057,13 @@ def sync(
     actor: str,
 ) -> list[ConnectResult]:
     """Rewrite every matching connection's variable with the key's current value.
+
+    ``key_name`` limits it to one key, ``key_names`` to a set of keys, all in this
+    one call (one write and one backup per file, one recording save): naming keys
+    one call at a time would back a file up once per key and push the oldest backup
+    out of the few that are kept. Passing both raises ValueError; a name that is
+    not in the vault raises ``key_not_found`` before anything is written, and an
+    empty ``key_names`` syncs nothing.
 
     One result per connection, in vault order; nothing raises for a single
     connection: a refusal or failure is that result's ``reason`` (and its
@@ -1065,19 +1073,25 @@ def sync(
     final save that records ``last_error`` fails, every result it concerned still
     comes back, with ``warning == "last_error_not_recorded"``.
     """
+    if key_name is not None and key_names is not None:
+        raise ValueError("pass key_name or key_names, not both")
+    only = None if key_names is None else frozenset(key_names)
+    if key_name is not None:
+        only = frozenset((key_name,))
     vault = _reload(vault_key, password)
     config = pushkey_vault.load_config(strict=True)
     _require_migrated(config)
     registered = registered_projects(config)
-    if key_name is not None and not isinstance(vault.get(key_name), dict):
-        raise ConnectError("key_not_found", {"key": key_name})
+    for name in sorted(only or ()):
+        if not isinstance(vault.get(name), dict):
+            raise ConnectError("key_not_found", {"key": name})
     wanted = None
     if project is not None:
         wanted = _path_key(pushkey_projectfs.canonical_project_path(project, must_exist=False))
 
     rows = []  # (key, project, file, var)
     for name, entry in vault.items():
-        if key_name is not None and name != key_name:
+        if only is not None and name not in only:
             continue
         for conn in _connections(entry):
             conn_project, conn_file, conn_var = conn.get("project"), conn.get("file"), conn.get("var")

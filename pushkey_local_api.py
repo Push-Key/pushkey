@@ -541,6 +541,11 @@ def _canonicalize_registered_projects(cfg: dict, vault: Optional[dict] = None) -
                 assigned = entry.get("projects")
                 if isinstance(assigned, list):
                     entry["projects"] = [replacements.get(item, item) for item in assigned]
+                connections = entry.get("connections")
+                if isinstance(connections, list):
+                    for conn in connections:
+                        if isinstance(conn, dict) and conn.get("project") in replacements:
+                            conn["project"] = replacements[conn["project"]]
     return changed
 
 
@@ -968,8 +973,14 @@ def create_app() -> FastAPI:
             results = _pc.sync(
                 key_name=name, actor=_core_actor(sess), **_core_credentials(sess)
             )
-        except (ConnectError, ConfigUnreadableError) as error:
-            return {"synced": [], "sync_error": str(error)}, []
+        except Exception as error:
+            # A code only: the class name of anything unexpected, never its message.
+            code = (
+                error.code if isinstance(error, ConnectError)
+                else str(error) if isinstance(error, ConfigUnreadableError)
+                else type(error).__name__
+            )
+            return {"synced": [], "sync_error": code}, []
         return {"synced": [asdict(result) for result in results]}, _result_warnings(results)
 
     @app.post("/api/keys", status_code=201)
@@ -1200,6 +1211,31 @@ def create_app() -> FastAPI:
                             actor=actor, **credentials,
                         )
                         warnings.append(saved.health_warning)
+            # A key left allowed for a project it has no connection to would still
+            # read as assigned: the allowlist entry goes with the last connection.
+            named = [k for k in dict.fromkeys(body.keys) if not k.startswith("_")]
+
+            def leftover(entry) -> bool:
+                return isinstance(entry, dict) and any(
+                    isinstance(p, str) and _path_key(p) == _path_key(project)
+                    for p in entry.get("projects") or []
+                )
+
+            if any(leftover(sess.vault.get(k)) for k in named):
+                def drop_allowlist(fresh: dict) -> None:
+                    for k in named:
+                        entry = fresh.get(k)
+                        if not leftover(entry) or any(
+                            _path_key(row["project"]) == _path_key(project)
+                            for row in _connection_rows(entry)
+                        ):
+                            continue
+                        entry["projects"] = [
+                            p for p in entry["projects"]
+                            if not (isinstance(p, str) and _path_key(p) == _path_key(project))
+                        ]
+
+                warnings.append(_pc.commit(drop_allowlist, **credentials).health_warning)
         _set_warning(response, *warnings)
         return {"path": project, "unassigned": body.keys}
 
@@ -1248,14 +1284,13 @@ def create_app() -> FastAPI:
                 ))
                 return {"injected": injected, "skipped_existing": [], "env_file": env_file, "wrote": False}
 
-            if body.keys is None and body.env == "all":
-                results = _pc.sync(project=project, actor=actor, **credentials)
-            else:
-                results = [
-                    result
-                    for name in names
-                    for result in _pc.sync(key_name=name, project=project, actor=actor, **credentials)
-                ]
+            # One call for every named key: one write and one backup per file (a call per
+            # key would push the backup taken before the inject out of the few kept), and
+            # only keys from the listing above, which never holds a `_` entry.
+            results = (
+                _pc.sync(key_names=names, project=project, actor=actor, **credentials)
+                if names else []
+            )
         _set_warning(response, *_result_warnings(results))
         return {
             "injected": list(dict.fromkeys(r.key for r in results if r.written and r.change != "none")),
@@ -1270,6 +1305,10 @@ def create_app() -> FastAPI:
 
     @app.post("/api/connections/preview")
     def preview_connection(body: ConnectionPreview, _: None = Depends(require_token), sess: _Session = Depends(require_scope("read"))):
+        if body.value is not None or body.env is not None:
+            # A value in the body is a secret the session is trying out: that needs a
+            # session that may write, the same check the write routes make.
+            require_scope("write")(sess)
         _check_key_name(body.key)
         cfg = _pv.load_config(strict=True)
         if not _pc.is_migrated(cfg):
@@ -1322,7 +1361,7 @@ def create_app() -> FastAPI:
         statuses = _pc.status(
             sess.vault, _pv.load_config(strict=True), key_name=key, project=project
         )
-        return {"connections": [asdict(state) for state in statuses]}
+        return {"connections": [asdict(state) for state in statuses if not state.key.startswith("_")]}
 
     @app.post("/api/connections/sync")
     def sync_connections(body: ConnectionSync, response: Response, _: None = Depends(require_token), sess: _Session = Depends(require_scope("inject"))):
