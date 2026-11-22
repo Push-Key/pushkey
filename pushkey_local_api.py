@@ -291,6 +291,14 @@ def _http_error(err: "_pfs.ProjectPathError") -> HTTPException:
     return HTTPException(err.status, err.reason)
 
 
+def _core_credentials(sess) -> dict:
+    return {}
+
+
+def _error_status_and_body(exc) -> tuple:
+    return 500, {}
+
+
 def _canonical_project_path(raw: str, *, must_exist: bool = True) -> str:
     """Return a canonical absolute project directory, rejecting ambiguous paths."""
     try:
