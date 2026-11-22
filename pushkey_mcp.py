@@ -575,6 +575,24 @@ def assign_key(key_name: str, project_path: str) -> dict:
     return {"success": True, "key": key_name, "project": project_path}
 
 
+@mcp.tool()
+def preview_connection(name: str, project_path: str, file: str = None, var: str = None, value: str = None, env: str = None) -> dict:
+    """STUB (red)."""
+    return {"success": False, "error": "not_implemented"}
+
+
+@mcp.tool()
+def connect_key(name: str, project_path: str, file: str = None, var: str = None, confirm: list[str] = None, value: str = None) -> dict:
+    """STUB (red)."""
+    return {"success": False, "error": "not_implemented"}
+
+
+@mcp.tool()
+def key_usage(name: str) -> dict:
+    """STUB (red)."""
+    return {"success": False, "error": "not_implemented"}
+
+
 # ── Agent token management (requires master password session) ─────────────────
 
 @mcp.tool()
