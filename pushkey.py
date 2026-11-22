@@ -2278,6 +2278,26 @@ def _project_connections(vault, path):
     return rows
 
 
+def _used_in_rows(status_list):
+    """STUB (red): rows of the USED IN block."""
+    return []
+
+
+def _used_in_pill(state):
+    """STUB (red): (pill label, palette key, offers 'Update now') for a connection state."""
+    return ("", "text3", False)
+
+
+def _connect_preview_lines(preview):
+    """STUB (red): plain-words lines for a connect preview."""
+    return []
+
+
+def _connect_notice_view(notice, config, vault):
+    """STUB (red): what the migration notice modal shows."""
+    return None
+
+
 class AppFrame(ctk.CTkFrame):
     def __init__(self, master, password, vault, on_lock, app=None, vault_key=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
@@ -2601,6 +2621,36 @@ class AppFrame(ctk.CTkFrame):
                 text = _CONNECT_ERROR_TEXT.get(result.reason) or f"could not be written ({result.reason})"
                 errors.append(f"{label}: {text}")
         return len(projects), errors, keys
+
+    def _submit_add_key(self, win):
+        """STUB (red): the add-key window's Save action."""
+        self.add_key()
+        win.destroy()
+
+    def _add_wants_connection(self):
+        """STUB (red)."""
+        return False
+
+    def _add_connection_choice(self):
+        """STUB (red)."""
+        return None
+
+    def _sync_results(self, **selector):
+        """STUB (red)."""
+        return [], None
+
+    def _show_sync_results(self, title, headline, results, error=None):
+        """STUB (red)."""
+
+    def _register_folder_for_add(self, folder):
+        """STUB (red)."""
+        return None
+
+    def _used_in_update_now(self, key, project):
+        """STUB (red)."""
+
+    def _used_in_disconnect(self, key, project, file, var):
+        """STUB (red)."""
 
     def _apply_project_assignment(self, path, selected):
         """Make the keys in ``selected`` the keys connected to project ``path``.
@@ -8936,6 +8986,15 @@ class PushkeyApp:
         except Exception:
             messagebox.showwarning(
                 "Pushkey", "The notice could not be hidden. It will show again next time.")
+
+    def _open_connect_notice(self, view):
+        """STUB (red)."""
+
+    def _notice_later(self, win):
+        """STUB (red)."""
+
+    def _notice_hide(self, win):
+        """STUB (red)."""
 
     def reload_app(self, pw, vault, vault_key=None):
         self.root.configure(fg_color=C["bg"])

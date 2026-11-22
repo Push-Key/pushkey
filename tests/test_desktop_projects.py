@@ -129,7 +129,9 @@ _BOUND = (
     "_auto_inject_key", "_auto_inject_keys_bulk", "_stamp_keys_used", "add_key", "add_project",
     "remove_project", "sync_project", "_apply_project_assignment", "_save_ci_fields",
     "_update_project_record", "_try_update_project_record", "import_vault", "_inline_inject",
-    "_run_scan", "_run_git_scan",
+    "_run_scan", "_run_git_scan", "_apply_rotation", "_promote_backup_key", "_submit_add_key",
+    "_add_wants_connection", "_add_connection_choice", "_sync_results", "_show_sync_results",
+    "_register_folder_for_add", "_used_in_update_now", "_used_in_disconnect",
 )
 
 
@@ -154,6 +156,12 @@ class FakeApp:
         self.proj_name = FakeText()
         self.proj_path_var = FakeText()
         self.proj_env = FakeText("dev")
+        # The add-key window's "Connect to a project" widgets (off until a test picks one).
+        self.add_conn_on = FakeText(0)
+        self.add_conn_project = FakeText("")
+        self.add_conn_file = FakeText("")
+        self.add_conn_var = FakeText("")
+        self._add_conn_paths = {}
         for name in _BOUND:
             setattr(self, name, types.MethodType(getattr(pushkey.AppFrame, name), self))
 
@@ -161,6 +169,9 @@ class FakeApp:
         self.invalidated.extend(tabs)
 
     def render_projects(self):
+        self.rendered += 1
+
+    def _render_key_rows(self):
         self.rendered += 1
 
     def _gate(self, feature, current_count=0):
@@ -216,6 +227,21 @@ class World:
         vault, _ = load_vault(PASSWORD)
         return vault
 
+    def pick(self, project, file=".env", var="", on=True):
+        """Fill the add-key window's connect section the way the user would."""
+        label = Path(project).name
+        self.app._add_conn_paths = {label: project}
+        self.app.add_conn_on.set(1 if on else 0)
+        self.app.add_conn_project.set(label)
+        self.app.add_conn_file.set(file)
+        self.app.add_conn_var.set(var)
+
+    def fill(self, name, value=NEW, category="General", env="all"):
+        self.app.add_name.set(name)
+        self.app.add_value.set(value)
+        self.app.add_cat.set(category)
+        self.app.add_env.set(env)
+
 
 @pytest.fixture
 def world(tmp_path, monkeypatch, box):
@@ -229,7 +255,7 @@ def _env_text(folder, name=".env"):
 
 
 def _connections(vault, key, project):
-    return [c for c in vault[key].get("connections", []) if c["project"] == project]
+    return [c for c in (vault.get(key) or {}).get("connections", []) if c["project"] == project]
 
 
 # -- add key / rotate: only connections are written ------------------------------------
@@ -826,3 +852,602 @@ def test_add_project_reports_when_the_environment_cannot_be_saved(world, box, mo
     assert "added, but its environment could not be saved" in errors[0][2]
     assert (str(failure) or "") in errors[0][2]
     assert box.of("info") == []  # no "Linked"
+
+
+# =========================================================================================
+# Task 13: add-and-connect screens (add-key window logic, USED IN block, rotation results,
+# migration notice). No Tk root: every test drives a bound method on the fakes above.
+# =========================================================================================
+
+NEW_KEY = "BRAND_NEW_KEY"
+
+
+class FakeWin:
+    """A window that only remembers whether it was closed."""
+
+    def __init__(self):
+        self.destroyed = False
+
+    def destroy(self):
+        self.destroyed = True
+
+
+# -- add_key ----------------------------------------------------------------------------
+
+
+def test_add_key_returns_false_on_missing_info(world, box):
+    world.fill("", NEW)
+    assert world.app.add_key() is False
+    world.fill("SOMETHING", "")
+    assert world.app.add_key() is False
+
+    assert len(box.of("warning")) == 2
+    assert "SOMETHING" not in world.app.vault and "SOMETHING" not in world.disk_vault()
+
+
+def test_add_key_with_connection_calls_connect(world, box):
+    project = world.register("acme")
+    world.fill(NEW_KEY, NEW, env="dev")
+    world.pick(project, ".env", NEW_KEY)
+
+    assert world.app.add_key() is True
+
+    disk = world.disk_vault()
+    assert disk.get(NEW_KEY, {}).get("value") == NEW
+    connections = _connections(disk, NEW_KEY, project)
+    assert [(c["file"], c["var"]) for c in connections] == [(".env", NEW_KEY)]
+    assert NEW_KEY + "=" + NEW in _env_text(project)
+    assert NEW_KEY in world.app.vault  # the session's own copy was brought up to date
+    assert NEW not in box.text()
+    assert "keys" in world.app.invalidated and "projects" in world.app.invalidated
+
+
+def test_add_key_with_connection_keeps_the_chosen_category(world, box):
+    project = world.register("acme")
+    world.fill(NEW_KEY, NEW, category="AI", env="dev")
+    world.pick(project, ".env", NEW_KEY)
+
+    assert world.app.add_key() is True
+
+    assert world.disk_vault().get(NEW_KEY, {}).get("category") == "AI"
+    assert world.app.vault.get(NEW_KEY, {}).get("category") == "AI"
+
+
+def test_add_key_write_failure_after_the_vault_save_still_closes_the_window(world, box):
+    project = world.register("acme")
+    (Path(project) / ".env").mkdir()  # an env file that cannot be written
+    world.fill(NEW_KEY, NEW, env="dev")
+    world.pick(project, ".env", NEW_KEY)
+
+    assert world.app.add_key() is True  # the key is saved; a second Save would say "exists"
+
+    disk = world.disk_vault()
+    assert disk.get(NEW_KEY, {}).get("value") == NEW
+    assert _connections(disk, NEW_KEY, project)
+    assert (disk.get(NEW_KEY, {}).get("connections") or [{}])[0].get("last_error")
+    shown = box.of("warning") + box.of("error")
+    assert len(shown) == 1 and "acme" in shown[0][2]
+    assert NEW not in box.text()
+
+
+def test_add_key_failure_keeps_window_open(world, box):
+    project = world.register("acme")
+    world.connect(OPENAI, project, var="SHARED_VAR", write=False)
+    world.fill(NEW_KEY, NEW, env="dev")
+    world.pick(project, ".env", "SHARED_VAR")  # another key already writes there
+    win = FakeWin()
+
+    assert world.app._submit_add_key(win) is False
+
+    assert win.destroyed is False
+    assert world.app.add_name.get() == NEW_KEY and world.app.add_value.get() == NEW  # inputs kept
+    errors = box.of("error")
+    assert len(errors) == 1 and "Another key already writes" in errors[0][2]
+    assert NEW_KEY not in world.app.vault and NEW_KEY not in world.disk_vault()
+    assert NEW not in box.text()
+
+
+def test_add_key_success_closes_the_window(world, box):
+    project = world.register("acme")
+    world.fill(NEW_KEY, NEW, env="dev")
+    world.pick(project, ".env", NEW_KEY)
+    win = FakeWin()
+
+    assert world.app._submit_add_key(win) is True
+
+    assert win.destroyed is True
+
+
+def test_add_key_button_and_return_both_use_the_submit_helper():
+    source = inspect.getsource(pushkey.AppFrame._show_add_key_modal)
+
+    assert source.count("_submit_add_key") >= 2  # the button and <Return>
+    assert "self.add_key(), win.destroy()" not in source
+
+
+def test_add_key_connect_checked_without_a_project_asks_instead_of_saving(world, box):
+    world.fill(NEW_KEY, NEW, env="dev")
+    world.pick("", "", "", on=True)
+
+    assert world.app.add_key() is False
+
+    assert len(box.of("warning")) == 1
+    assert NEW_KEY not in world.disk_vault()
+
+
+def test_add_key_extra_confirmation_no_cancels_save(world, box):
+    project = world.register("acme")  # a dev project
+    world.fill("PROD_KEY", NEW, env="prod")  # for another environment
+    world.pick(project, ".env", "PROD_KEY")
+    box.answer = False
+
+    assert world.app.add_key() is False
+
+    asks = box.of("askyesno")
+    assert len(asks) == 1 and "This key is for another environment. Continue?" in asks[0][2]
+    assert "PROD_KEY" not in world.app.vault and "PROD_KEY" not in world.disk_vault()
+    assert _env_text(project) is None
+
+    box.answer = True
+    box.calls.clear()
+    assert world.app.add_key() is True
+    assert "PROD_KEY=" + NEW in _env_text(project)
+
+
+def test_add_key_second_extra_confirmation_no_also_cancels(world, box):
+    project = world.register("acme")
+    world.fill("PROD_SECRET", NEW, env="prod")
+    world.pick(project, ".env", "NEXT_PUBLIC_PROD_SECRET")  # bundled into browser code too
+    answers = iter([True, False])
+    box.askyesno = lambda *a, **k: (box._record("askyesno", a), next(answers))[1]
+
+    assert world.app.add_key() is False
+
+    texts = [call[2] for call in box.of("askyesno")]
+    assert len(texts) == 2
+    assert "another environment" in texts[0] and "bundled into browser code. Continue?" in texts[1]
+    assert "PROD_SECRET" not in world.disk_vault()
+    assert _env_text(project) is None
+
+
+def test_add_key_plain_path_uses_commit_not_stale_save(world, box):
+    other, _ = load_vault(PASSWORD)  # another tool adds a key after the desktop loaded
+    other["ADDED_ELSEWHERE"] = _entry(OTHER)
+    save_vault(other, PASSWORD)
+    stale_saves = []
+    world.app.save = lambda *a, **k: stale_saves.append(1)  # the stale whole-vault save
+    world.fill(NEW_KEY, NEW, category="AI")
+
+    assert world.app.add_key() is True
+
+    disk = world.disk_vault()
+    assert NEW_KEY in disk and "ADDED_ELSEWHERE" in disk  # nothing was overwritten
+    assert disk.get(NEW_KEY, {}).get("category") == "AI" and disk.get(NEW_KEY, {}).get("value") == NEW
+    assert "ADDED_ELSEWHERE" in world.app.vault  # the session adopted what was on disk
+    assert box.of("warning") == [] and box.of("error") == []
+    assert stale_saves == []
+
+
+def test_add_key_plain_path_refuses_a_name_another_tool_just_added(world, box):
+    other, _ = load_vault(PASSWORD)
+    other[NEW_KEY] = _entry(OTHER)  # appears between the desktop's load and this Save
+    save_vault(other, PASSWORD)
+    world.fill(NEW_KEY, NEW)
+
+    assert world.app.add_key() is False
+
+    assert world.disk_vault()[NEW_KEY]["value"] == OTHER  # not replaced
+    assert len(box.of("error")) == 1
+
+
+def test_add_key_rotation_uses_commit_and_shows_per_project_results(world, box):
+    project = world.register("acme")
+    world.connect(STRIPE, project)
+    other, _ = load_vault(PASSWORD)
+    other["ADDED_ELSEWHERE"] = _entry(OTHER)
+    save_vault(other, PASSWORD)
+    world.fill(STRIPE, NEW)
+
+    assert world.app.add_key() is True
+
+    disk = world.disk_vault()
+    assert disk[STRIPE]["value"] == NEW and disk[STRIPE].get("previous") == OLD
+    assert "ADDED_ELSEWHERE" in disk
+    assert STRIPE + "=" + NEW in _env_text(project)
+    dialogs = box.of("info") + box.of("warning")
+    assert len(dialogs) == 1 and "acme" in dialogs[0][2] and ".env" in dialogs[0][2]
+    assert OLD not in box.text() and NEW not in box.text()
+
+
+def test_add_key_existing_name_with_a_connection_replaces_and_connects(world, box):
+    first = world.register("first")
+    second = world.register("second")
+    world.connect(STRIPE, first)
+    world.fill(STRIPE, NEW, env="dev")
+    world.pick(second, ".env", STRIPE)
+
+    assert world.app.add_key() is True
+
+    disk = world.disk_vault()
+    assert disk[STRIPE]["value"] == NEW
+    assert _connections(disk, STRIPE, first) and _connections(disk, STRIPE, second)
+    assert STRIPE + "=" + NEW in _env_text(first)
+    assert STRIPE + "=" + NEW in _env_text(second)
+
+
+# -- rotation: replace_value + sync, one results dialog -----------------------------------
+
+
+def test_rotation_results_dialog_has_no_value(world, box):
+    project = world.register("acme")
+    second = world.register("second")
+    world.connect(STRIPE, project)
+    world.connect(STRIPE, second, write=False)
+    (Path(second) / ".env").mkdir()  # this one cannot be written
+
+    assert world.app._apply_rotation(STRIPE, NEW) is True
+
+    dialogs = box.of("info") + box.of("warning") + box.of("error")
+    assert len(dialogs) == 1
+    text = dialogs[0][2]
+    assert "acme" in text and "second" in text and ".env" in text
+    assert OLD not in box.text() and NEW not in box.text()
+    assert world.disk_vault()[STRIPE].get("previous") == OLD
+    assert STRIPE + "=" + NEW in _env_text(project)
+
+
+def test_rotation_without_connections_is_one_short_dialog(world, box):
+    assert world.app._apply_rotation(OPENAI, NEW) is True
+
+    assert len(box.calls) == 1 and OPENAI in box.calls[0][2]
+    assert world.disk_vault()[OPENAI]["value"] == NEW
+
+
+def test_rotation_failure_says_so_and_changes_nothing(world, box, monkeypatch):
+    def refuse(mutate, **kw):
+        raise pushkey_connect.ConnectError("vault_changed")
+
+    monkeypatch.setattr(pushkey_connect, "commit", refuse)
+
+    assert world.app._apply_rotation(STRIPE, NEW) is False
+
+    errors = box.of("error")
+    assert len(errors) == 1 and "vault changed" in errors[0][2]
+    assert world.disk_vault()[STRIPE]["value"] == OLD
+
+
+def _with_backup(world, project):
+    world.connect(STRIPE, project)
+    vault, _ = load_vault(PASSWORD)
+    vault[STRIPE].update(dual_rotation=True, next_value=NEW, next_added="2026-01-01")
+    save_vault(vault, PASSWORD)
+    world.reload_app()
+
+
+def test_promote_backup_syncs(world, box):
+    project = world.register("acme")
+    _with_backup(world, project)
+
+    world.app._promote_backup_key(STRIPE)
+
+    disk = world.disk_vault()
+    assert disk[STRIPE]["value"] == NEW and disk[STRIPE].get("previous") == OLD
+    assert disk[STRIPE]["next_value"] is None and disk[STRIPE]["next_added"] is None
+    assert STRIPE + "=" + NEW in _env_text(project)
+    assert OLD not in box.text() and NEW not in box.text()
+    assert "acme" in box.text()  # the per-project result is in the one dialog
+
+
+def test_promote_backup_declined_changes_nothing(world, box):
+    project = world.register("acme")
+    _with_backup(world, project)
+    box.answer = False
+
+    world.app._promote_backup_key(STRIPE)
+
+    assert world.disk_vault()[STRIPE]["value"] == OLD
+    assert STRIPE + "=" + OLD in _env_text(project)
+
+
+def test_promote_backup_text_no_longer_says_the_old_key_is_discarded():
+    source = inspect.getsource(pushkey.AppFrame._promote_backup_key)
+
+    assert "discarded from Pushkey" not in source  # the old value now goes to history
+    assert "replace_value" in source and "commit" in source
+
+
+# -- USED IN block ----------------------------------------------------------------------
+
+
+def test_used_in_rows_from_status(world, box):
+    first = world.register("acme")
+    second = world.register("second")
+    world.connect(STRIPE, first)
+    world.connect(STRIPE, second, write=False)
+    statuses = pushkey_connect.status(world.app.vault, world.app.config, key_name=STRIPE)
+
+    rows = _ok(lambda: pushkey._used_in_rows(statuses))
+
+    assert [row[:3] for row in rows] == [("acme", ".env", STRIPE), ("second", ".env", STRIPE)]
+    assert [row[3] for row in rows] == [s.state for s in statuses]
+    assert rows[0][3] == "up_to_date"
+    assert all(len(row) == 5 for row in rows)
+    assert OLD not in repr(rows)
+
+
+def test_used_in_rows_state_mapping():
+    import typing
+
+    expected = {
+        "up_to_date": ("Up to date", "green", False),
+        "out_of_date": ("Out of date", "amber", True),
+        "not_in_file": ("Not in the file yet", "amber", True),
+        "not_ignored": ("Not in .gitignore", "amber", False),
+        "not_written": ("Not written", "red", True),
+        "file_missing": ("File missing", "red", False),
+        "folder_missing": ("Folder not on this computer", "red", False),
+    }
+    states = set(typing.get_args(typing.get_type_hints(pushkey_connect.ConnectionStatus)["state"]))
+
+    assert states == set(expected)  # every state the core can report has a pill
+    for state, wanted in expected.items():
+        assert _ok(lambda: pushkey._used_in_pill(state)) == wanted
+    assert _ok(lambda: pushkey._used_in_pill("something_new")) == ("Unknown", "text3", False)
+
+
+def test_used_in_update_now_syncs_only_that_connection(world, box):
+    first = world.register("first")
+    second = world.register("second")
+    world.connect(STRIPE, first)
+    world.connect(STRIPE, second)
+    world.set_value(STRIPE, NEW)
+
+    _ok(lambda: world.app._used_in_update_now(STRIPE, first))
+
+    assert STRIPE + "=" + NEW in _env_text(first)
+    assert STRIPE + "=" + OLD in _env_text(second)  # not asked for
+    dialogs = box.calls
+    assert len(dialogs) == 1 and "first" in dialogs[0][2]
+    assert OLD not in box.text() and NEW not in box.text()
+
+
+def test_used_in_disconnect_leaves_the_line_in_the_file(world, box):
+    project = world.register("acme")
+    world.connect(STRIPE, project)
+
+    _ok(lambda: world.app._used_in_disconnect(STRIPE, project, ".env", STRIPE))
+
+    asks = box.of("askyesno")
+    assert len(asks) == 1 and "left as it is" in asks[0][2] and "acme" in asks[0][2]
+    assert _connections(world.disk_vault(), STRIPE, project) == []
+    assert STRIPE + "=" + OLD in _env_text(project)  # the line stays
+
+
+def test_used_in_disconnect_declined_changes_nothing(world, box):
+    project = world.register("acme")
+    world.connect(STRIPE, project)
+    box.answer = False
+
+    _ok(lambda: world.app._used_in_disconnect(STRIPE, project, ".env", STRIPE))
+
+    assert len(_connections(world.disk_vault(), STRIPE, project)) == 1
+
+
+def test_expand_panel_has_a_used_in_block_instead_of_project_pills():
+    source = inspect.getsource(pushkey.AppFrame._render_expand_panel)
+
+    assert '"USED IN"' in source and "_used_in_rows" in source
+    assert '"PROJECTS"' not in source
+    assert "Not used in any project yet. Connect it from Add or the project's Keys screen." in source
+    assert "_used_in_update_now" in source and "_used_in_disconnect" in source
+
+
+# -- connect preview wording, adding a folder -----------------------------------------------
+
+
+def _preview(**kw):
+    values = dict(
+        key=STRIPE, project="C:/p", project_name="acme", file=".env.local", var="STRIPE_KEY",
+        environment="dev", line="Save to acme -> dev -> .env.local as STRIPE_KEY",
+        change="add", gitignore_change=False, needs_confirm=[], conflict_key=None,
+    )
+    values.update(kw)
+    return pushkey_connect.Preview(**values)
+
+
+def test_connect_preview_lines_in_plain_words():
+    lines = _ok(lambda: pushkey._connect_preview_lines(_preview()))
+    assert lines == [
+        "Save to acme -> dev -> .env.local as STRIPE_KEY",
+        "Adds STRIPE_KEY to .env.local. The other lines stay as they are.",
+        ".env.local is already ignored by git.",
+    ]
+
+    lines = pushkey._connect_preview_lines(_preview(
+        change="replace", gitignore_change=True, needs_confirm=["env_mismatch", "public_prefix"]))
+    assert lines == [
+        "Save to acme -> dev -> .env.local as STRIPE_KEY",
+        "Replaces STRIPE_KEY in .env.local. The other lines stay as they are.",
+        ".env.local will be added to .gitignore.",
+        "This key is for another environment. You will be asked to confirm.",
+        "This name is bundled into browser code. You will be asked to confirm.",
+    ]
+
+    assert pushkey._connect_preview_lines(_preview(change="none"))[1] == ".env.local already holds this value."
+
+
+def test_register_folder_for_add_registers_and_returns_the_path(world, box):
+    folder = world.folder("brand-new")
+
+    path = _ok(lambda: world.app._register_folder_for_add(str(folder)))
+
+    assert path in pushkey_connect.registered_projects(load_config(strict=True))
+    assert path in pushkey_connect.registered_projects(world.app.config)
+    assert "projects" in world.app.invalidated
+
+
+def test_register_folder_for_add_says_so_when_it_is_already_a_project(world, box):
+    folder = world.folder("brand-new")
+    _ok(lambda: world.app._register_folder_for_add(str(folder)))
+    box.calls.clear()
+
+    assert _ok(lambda: world.app._register_folder_for_add(str(folder))) is None
+
+    assert len(box.calls) == 1 and "already a project" in box.calls[0][2]
+
+
+def test_register_folder_for_add_over_the_limit_uses_the_plan_prompt(world, box, monkeypatch):
+    world.register("first")
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "free")
+    folder = world.folder("second")
+
+    assert _ok(lambda: world.app._register_folder_for_add(str(folder))) is None
+
+    assert world.app.gate_calls == [("max_projects", 1)]
+    assert len(pushkey_connect.registered_projects(load_config(strict=True))) == 1
+
+
+def test_register_folder_for_add_ignores_a_cancelled_dialog(world, box):
+    assert _ok(lambda: world.app._register_folder_for_add("")) is None
+    assert box.calls == []
+
+
+# -- S12: imported keys use a real environment name -------------------------------------
+
+
+def test_env_import_writes_prod_not_production():
+    source = inspect.getsource(pushkey.AppFrame._do_env_import)
+
+    assert '"env": "production"' not in source
+    assert '"env": "prod"' in source
+    assert "prod" in pushkey.ENV_LEVELS and "production" not in pushkey.ENV_LEVELS
+
+
+# -- migration notice -------------------------------------------------------------------
+
+NOTICE = {
+    "every_key_projects": [],  # filled per test with real folders
+    "env_skipped": [["acme", "PROD_KEY"]],
+    "unusable": ["lost"],
+    "unregistered": [["OTHER_KEY", "C:/work/elsewhere"]],
+}
+
+
+class NoticeApp:
+    """The PushkeyApp attributes the notice methods use; the modal itself is a recorder."""
+
+    def __init__(self):
+        self.opened = []
+        self.frame = None
+        self._open_connect_notice = lambda view: self.opened.append(view)
+        for name in ("_show_connect_notice", "_notice_later", "_notice_hide"):
+            setattr(self, name, types.MethodType(getattr(pushkey.PushkeyApp, name), self))
+
+
+def _notice_world(world, count=2):
+    folders = [world.register(f"old-{i}") for i in range(count)]
+    notice = dict(NOTICE, every_key_projects=folders)
+    config = load_config(strict=True)
+    config["connect_notice"] = notice
+    config["connect_schema"] = 1
+    save_config(config)
+    return folders, notice
+
+
+def test_notice_later_does_not_dismiss(world, box, monkeypatch):
+    _folders, notice = _notice_world(world)
+    monkeypatch.setattr(
+        pushkey.pushkey_connect_migrate, "dismiss_notice",
+        lambda: pytest.fail("Later must not dismiss the notice"))
+    app, win = NoticeApp(), FakeWin()
+
+    _ok(lambda: app._notice_later(win))
+
+    assert win.destroyed is True
+    assert load_config(strict=True)["connect_notice"] == notice
+    assert box.calls == []
+
+
+def test_notice_hide_button_dismisses(world, box):
+    _folders, _notice = _notice_world(world)
+    app, win = NoticeApp(), FakeWin()
+
+    _ok(lambda: app._notice_hide(win))
+
+    assert "connect_notice" not in load_config(strict=True)
+    assert win.destroyed is True
+    assert box.calls == []
+
+
+def test_notice_hide_failure_warns_once_and_keeps_the_window(world, box, monkeypatch):
+    _folders, notice = _notice_world(world)
+
+    def refuse():
+        raise RuntimeError("config_busy")
+
+    monkeypatch.setattr(pushkey.pushkey_connect_migrate, "dismiss_notice", refuse)
+    app, win = NoticeApp(), FakeWin()
+
+    _ok(lambda: app._notice_hide(win))
+
+    assert box.calls == [(
+        "warning", "Pushkey", "The notice could not be hidden. It will show again next time.")]
+    assert win.destroyed is False  # still there to try again or press Later
+    assert load_config(strict=True)["connect_notice"] == notice
+
+
+def test_notice_only_the_hide_button_can_dismiss():
+    for name in ("_show_connect_notice", "_open_connect_notice", "_notice_later"):
+        assert "dismiss_notice" not in inspect.getsource(getattr(pushkey.PushkeyApp, name)), name
+    assert "dismiss_notice" in inspect.getsource(pushkey.PushkeyApp._notice_hide)
+    builder = inspect.getsource(pushkey.PushkeyApp._open_connect_notice)
+    # The window's own X is "Later", and there is no "don't show again" checkbox.
+    assert "WM_DELETE_WINDOW" in builder and "_notice_later" in builder
+    assert "CTkCheckBox" not in builder and "show again" not in builder
+    assert "Hide this notice" in builder and "Later" in builder and "Pick keys" in builder
+
+
+def test_show_connect_notice_opens_the_modal_with_names_only(world, box):
+    folders, _notice = _notice_world(world)
+    app = NoticeApp()
+
+    _ok(lambda: app._show_connect_notice(world.app.vault))
+
+    assert len(app.opened) == 1 and box.calls == []  # one modal, no message boxes
+    text = repr(app.opened[0])
+    for expected in ("old-0", "old-1", "PROD_KEY", "lost", "OTHER_KEY", "C:/work/elsewhere"):
+        assert expected in text
+    assert OLD not in text and OTHER not in text
+    assert load_config(strict=True).get("connect_notice")  # showing it never dismisses
+
+
+def test_show_connect_notice_with_nothing_to_show_opens_nothing(world, box):
+    save_config({"projects": {}, "connect_schema": 1})
+    app = NoticeApp()
+
+    _ok(lambda: app._show_connect_notice(world.app.vault))
+
+    assert app.opened == [] and box.calls == []
+
+
+def test_connect_notice_view_title_rows_and_counts(world, box):
+    folders, notice = _notice_world(world, count=2)
+    world.connect(STRIPE, folders[0], write=False)
+    config = load_config(strict=True)
+
+    view = _ok(lambda: pushkey._connect_notice_view(notice, config, world.app.vault))
+
+    assert isinstance(view, dict)
+    assert view["title"] == "2 projects used to get every key"
+    assert [(row[1], row[2]) for row in view["rows"]] == [("old-0", "· 1 key"), ("old-1", "· 0 keys")]
+    assert [row[0] for row in view["rows"]] == folders
+    assert "Now a project only gets the keys you connect to it." in view["intro"]
+    assert "Their .env files are not changed." in view["footer"]
+    extras = "\n".join(view["extras"])
+    assert "acme / PROD_KEY" in extras and "lost" in extras and "OTHER_KEY / C:/work/elsewhere" in extras
+
+    one = pushkey._connect_notice_view(dict(notice, every_key_projects=folders[:1]), config, world.app.vault)
+    assert one["title"] == "1 project used to get every key"
+
+    none = pushkey._connect_notice_view(dict(notice, every_key_projects=[]), config, world.app.vault)
+    assert none["rows"] == [] and none["title"] == "Some projects need a look"
