@@ -2163,7 +2163,8 @@ class RecoverySetupDialog(ctk.CTkToplevel):
                 self._err_lbl.configure(text="Failed to initialize vault — please try again")
             return
         self.destroy()
-        self._on_confirmed(self._password, {}, vault_key)
+        # The loaded vault (not a bare {}) carries the revision every later save needs.
+        self._on_confirmed(self._password, vault, vault_key)
 
 
 #: Config keys the shared project store owns; the desktop's own saves never write them.
@@ -2422,7 +2423,10 @@ class AppFrame(ctk.CTkFrame):
         warning unless ``quiet``) when config.json is unreadable or busy.
         """
         owned = _PROJECT_OWNED_CONFIG_KEYS
-        own = {k: v for k, v in self.config.items() if k not in owned}
+        # One shallow snapshot (atomic under the GIL); the write is built from it, so a
+        # UI-thread change to self.config mid-save cannot break the scan.
+        snapshot = dict(self.config)
+        own = {k: v for k, v in snapshot.items() if k not in owned}
 
         def mutate(on_disk):
             on_disk.update(own)
@@ -2435,9 +2439,13 @@ class AppFrame(ctk.CTkFrame):
                 messagebox.showwarning(
                     "Pushkey", f"Settings could not be saved: {error or 'config_unreadable'}")
             return False
+        # Assign key by key from the disk copy. Never pop then restore: the UI thread
+        # reads self.config["projects"] directly and must never find it missing.
         for k in owned:
-            self.config.pop(k, None)
-        self.config.update(from_disk)
+            if k in from_disk:
+                self.config[k] = from_disk[k]
+            else:
+                self.config.pop(k, None)
         return True
 
     def _schedule_health_refresh(self):
@@ -2519,8 +2527,8 @@ class AppFrame(ctk.CTkFrame):
             # top bar stayed white in dark mode and white lines bled
             # through. Rebuilding the AppFrame guarantees every widget
             # picks up the new C palette consistently.
-            pw, vault = self.password, self.vault
-            self.master.after(0, lambda: self.app.reload_app(pw, vault))
+            pw, vault, vault_key = self.password, self.vault, self.vault_key
+            self.master.after(0, lambda: self.app.reload_app(pw, vault, vault_key))
         else:
             self._theme_btn.configure(text="☀" if new_mode == "dark" else "☾")
 
@@ -8733,9 +8741,10 @@ class PushkeyApp:
             messagebox.showwarning(
                 "Pushkey", "The notice could not be hidden. It will show again next time.")
 
-    def reload_app(self, pw, vault):
+    def reload_app(self, pw, vault, vault_key=None):
         self.root.configure(fg_color=C["bg"])
-        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
+        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self,
+                    vault_key=vault_key)
 
 
 def _cli_main(args):

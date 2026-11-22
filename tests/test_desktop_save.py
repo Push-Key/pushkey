@@ -408,6 +408,11 @@ def test_desktop_fix1_reload_app_passes_the_vault_key_to_the_frame():
 
 
 def test_desktop_fix1_theme_toggle_keeps_the_vault_key_and_saves(frame, box, monkeypatch):
+    # A V3 vault: its saves need the vault key (the `frame` fixture's vault is V2).
+    pushkey_shared.VAULT_FILE.unlink()
+    pushkey.save_vault_and_publish(
+        {KEY: _entry()}, PASSWORD, recovery_code=pushkey.generate_recovery_code())
+    frame.vault, frame.vault_key = load_vault(PASSWORD)
     app = FakePushkeyApp()
     frame.app = app
     frame.master = types.SimpleNamespace(after=lambda delay, fn: fn())  # run the rebuild now
