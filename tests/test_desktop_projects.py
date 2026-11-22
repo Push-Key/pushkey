@@ -19,6 +19,7 @@ import pytest
 import pushkey
 import pushkey_connect
 import pushkey_crypto
+import pushkey_shared
 import pushkey_tiers
 import pushkey_vault
 from pushkey_vault import load_config, load_vault, save_config, save_vault
@@ -710,3 +711,118 @@ def test_project_connections_lists_one_folder_only(world):
     rows = pushkey._project_connections(world.app.vault, project)
 
     assert [(name, conn["var"]) for name, conn in rows] == [(STRIPE, STRIPE)]
+
+
+# -- fix round 1: nothing from another machine decides where a secret is written ---------
+
+
+def _backup_file(tmp_path, monkeypatch, vault):
+    backup = tmp_path / "backup.pushkey-backup"
+    backup.write_bytes(pushkey.encrypt_data(json.dumps({"vault": vault, "config": {}}), PASSWORD))
+    monkeypatch.setattr(pushkey.filedialog, "askopenfilename", lambda **kwargs: str(backup))
+
+
+def _foreign_link(project):
+    return {"project": project, "file": ".env", "var": "NEW_ONE", "added": "2026-01-01"}
+
+
+def test_import_vault_new_key_arrives_with_no_connections_to_a_path_registered_here(
+        world, box, monkeypatch, tmp_path):
+    project = world.register("acme")  # the same path is registered here
+    backup_vault = {"NEW_ONE": _entry(OTHER, projects=[project], connections=[_foreign_link(project)])}
+    _backup_file(tmp_path, monkeypatch, backup_vault)
+
+    _ok(world.app.import_vault)
+
+    for vault in (world.app.vault, world.disk_vault()):
+        assert vault["NEW_ONE"]["value"] == OTHER
+        assert vault["NEW_ONE"]["connections"] == []
+        assert vault["NEW_ONE"]["projects"] == []
+    # The next add/rotate sync for the key must not write into the coincident folder.
+    count, errors = _ok(lambda: world.app._auto_inject_key("NEW_ONE"))
+    assert (count, errors) == (0, [])
+    assert _env_text(project) is None
+
+
+def test_import_vault_existing_key_without_local_links_does_not_take_the_backups(
+        world, box, monkeypatch, tmp_path):
+    project = world.register("acme")
+    legacy = world.disk_vault()
+    del legacy[STRIPE]["projects"], legacy[STRIPE]["connections"]  # an entry from before links existed
+    save_vault(legacy, PASSWORD)
+    world.reload_app()
+    entry = _entry(NEW, projects=[project], connections=[_foreign_link(project)])
+    _backup_file(tmp_path, monkeypatch, {STRIPE: entry})
+
+    _ok(world.app.import_vault)
+
+    vault = world.disk_vault()
+    assert vault[STRIPE]["value"] == NEW
+    assert vault[STRIPE]["connections"] == [] and vault[STRIPE]["projects"] == []
+
+
+def test_team_import_goes_through_the_same_merge_and_never_trusts_foreign_links():
+    source = inspect.getsource(pushkey.AppFrame.team_import)
+    assert "_merge_foreign_vault_entries" in source
+    assert "self.vault.update(team_vault)" not in source
+
+    project = "C:/same/path/here"
+    local = {STRIPE: _entry(OLD, projects=[project], connections=[_foreign_link(project)])}
+    incoming = {
+        STRIPE: _entry(NEW, projects=["x"], connections=[]),
+        "TEAM_NEW": _entry(OTHER, projects=[project], connections=[_foreign_link(project)]),
+    }
+    pushkey._merge_foreign_vault_entries(local, incoming)
+
+    assert local[STRIPE]["value"] == NEW  # the shared value arrives
+    assert local[STRIPE]["connections"] == [_foreign_link(project)]  # this computer's links stay
+    assert local[STRIPE]["projects"] == [project]
+    assert local["TEAM_NEW"]["connections"] == [] and local["TEAM_NEW"]["projects"] == []
+    assert incoming["TEAM_NEW"]["connections"] == [_foreign_link(project)]  # the input is not edited
+
+
+def test_merge_keeps_the_rest_of_a_foreign_entry():
+    local = {}
+    pushkey._merge_foreign_vault_entries(
+        local, {"K": _entry(OTHER, provider="OpenAI", notes="n", _rbac={"role": "viewer"})})
+    assert local["K"]["provider"] == "OpenAI" and local["K"]["notes"] == "n"
+    assert local["K"]["_rbac"] == {"role": "viewer"}
+
+
+def test_reload_config_keeps_project_data_when_the_config_file_is_unreadable(world, box, monkeypatch):
+    project = world.register("acme")
+    before = dict(world.app.config["projects"])
+    logged = []
+    monkeypatch.setattr(pushkey, "log_event", lambda message, *a, **k: logged.append(message))
+    pushkey_shared.CONFIG_FILE.write_bytes(b"not a config at all")
+
+    _ok(world.app._reload_config)
+
+    assert world.app.config["projects"] == before and project in world.app.config["projects"]
+    assert len(logged) == 1 and "config" in logged[0]
+    assert box.of("error") == [] and box.of("warning") == [] and box.of("info") == []
+
+
+@pytest.mark.parametrize("failure", [
+    pushkey_vault.ConfigUnreadableError("config_unreadable"), OSError("disk full")],
+    ids=["config_unreadable", "oserror"])
+def test_add_project_reports_when_the_environment_cannot_be_saved(world, box, monkeypatch, failure):
+    folder = world.folder("acme-web")
+    world.app.proj_name.set("Acme Web")
+    world.app.proj_path_var.set(str(folder))
+    world.app.proj_env.set("staging")
+
+    def refuse(mutate):
+        raise failure
+
+    monkeypatch.setattr(pushkey, "update_config", refuse)
+
+    _ok(world.app.add_project)
+
+    registered = pushkey_connect.registered_projects(load_config(strict=True))
+    assert len(registered) == 1  # the project stays registered
+    errors = box.of("error")
+    assert len(errors) == 1
+    assert "added, but its environment could not be saved" in errors[0][2]
+    assert (str(failure) or "") in errors[0][2]
+    assert box.of("info") == []  # no "Linked"

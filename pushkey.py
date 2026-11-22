@@ -2248,6 +2248,11 @@ def _project_scan_roots(config):
     return {path for path in pushkey_connect.registered_projects(config) if os.path.isdir(path)}
 
 
+def _merge_foreign_vault_entries(local_vault, incoming):
+    """Inert placeholder for the RED run (replaced by the real merge)."""
+    local_vault.update(incoming)
+
+
 def _project_connections(vault, path):
     """``[(key name, connection)]`` for the connections that write into folder ``path``."""
     rows = []
