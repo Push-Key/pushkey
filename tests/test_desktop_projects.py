@@ -132,7 +132,7 @@ _BOUND = (
     "_run_scan", "_run_git_scan", "_apply_rotation", "_promote_backup_key", "_submit_add_key",
     "_add_wants_connection", "_add_connection_choice", "_sync_results", "_show_sync_results",
     "_register_folder_for_add", "_used_in_update_now", "_used_in_disconnect", "_stamp_written",
-    "_keep_category", "_project_label",
+    "_keep_category", "_project_label", "_inline_rotate",
 )
 
 
@@ -163,6 +163,8 @@ class FakeApp:
         self.add_conn_file = FakeText("")
         self.add_conn_var = FakeText("")
         self._add_conn_paths = {}
+        self._rotate_pending = True
+        self._rotate_result = None
         for name in _BOUND:
             setattr(self, name, types.MethodType(getattr(pushkey.AppFrame, name), self))
 
@@ -1472,3 +1474,188 @@ def test_connect_notice_view_title_rows_and_counts(world, box):
 
     none = pushkey._connect_notice_view(dict(notice, every_key_projects=[]), config, world.app.vault)
     assert none["rows"] == [] and none["title"] == "Some projects need a look"
+
+
+# -- fix round 1: inline rotate strip, USED IN read failure, window fit --------------------
+
+
+def test_inline_rotate_failure_shows_no_rotated_strip(world, box, monkeypatch):
+    def refuse(mutate, **kw):
+        raise pushkey_connect.ConnectError("vault_changed")
+
+    monkeypatch.setattr(pushkey_connect, "commit", refuse)
+
+    assert world.app._inline_rotate(STRIPE, NEW) is False
+
+    assert world.app._rotate_result is None  # no green "Rotated" strip, no copy button
+    assert world.app._rotate_pending is True  # the input stays so the user can try again
+    errors = box.of("error")
+    assert len(errors) == 1 and "was not changed" in errors[0][2]
+    assert len(box.calls) == 1
+    assert world.disk_vault()[STRIPE]["value"] == OLD
+
+
+def test_inline_rotate_without_connections_opens_no_dialog(world, box):
+    assert world.app._inline_rotate(OPENAI, NEW) is True
+
+    assert box.calls == []  # strip only, exactly as before connections existed
+    assert world.app._rotate_result == NEW and world.app._rotate_pending is False
+    assert world.disk_vault()[OPENAI]["value"] == NEW
+
+
+def test_inline_rotate_with_connections_shows_strip_and_results_dialog(world, box):
+    project = world.register("acme")
+    world.connect(STRIPE, project)
+
+    assert world.app._inline_rotate(STRIPE, NEW) is True
+
+    assert world.app._rotate_result == NEW
+    assert len(box.calls) == 1 and "acme" in box.calls[0][2]
+    assert OLD not in box.text() and NEW not in box.text()
+    assert STRIPE + "=" + NEW in _env_text(project)
+
+
+def test_inline_rotate_core_refusal_while_syncing_still_tells_the_user(world, box, monkeypatch):
+    def refuse(**kw):
+        raise pushkey_connect.ConnectError("vault_changed")
+
+    monkeypatch.setattr(pushkey_connect, "sync", refuse)
+
+    assert world.app._inline_rotate(OPENAI, NEW) is True  # the value was saved
+
+    assert world.app._rotate_result == NEW
+    assert len(box.calls) == 1 and "were not updated" in box.calls[0][2]
+
+
+def test_apply_rotation_default_still_shows_its_dialog_without_connections(world, box):
+    assert world.app._apply_rotation(OPENAI, NEW) is True
+
+    assert len(box.calls) == 1  # the modal rotate and rollback paths keep their confirmation
+
+
+def test_rotation_callers_that_have_their_own_strip_or_queue_ask_for_no_empty_dialog():
+    strip = inspect.getsource(pushkey.AppFrame._render_rotate_subpanel)
+    queue = inspect.getsource(pushkey.AppFrame._prompt_rotation_queue)
+    inline = inspect.getsource(pushkey.AppFrame._inline_rotate)
+
+    assert "_inline_rotate" in strip and "_apply_rotation" not in strip
+    assert "_apply_rotation" in inline and "_rotate_result = new_val" in inline
+    assert "skip_empty_dialog=True" in queue and "skip_empty_dialog=True" in inline
+
+
+class _Widget:
+    """A widget that records its text and accepts any layout call."""
+
+    made = []
+
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        _Widget.made.append(self)
+
+    def __getattr__(self, name):
+        return lambda *a, **k: self
+
+
+def test_used_in_read_failure_says_so_instead_of_claiming_no_projects(monkeypatch):
+    import types as _types
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("status unreadable")
+
+    _Widget.made = []
+    monkeypatch.setattr(pushkey, "ctk", _types.SimpleNamespace(CTkFrame=_Widget, CTkLabel=_Widget))
+    monkeypatch.setattr(pushkey_connect, "status", broken)
+    app = _types.SimpleNamespace(vault={STRIPE: _entry()}, config={})
+
+    _ok(lambda: pushkey.AppFrame._render_used_in(app, None, STRIPE))
+
+    texts = [w.kwargs.get("text") for w in _Widget.made]
+    assert "Could not read this key's projects" in texts
+    assert not any("Not used in any project yet" in str(t) for t in texts)
+    assert not any("status unreadable" in str(t) or "RuntimeError" in str(t) for t in texts)
+
+
+def test_used_in_without_connections_still_has_the_empty_text(monkeypatch):
+    import types as _types
+
+    _Widget.made = []
+    monkeypatch.setattr(pushkey, "ctk", _types.SimpleNamespace(CTkFrame=_Widget, CTkLabel=_Widget))
+    monkeypatch.setattr(pushkey_connect, "status", lambda *a, **k: [])
+    app = _types.SimpleNamespace(vault={STRIPE: _entry()}, config={})
+
+    _ok(lambda: pushkey.AppFrame._render_used_in(app, None, STRIPE))
+
+    texts = [str(w.kwargs.get("text")) for w in _Widget.made]
+    assert any("Not used in any project yet" in t for t in texts)
+    assert not any("Could not read" in t for t in texts)
+
+
+def test_clamp_to_screen_leaves_a_window_that_fits():
+    assert _ok(lambda: pushkey._clamp_to_screen(560, 700, 1920, 1080)) == (560, 700)
+
+
+def test_clamp_to_screen_cuts_a_tall_window_to_the_screen_minus_the_margin():
+    assert _ok(lambda: pushkey._clamp_to_screen(560, 1400, 1920, 1080)) == (560, 1000)
+    assert _ok(lambda: pushkey._clamp_to_screen(2500, 700, 1920, 1080)) == (1840, 700)
+
+
+def test_clamp_to_screen_works_in_window_units_at_125_percent_scaling():
+    # geometry() multiplies by the scaling: 1000 x 1.25 would be 1250 real pixels > 1000 allowed.
+    assert _ok(lambda: pushkey._clamp_to_screen(560, 1000, 1920, 1080, scale=1.25)) == (560, 800)
+
+
+class _SizedWin:
+    def __init__(self, req_w, req_h, screen_w, screen_h, scale=1.0):
+        self.req = (req_w, req_h)
+        self.screen = (screen_w, screen_h)
+        self.scale = scale
+        self.min = None
+        self.geo = None
+
+    def update_idletasks(self):
+        pass
+
+    def _get_window_scaling(self):
+        return self.scale
+
+    def winfo_reqwidth(self):
+        return self.req[0]
+
+    def winfo_reqheight(self):
+        return self.req[1]
+
+    def winfo_screenwidth(self):
+        return self.screen[0]
+
+    def winfo_screenheight(self):
+        return self.screen[1]
+
+    def minsize(self, w, h):
+        self.min = (w, h)
+
+    def geometry(self, text):
+        self.geo = text
+
+
+def test_fit_window_never_exceeds_the_screen():
+    win = _SizedWin(600, 1500, 1920, 1080)
+
+    _ok(lambda: pushkey._fit_window(win, width=560))
+
+    assert win.geo == "600x1000" and win.min == (600, 1000)
+
+
+def test_fit_window_keeps_a_window_that_fits_at_its_size():
+    win = _SizedWin(600, 700, 1920, 1080)
+
+    _ok(lambda: pushkey._fit_window(win, width=560))
+
+    assert win.geo == "600x700" and win.min == (600, 700)
+
+
+def test_fit_window_divides_by_the_scaling_before_clamping():
+    win = _SizedWin(700, 1500, 1920, 1080, scale=1.25)
+
+    _ok(lambda: pushkey._fit_window(win, width=560))
+
+    assert win.geo == "560x800" and win.min == (560, 800)

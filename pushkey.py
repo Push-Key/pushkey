@@ -6329,6 +6329,13 @@ class AppFrame(ctk.CTkFrame):
         self._rotate_result = None
         self._render_key_rows()
 
+    def _inline_rotate(self, name, new_val):
+        self._apply_rotation(name, new_val)
+        self._rotate_pending = False
+        self._rotate_result = new_val
+        self._render_key_rows()
+        return True
+
     def _render_rotate_subpanel(self, parent_frame, name: str):
         if self._rotate_result is not None:
             # ── Result strip ──
@@ -6388,10 +6395,7 @@ class AppFrame(ctk.CTkFrame):
             new_val = inp_var.get().strip()
             if not new_val:
                 return
-            self._apply_rotation(n, new_val)
-            self._rotate_pending = False
-            self._rotate_result = new_val
-            self._render_key_rows()
+            self._inline_rotate(n, new_val)
 
         def _cancel():
             self._rotate_pending = False
