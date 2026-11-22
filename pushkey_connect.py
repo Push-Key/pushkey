@@ -1065,6 +1065,9 @@ def sync(
     not in the vault raises ``key_not_found`` before anything is written, and an
     empty ``key_names`` syncs nothing.
 
+    An unfiltered call (neither ``key_name`` nor ``key_names``) skips vault entries
+    whose name starts with ``_`` (internal entries); naming one explicitly still works.
+
     One result per connection, in vault order; nothing raises for a single
     connection: a refusal or failure is that result's ``reason`` (and its
     ``last_error``). Connections to the same file are written together, so one
@@ -1093,6 +1096,8 @@ def sync(
     for name, entry in vault.items():
         if only is not None and name not in only:
             continue
+        if only is None and name.startswith("_"):
+            continue  # an unfiltered scan never writes internal "_" entries
         for conn in _connections(entry):
             conn_project, conn_file, conn_var = conn.get("project"), conn.get("file"), conn.get("var")
             if not all(isinstance(part, str) for part in (conn_project, conn_file, conn_var)):

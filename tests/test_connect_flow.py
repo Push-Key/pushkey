@@ -1618,3 +1618,16 @@ def test_sync_of_named_keys_refuses_an_unknown_key_before_it_writes(world):
     assert error is not None and error.code == "key_not_found"
     assert error.detail == {"key": "NOPE"}
     assert (world.folder / ".env").read_bytes() == before
+
+
+def test_sync_skips_underscore_prefixed_vault_entries(world):
+    world.add_key("_meta", value="meta-secret", connections=[_conn(world.project, var="META_VAR")])
+    _ok(lambda: world.connect())
+    world.rotate(KEY, "sb_publishable_y")
+
+    results = _ok(lambda: world.sync())
+
+    assert [r.key for r in results] == [KEY]
+    text = world.read(".env")
+    assert f"{KEY}=sb_publishable_y\n" in text
+    assert "META_VAR" not in text and "meta-secret" not in text
