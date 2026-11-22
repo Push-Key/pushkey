@@ -18,7 +18,8 @@ in transcripts or telemetry. The vault itself remains local and encrypted.
 
 Safe by argument and output shape:
     ✅ Metadata/name-only  (list_keys, check_health, rotate_to_backup,
-                            inject_env)
+                            inject_env, preview_connection, connect_key,
+                            key_usage, assign_key)
     ⚠️  Secret-bearing     (get_key) — the returned value enters the MCP
         output              client context and may be retained by the client,
                             model provider, transcript, or telemetry
@@ -41,12 +42,17 @@ choice to the user at call time.
 """
 from mcp.server.fastmcp import FastMCP
 
+import pushkey_connect as _pc
+import pushkey_connect_migrate as _pcm
+import pushkey_projectfs as _pfs
+import pushkey_shared as _s
 import pushkey_vault as _vault
+from pushkey_connect import ConnectError
 from pushkey_health import HealthSidecarError
+from dataclasses import asdict
 from datetime import datetime, timedelta
-from pathlib import Path
+import os
 import re
-from pushkey_env import mutate_env_file
 
 
 def _safe_str(s, max_len: int = 500) -> str:
@@ -96,7 +102,29 @@ def _unlock_with_password(password: str) -> dict:
     _SESSION["password"] = password
     _SESSION["scopes"] = ["read", "write", "inject"]  # full access
     _SESSION["last_activity"] = datetime.now()
-    return {"success": True, "key_count": len(vault), "auth": "master_password"}
+    _migrate_project_store()
+    return {"success": True, "key_count": len(_SESSION["vault"]), "auth": "master_password"}
+
+
+def _migrate_project_store() -> None:
+    """Run the one-time project store migration; the unlock never fails because of it.
+
+    Only a master-password unlock gets here (a token session never writes at unlock), and
+    only when a vault file exists. A damaged or busy config, a busy vault or a failed save
+    leave the store as it was: the next password unlock tries again and the project tools
+    answer ``migration_pending`` or a config error meanwhile. The log line names the error
+    type and, for the core's own errors, its code; never a message that could hold a value.
+    """
+    if not _s.VAULT_FILE.exists():
+        return
+    try:
+        _pcm.ensure_migrated(
+            vault_key=_SESSION["vault_key"], password=_SESSION["password"], target=_SESSION["vault"]
+        )
+    except Exception as error:
+        from pushkey_crypto import log_event
+        code = f": {error}" if isinstance(error, (ConnectError, _vault.ConfigUnreadableError)) else ""
+        log_event(f"[mcp] project store migration skipped ({type(error).__name__}{code})")
 
 
 def _unlock_with_token(token_value: str) -> dict:
@@ -167,6 +195,150 @@ def _require_scope(scope: str) -> dict | None:
     return None
 
 
+# ── connect core helpers ─────────────────────────────────────────────────────
+
+_CORE_ERRORS = (ConnectError, _vault.ConfigUnreadableError, _pfs.ProjectPathError)
+
+_ERROR_HINTS = {
+    "project_not_registered": "A person must add this folder as a project in Pushkey first.",
+    "migration_pending": "Open Pushkey with your master password once to finish migrating projects.",
+    "file_tracked_by_git": "this file is committed to git; Pushkey will not write secrets into it",
+    "confirmation_required": (
+        "Ask the person to approve these, then call connect_key again with confirm set to them."
+    ),
+}
+
+
+def _error_reply(error: Exception) -> dict:
+    """``{"success": False, "error": <code>, "hint": ...}`` for an error the connect core raises.
+
+    Only the stable code (and, for ``confirmation_required``, the confirmations still
+    missing) is passed on: the error's names and paths are not echoed, and no key value
+    ever is.
+    """
+    if isinstance(error, ConnectError):
+        code = error.code
+    elif isinstance(error, _vault.ConfigUnreadableError):
+        reason = str(error)
+        code = reason if reason in ("config_unreadable", "config_busy") else "config_unreadable"
+    else:
+        code = error.reason
+    reply = {"success": False, "error": code}
+    if code in _ERROR_HINTS:
+        reply["hint"] = _ERROR_HINTS[code]
+    if code == "confirmation_required":
+        reply["needs"] = list(error.detail.get("needs", []))
+    return reply
+
+
+def _core_credentials() -> dict:
+    """The credentials the connect core is given for this session.
+
+    A token session holds no password (``None``), so the core saves with the vault key
+    only. ``target`` is the session's vault, kept current by the core after every save.
+    """
+    return {
+        "vault_key": _SESSION["vault_key"],
+        "password": _SESSION.get("password"),
+        "target": _SESSION["vault"],
+    }
+
+
+def _core_actor() -> str:
+    """The name audit lines carry for this session."""
+    return "mcp" if _SESSION.get("password") is not None else "mcp agent-token"
+
+
+def _may_inject() -> bool:
+    return "inject" in _SESSION.get("scopes", [])
+
+
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _connection_rows(entry) -> list[dict]:
+    """``{project, file, var}`` of each well-formed connection of a vault entry."""
+    connections = entry.get("connections") if isinstance(entry, dict) else None
+    rows = []
+    for conn in connections if isinstance(connections, list) else []:
+        if isinstance(conn, dict) and all(isinstance(conn.get(part), str) for part in ("project", "file", "var")):
+            rows.append({"project": conn["project"], "file": conn["file"], "var": conn["var"]})
+    return rows
+
+
+def _registered_project(project_path: str) -> str:
+    """The registered key of the project folder ``project_path`` names.
+
+    Raises ConnectError ``migration_pending`` for a store that is not migrated yet and
+    ``project_not_registered`` for a folder a person has not added as a project.
+    """
+    config = _vault.load_config(strict=True)
+    if not _pc.is_migrated(config):
+        raise ConnectError("migration_pending")
+    canonical = _pfs.canonical_project_path(project_path, must_exist=False)
+    for key in _pc.registered_projects(config):
+        if _path_key(key) == _path_key(canonical):
+            return key
+    raise ConnectError("project_not_registered", {"project": canonical})
+
+
+def _replace_value_of(fresh: dict, name: str, new_value: str) -> dict:
+    """Rotate-style replacement on a freshly loaded vault (the commit's mutate step)."""
+    entry = fresh.get(name)
+    if not isinstance(entry, dict):
+        raise ConnectError("key_not_found", {"key": name})
+    _pc.replace_value(entry, new_value)
+    return entry
+
+
+def _after_value_change(name: str) -> tuple[dict, list]:
+    """Bring a key's connected files up to date after its value changed.
+
+    Returns ``(reply fields, warnings)``. A session with the inject scope syncs and reports
+    ``synced``; any other session lists the connections it could not write in
+    ``not_synced``. The value is already saved when this runs, so a sync that cannot start
+    (an unreadable config, a store not yet migrated) is a code-only ``sync_error`` and never
+    turns the successful change into an error (a retry would change the key twice).
+    """
+    if not _may_inject():
+        return {"not_synced": _connection_rows(_SESSION["vault"].get(name))}, []
+    try:
+        results = _pc.sync(key_name=name, actor=_core_actor(), **_core_credentials())
+    except Exception as error:
+        # A code only: the class name of anything unexpected, never its message.
+        code = (
+            error.code if isinstance(error, ConnectError)
+            else str(error) if isinstance(error, _vault.ConfigUnreadableError)
+            else type(error).__name__
+        )
+        return {"synced": [], "sync_error": code}, []
+    warnings = [w for result in results for w in (result.health_warning, result.warning)]
+    return {"synced": [asdict(result) for result in results]}, warnings
+
+
+def _first(*warnings):
+    """The first warning that is set, or None."""
+    return next((w for w in warnings if w), None)
+
+
+def _add_key_warning(name: str) -> str:
+    return (
+        "Key value entered the MCP client context and may be retained by the client, "
+        "model provider, transcript, or telemetry. "
+        "OK for dev/test keys. For production keys, add via local CLI: "
+        f"`pushkey add {name}` (hidden prompt, no LLM exposure)."
+    )
+
+
+_ROTATE_KEY_WARNING = (
+    "New key value entered the MCP client context and may be retained by the "
+    "client, model provider, transcript, or telemetry. "
+    "OK for dev/test keys. For production keys, prefer `pushkey rotate` (CLI, getpass) "
+    "or pre-stage a backup and use rotate_to_backup() so secrets never cross chat."
+)
+
+
 @mcp.tool()
 def unlock_vault(password: str) -> dict:
     """
@@ -197,6 +369,8 @@ def list_keys(env: str = None, provider: str = None, project: str = None) -> dic
     vault = _SESSION["vault"]
     keys = []
     for name, meta in vault.items():
+        if name.startswith("_") or not isinstance(meta, dict):
+            continue  # vault metadata, never a key
         if env and meta.get("env") != env:
             continue
         if provider and meta.get("provider", "").lower() != provider.lower():
@@ -257,6 +431,11 @@ def add_key(
 ) -> dict:
     """Add a new key to the vault. Fails if key already exists unless overwrite=True. Requires 'write' scope.
 
+    With overwrite=True the existing key keeps its provider, env, notes and connections
+    (those arguments are ignored): only its value is replaced, as a rotation does, and
+    every file the key is connected to is brought up to date when the session has the
+    'inject' scope (otherwise the reply lists them under `not_synced`).
+
     ⚠️  PLAINTEXT-OVER-CHAT WARNING
     The `value` argument enters the MCP client context and may be transmitted
     to a model provider or retained in client transcripts or telemetry.
@@ -274,6 +453,26 @@ def add_key(
     vault = _SESSION["vault"]
     if name in vault and not overwrite:
         return {"success": False, "error": f"key '{name}' already exists; pass overwrite=True to replace"}
+    if name in vault:
+        try:
+            saved = _pc.commit(
+                lambda fresh: _replace_value_of(fresh, name, _sanitize_key_value(value)),
+                **_core_credentials(),
+            )
+        except _CORE_ERRORS as error:
+            return _error_reply(error)
+        follow_up, warnings = _after_value_change(name)
+        result = {
+            "success": True,
+            "name": name,
+            "provider": saved.value.get("provider", "Unknown"),
+            "warning": _add_key_warning(name),
+            **follow_up,
+        }
+        health_warning = _first(saved.health_warning, *warnings)
+        if health_warning:
+            result["health_warning"] = health_warning
+        return result
     if not provider:
         provider = _prov.detect_provider(name, value) or "Unknown"
     now = datetime.now().strftime("%Y-%m-%d")
@@ -291,12 +490,7 @@ def add_key(
         "success": True,
         "name": name,
         "provider": provider,
-        "warning": (
-            "Key value entered the MCP client context and may be retained by the client, "
-            "model provider, transcript, or telemetry. "
-            "OK for dev/test keys. For production keys, add via local CLI: "
-            f"`pushkey add {name}` (hidden prompt, no LLM exposure)."
-        ),
+        "warning": _add_key_warning(name),
     }
     if health_warning:
         result["health_warning"] = health_warning
@@ -306,49 +500,67 @@ def add_key(
 @mcp.tool()
 def inject_env(project_path: str, keys: list[str] = None) -> dict:
     """
-    Write vault keys into <project_path>/.env and ensure .env is in .gitignore.
-    If keys is None, injects all keys whose projects list includes project_path.
-    Requires 'inject' scope.
+    Write the keys connected to a registered project into their env file (a variable's
+    value is replaced) and make sure the file is in the project's .gitignore.
+    If keys is None, writes every key connected to the project; explicit keys must be
+    connected to it (see connect_key / assign_key), otherwise the call is refused.
+    A folder that a person has not added as a project in Pushkey is refused with
+    `project_not_registered`. Requires 'inject' scope. No reply carries a key value.
     """
     err = _require_scope("inject")
     if err:
         return err
     vault = _SESSION["vault"]
-    project = Path(project_path).resolve()
-    if not project.is_dir():
-        return {"success": False, "error": f"directory not found: {project_path}"}
-    resolved_project = str(project)
+    try:
+        project = _registered_project(project_path)
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
 
+    connected: dict[str, list[dict]] = {}
+    for name, entry in vault.items():
+        rows = [r for r in _connection_rows(entry) if _path_key(r["project"]) == _path_key(project)]
+        if rows and not name.startswith("_"):
+            connected[name] = rows
     if keys is None:
-        keys = [n for n, m in vault.items() if resolved_project in m.get("projects", [])]
+        keys = list(connected)
         if not keys:
-            return {"success": False, "error": "no keys assigned to this project; pass keys=[...] explicitly"}
-
-    missing = [k for k in keys if k not in vault]
+            return {"success": False, "error": "no keys connected to this project; connect keys first or pass keys=[...]"}
     invalid = [k for k in keys if not _valid_key_name(k)]
     if invalid:
         return {"success": False, "error": f"invalid key names: {invalid}"}
+    missing = [k for k in keys if not isinstance(vault.get(k), dict)]
     if missing:
         return {"success": False, "error": f"keys not in vault: {missing}"}
-    unassigned = [k for k in keys if not _key_allows_project(vault[k], resolved_project)]
-    if unassigned:
+    unconnected = [k for k in keys if k not in connected]
+    if unconnected:
         return {
             "success": False,
-            "error": f"project path is not allowlisted for keys: {unassigned}",
-            "hint": "Assign keys to this project path before calling inject_env.",
+            "error": f"keys not connected: {unconnected}",
+            "hint": "Connect the keys to this project with connect_key before calling inject_env.",
         }
-    sanitized = {
-        name: {**vault[name], "value": _sanitize_key_value(vault[name]["value"])}
-        for name in keys
+    names = list(dict.fromkeys(keys))
+    try:
+        # One call for every named key: one write and one backup per file.
+        results = _pc.sync(key_names=names, project=project, actor=_core_actor(), **_core_credentials())
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    injected = list(dict.fromkeys(r.key for r in results if r.written and r.change != "none"))
+    reply = {
+        "success": all(r.written for r in results),
+        "injected_count": len(injected),
+        "injected_names": injected,
+        # A connected variable's value is always replaced; nothing is "kept" any more.
+        "skipped_count": 0,
+        "skipped_existing": [],
+        "results": [asdict(r) for r in results],
     }
-    result = mutate_env_file(project, sanitized, key_names=keys, update_existing=False)
-    return {
-        "success": True,
-        "injected_count": len(result.injected_names),
-        "injected_names": result.injected_names,
-        "skipped_count": len(result.skipped_existing),
-        "skipped_existing": result.skipped_existing,
-    }
+    if not reply["success"]:
+        reply["error"] = "write_failed"
+        reply["hint"] = "See each result's reason."
+    health_warning = _first(*(w for r in results for w in (r.health_warning, r.warning)))
+    if health_warning:
+        reply["health_warning"] = health_warning
+    return reply
 
 
 @mcp.tool()
@@ -392,6 +604,10 @@ def check_health(rotation_threshold_days: int = 90) -> dict:
 def rotate_key(name: str, new_value: str) -> dict:
     """Replace a key's value and update its rotated timestamp. Requires 'write' scope.
 
+    Every file the key is connected to is brought up to date when the session has the
+    'inject' scope (the reply's `synced` lists them); otherwise the reply lists them under
+    `not_synced`. A sync that fails after the value is saved is a code-only `sync_error`.
+
     ⚠️  PLAINTEXT-OVER-CHAT WARNING
     `new_value` enters the MCP client context and may be transmitted to a model
     provider or retained in client transcripts or telemetry. Use this path only
@@ -413,20 +629,22 @@ def rotate_key(name: str, new_value: str) -> dict:
     vault = _SESSION["vault"]
     if name not in vault:
         return {"success": False, "error": f"key '{name}' not found"}
-    vault[name]["value"] = _sanitize_key_value(new_value)
-    vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
-    health_warning = _save_session_vault(vault)
+    try:
+        saved = _pc.commit(
+            lambda fresh: _replace_value_of(fresh, name, _sanitize_key_value(new_value)),
+            **_core_credentials(),
+        )
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    follow_up, warnings = _after_value_change(name)
     result = {
         "success": True,
         "name": name,
-        "rotated": vault[name]["rotated"],
-        "warning": (
-            "New key value entered the MCP client context and may be retained by the "
-            "client, model provider, transcript, or telemetry. "
-            "OK for dev/test keys. For production keys, prefer `pushkey rotate` (CLI, getpass) "
-            "or pre-stage a backup and use rotate_to_backup() so secrets never cross chat."
-        ),
+        "rotated": saved.value["rotated"],
+        "warning": _ROTATE_KEY_WARNING,
+        **follow_up,
     }
+    health_warning = _first(saved.health_warning, *warnings)
     if health_warning:
         result["health_warning"] = health_warning
     return result
@@ -503,6 +721,8 @@ def rotate_to_backup(name: str) -> dict:
     - Active key is discarded (revoke it at the provider after this call).
     - Backup key becomes the new active value.
     - Backup slot is cleared — add a new backup key to maintain the rotation cycle.
+    - Every file the key is connected to is brought up to date when the session has the
+      'inject' scope (`synced`); otherwise the reply lists them under `not_synced`.
 
     Requires 'write' scope and a master password session.
     """
@@ -520,23 +740,39 @@ def rotate_to_backup(name: str) -> dict:
     if not meta.get("next_value"):
         return {"success": False, "error": f"'{name}' has no backup key stored — call set_backup_key first"}
 
-    meta["value"] = meta["next_value"]
-    meta["rotated"] = datetime.now().strftime("%Y-%m-%d")
-    meta["next_value"] = None
-    meta["next_added"] = None
-    _save_session_vault(vault)
+    def promote(fresh: dict) -> dict:
+        entry = fresh.get(name)
+        if not isinstance(entry, dict):
+            raise ConnectError("key_not_found", {"key": name})
+        if not entry.get("next_value"):
+            raise ConnectError("no_backup_staged", {"key": name})
+        _pc.replace_value(entry, entry["next_value"])
+        entry["next_value"] = None
+        entry["next_added"] = None
+        return entry
+
+    try:
+        saved = _pc.commit(promote, **_core_credentials())
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
     try:
         from pushkey_crypto import log_event
         log_event(f"[mcp] backup promoted to active: {name}")
     except Exception:
         pass
-    return {
+    follow_up, warnings = _after_value_change(name)
+    result = {
         "success": True,
         "name": name,
-        "rotated": meta["rotated"],
+        "rotated": saved.value["rotated"],
         "backup_slot": "empty",
         "action_needed": f"Revoke the old key at your provider, then call set_backup_key('{name}', <new_backup>) to restore the rotation cycle.",
+        **follow_up,
     }
+    health_warning = _first(saved.health_warning, *warnings)
+    if health_warning:
+        result["health_warning"] = health_warning
+    return result
 
 
 @mcp.tool()
@@ -548,6 +784,8 @@ def list_projects() -> dict:
     vault = _SESSION["vault"]
     projects: dict[str, dict] = {}
     for name, meta in vault.items():
+        if name.startswith("_") or not isinstance(meta, dict):
+            continue
         for proj in meta.get("projects", []):
             if proj not in projects:
                 projects[proj] = {"key_count": 0, "keys": []}
@@ -558,7 +796,16 @@ def list_projects() -> dict:
 
 @mcp.tool()
 def assign_key(key_name: str, project_path: str) -> dict:
-    """Assign a vault key to a project path (adds to key's projects list). Requires 'write' scope."""
+    """Connect a vault key to a registered project without writing its env file (use
+    inject_env or connect_key to write it). Requires 'write' scope.
+
+    The folder must be a project a person has added in Pushkey; otherwise the call is
+    refused with `project_not_registered`. The key is connected to the project's default
+    file as a variable of its own name. If the connection needs a person's approval
+    (a variable another key holds, a browser-bundled name, a key of another environment)
+    the call is refused with `confirmation_required`: use connect_key with `confirm`.
+    No reply carries a key value.
+    """
     err = _require_scope("write")
     if err:
         return err
@@ -567,12 +814,111 @@ def assign_key(key_name: str, project_path: str) -> dict:
     vault = _SESSION["vault"]
     if key_name not in vault:
         return {"success": False, "error": f"key '{key_name}' not found"}
-    resolved = str(Path(project_path).resolve())
-    projects = vault[key_name].setdefault("projects", [])
-    if resolved not in projects:
-        projects.append(resolved)
-        _save_session_vault(vault)
-    return {"success": True, "key": key_name, "project": project_path}
+    try:
+        result = _pc.connect(
+            key_name=key_name, project=project_path, write=False,
+            actor=_core_actor(), **_core_credentials(),
+        )
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    reply = {"success": True, "key": key_name, "project": project_path, "connection": asdict(result)}
+    health_warning = _first(result.health_warning, result.warning)
+    if health_warning:
+        reply["health_warning"] = health_warning
+    return reply
+
+
+@mcp.tool()
+def preview_connection(name: str, project_path: str, file: str = None, var: str = None) -> dict:
+    """Say what connecting a vault key to a project would do, without changing anything.
+    Requires 'read' scope. Returns `preview` with the exact line to show a person
+    (`Save to <project> -> <environment> -> <file> as <var>`), whether the file would be
+    added to, replaced or left alone, whether .gitignore would change, and the
+    confirmations connect_key would need (`needs_confirm`).
+
+    `file` defaults to the project's default env file and `var` to the key name. Nothing
+    returns a key value, and no value can be passed in.
+    """
+    err = _require_scope("read")
+    if err:
+        return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
+    vault = _SESSION["vault"]
+    try:
+        if not isinstance(vault.get(name), dict):
+            raise ConnectError("key_not_found", {"key": name})
+        config = _vault.load_config(strict=True)
+        if not _pc.is_migrated(config):
+            raise ConnectError("migration_pending")
+        shown = _pc.preview(vault, config, key_name=name, project=project_path, file=file, var=var)
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    return {"success": True, "preview": asdict(shown)}
+
+
+@mcp.tool()
+def connect_key(
+    name: str,
+    project_path: str,
+    file: str = None,
+    var: str = None,
+    confirm: list[str] = None,
+) -> dict:
+    """Connect an existing vault key to a variable in a registered project's env file and
+    write it there. Requires BOTH 'write' and 'inject' scopes.
+
+    The secret is never passed in: only the key's NAME, so nothing here crosses the chat
+    (add the key first with add_key, or better with the local CLI `pushkey add`). Nothing
+    in the reply is a key value. The folder must be a project a person has added in
+    Pushkey (`project_not_registered` otherwise; this tool never registers projects).
+    `file` defaults to the project's default env file and `var` to the key name. When the
+    connection needs a person's approval the call is refused with `confirmation_required`
+    and `needs`; once they approve, call again with `confirm` set to those codes
+    (use preview_connection first to see them). A write that fails after the connection
+    is saved is reported in `connection.written` / `connection.reason`, not as an error.
+    """
+    err = _require_scope("write")
+    if err:
+        return err
+    err = _require_scope("inject")
+    if err:
+        return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
+    try:
+        result = _pc.connect(
+            key_name=name, project=project_path, file=file, var=var,
+            confirmed=confirm or (), write=True, actor=_core_actor(), **_core_credentials(),
+        )
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    reply = {"success": True, "key": name, "project": result.project, "connection": asdict(result)}
+    health_warning = _first(result.health_warning, result.warning)
+    if health_warning:
+        reply["health_warning"] = health_warning
+    return reply
+
+
+@mcp.tool()
+def key_usage(name: str) -> dict:
+    """Where a vault key is connected and whether each file is up to date.
+    Requires 'read' scope. Returns `connections`: project, file, variable and a state
+    (up_to_date, out_of_date, not_in_file, file_missing, folder_missing, not_ignored or
+    not_written, with a reason). Nothing returns a key value."""
+    err = _require_scope("read")
+    if err:
+        return err
+    if not _valid_key_name(name):
+        return {"success": False, "error": "invalid key name"}
+    vault = _SESSION["vault"]
+    try:
+        if not isinstance(vault.get(name), dict):
+            raise ConnectError("key_not_found", {"key": name})
+        statuses = _pc.status(vault, _vault.load_config(strict=True), key_name=name)
+    except _CORE_ERRORS as error:
+        return _error_reply(error)
+    return {"success": True, "name": name, "connections": [asdict(state) for state in statuses]}
 
 
 # ── Agent token management (requires master password session) ─────────────────
@@ -583,9 +929,9 @@ def create_agent_token(name: str, scopes: list[str]) -> dict:
     Create a scoped agent token for CI/CD pipelines or autonomous agents (Pro+ only).
 
     scopes: list of "read", "write", "inject" (any combination).
-      read   — list_keys, get_key, check_health, list_projects
-      write  — add_key, rotate_key, assign_key
-      inject — inject_env
+      read   — list_keys, get_key, check_health, list_projects, preview_connection, key_usage
+      write  — add_key, rotate_key, assign_key (connect_key needs write AND inject)
+      inject — inject_env (and the file sync after rotate_key / add_key / rotate_to_backup)
 
     The token value is returned once and never stored in plaintext.
     Requires master password session (cannot create tokens from another token).

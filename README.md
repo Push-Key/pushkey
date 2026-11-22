@@ -37,10 +37,10 @@ Most developers manage API keys in `.env` files, shell profiles, or their brain.
 
 | 😬 The problem | ✅ Pushkey fixes it |
 |----------------|---------------------|
-| Keys committed to git by accident | `inject` writes `.gitignore` guard first, every time |
+| Keys committed to git by accident | Every connected file is listed in `.gitignore` before it is written, and a file git already tracks is refused |
 | Keys shared over Slack in plaintext | Encrypted vault, share the vault, not the secret |
 | No idea when `sk-abc123` was last rotated | Per-key rotation timestamps + health scoring |
-| One key used across 6 projects | Multi-project assignment with per-env injection |
+| One key used across 6 projects | Connect one key to many projects, each with its own file and variable name |
 | No audit trail | Encrypted per-entry audit log with deterministic replay |
 
 ---
@@ -78,20 +78,31 @@ pip install -r requirements.txt
 pushkey init
 # → Sets master password, generates PUSH-XXXX-XXXX-XXXX-XXXX recovery code (save it!)
 
-# 2. Add a key
-pushkey add OPENAI_API_KEY sk-abc123
+# 2. Register a project folder, then add a key and connect it to that project
+pushkey project add ~/my-project
+pushkey add OPENAI_API_KEY --project ~/my-project
+# → Prompts for the value (hidden), shows what will be written, then writes it
+#   to the project's .env and lists .env in the project's .gitignore first.
+#   Add --file .env.local and --as NEXT_PUBLIC_KEY to choose the file and variable name.
 
-# 3. Inject into your project
-cd ~/my-project
-pushkey inject
-# → Writes .env, adds .env to .gitignore automatically
+# 3. Update the connected files later (for example after a rotation)
+pushkey sync
+# → Rewrites only the variables Pushkey manages; the rest of the file is left alone.
+#   Before changing a file it copies the old one to ~/.pushkey/env-backups/ (newest 3 per file).
 
 # 4. Or launch the GUI
 python pushkey.py
 ```
 
+> [!NOTE]
+> A value typed on the command line (`pushkey add NAME value`) stays in your shell history. Leave the value off and Pushkey asks for it with a hidden prompt.
+
 > [!TIP]
 > Set `PUSHKEY_MASTER` in your shell profile to skip the password prompt in scripts. Use a separate service account password, never your personal master password.
+
+### Upgrading from an earlier version
+
+The first time you unlock with your master password (desktop app or CLI), Pushkey makes a one-time move: the desktop app's named projects become entries in the shared project list (keyed by folder path, used by the desktop, CLI, web app and MCP server), and every key-to-project assignment becomes an explicit connection to `.env` with the key's name as the variable. The old entries stay in `config.json` under `projects_legacy`, running it twice changes nothing, and projects over your plan limit are not removed. A one-time notice in the desktop and web app lists anything that could not be moved; `pushkey project dismiss-notice` hides it.
 
 ---
 
@@ -101,15 +112,22 @@ python pushkey.py
 ┌─────────────────────────────────────────────────────────────────┐
 │  PUSHKEY CLI                                                     │
 ├────────────┬────────────────────┬───────────────────────────────┤
-│  add       │ <NAME> [VALUE]     │ Store a key (--generate)      │
+│  add       │ <NAME> [VALUE]     │ Store a key (--project to     │
+│            │                    │ connect it at the same time)  │
+│  connect   │ <NAME> --project P │ Connect a key to a project    │
+│            │                    │ file (--file, --as)           │
+│  where     │ <NAME>             │ Where a key is connected and  │
+│            │                    │ whether each file is current  │
+│  sync      │ [NAME] [--project] │ Rewrite connected files       │
+│  project   │ add|remove|list    │ Register project folders      │
 │  get       │ <NAME>             │ Print or copy (--clip)        │
 │  list      │                    │ All keys + health status      │
 │  rotate    │ <NAME> [VALUE]     │ Rotate to new value           │
 │  delete    │ <NAME>             │ Remove a key                  │
 │  status    │                    │ Vault health summary          │
-│  inject    │                    │ Write to .env (--env prod)    │
+│  inject    │ [--project P]      │ Write a project's connected   │
+│            │                    │ keys (--all: connect all)     │
 │  import    │ <FILE>             │ Bulk import from .env file    │
-│  assign    │ <NAME> <PATH>      │ Link key to a project         │
 │  info      │ <NAME>             │ Full key metadata             │
 │  history   │ <NAME>             │ Rotation history (--reveal)   │
 │  log       │                    │ Audit log (--limit N)         │
@@ -125,14 +143,17 @@ python pushkey.py
 # 🏷️  Add a key, provider auto-detected from name/prefix
 pushkey add STRIPE_SECRET_KEY sk_live_...
 
-# 🎲  Generate a cryptographically random key
-pushkey add MY_SIGNING_SECRET --generate
-
 # 📋  Copy to clipboard without printing to terminal
 pushkey get OPENAI_API_KEY --clip
 
-# 🌍  Inject only production keys
-pushkey inject --env prod
+# 🔗  Connect a key you already have to a project file and variable
+pushkey connect STRIPE_SECRET_KEY --project ~/shop --file .env.local --as STRIPE_KEY
+# A key whose environment differs from the project's asks for an extra confirmation
+# (--confirm env_mismatch), and so does a secret key written to a variable that gets
+# bundled into browser code, such as NEXT_PUBLIC_... (--confirm public_prefix)
+
+# 🔎  See where a key is used and whether each file is up to date
+pushkey where STRIPE_SECRET_KEY
 
 # 📥  Bulk import from an existing .env backup
 pushkey import .env.backup
@@ -226,9 +247,9 @@ V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 <td width="50%">
 
 **💉 `.env` Injection**
-- Always writes `.gitignore` guard before `.env`
-- Per-project key assignment
-- Per-env filtering on inject
+- Lists the file in the project's `.gitignore` before writing it, and refuses a file git tracks
+- Per-key connections: project, file and variable, with a preview before every write
+- Environment is a label and a warning (a prod key into a dev project asks first), never a silent filter
 - Drop zone for batch imports
 
 **🖥️ Interface**
@@ -286,8 +307,9 @@ V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 | ✍️ **Atomic writes** | `.tmp` → `os.replace()`, no partial vault states possible |
 | 🔒 **File permissions** | `vault.enc` and `.salt` set to `chmod 600` on write |
 | 💾 **Rolling backups** | Last 3 vault snapshots at `~/.pushkey/vault_backup_*.enc` |
-| 📵 **No plaintext on disk** | Vault, config, and audit log all encrypted at rest |
-| 🙈 **`.gitignore` guard** | `inject` adds `.env` to `.gitignore` before writing, every time |
+| 📵 **No plaintext on disk** | Vault, config, and audit log all encrypted at rest. Project env files and the env-file backups below are plaintext by nature |
+| 🗂️ **Env file backups** | Before Pushkey changes a project env file it copies the old one to `~/.pushkey/env-backups/<project id>/` (newest 3 per file; folder `0700`, files `0600` on POSIX). These copies are plaintext, kept outside the project so they cannot be committed |
+| 🙈 **`.gitignore` guard** | Connecting or syncing a file lists that exact file in the project's `.gitignore` before writing, and refuses a file git already tracks |
 | 🌐 **Zero-knowledge cloud** | Server stores only ciphertext, no key material ever transmitted |
 
 > [!WARNING]
@@ -301,7 +323,8 @@ V2 and V1 vaults are auto-detected and migrated on first open, no action needed.
 ~/.pushkey/
 ├── 🔐 vault.enc          AES-256-GCM encrypted vault (V3)
 ├── 🧂 .salt              32-byte random salt  (chmod 600)
-├── ⚙️  config.json        AES-256-GCM encrypted project config
+├── ⚙️  config.json        AES-256-GCM encrypted config: the registered projects, keyed by folder path
+├── 🗂️  env-backups/       Plaintext copies of replaced env files (newest 3 each)
 ├── 📋 pushkey.log        Encrypted binary audit log
 ├── 📡 health.json        Public sidecar, health + timestamps, no secrets
 ├── 🪪 .license           AES-GCM encrypted tier token
@@ -347,6 +370,10 @@ pytest --cov=. --cov-report=term-missing
 | `test_key_rotation.py` | Rotation timestamps and history |
 | `test_env_injection.py` | `.env` merge, gitignore dedup |
 | `test_multi_project.py` | Project link/unlink |
+| `test_connect_core.py`, `test_connect_flow.py`, `test_connect_migrate.py` | Add-and-connect core: registry, preview, connect, sync, migration |
+| `test_cli_connect.py`, `test_local_api_connect.py`, `test_mcp_connect.py` | Add-and-connect in the CLI, local API and MCP server |
+| `test_desktop_projects.py`, `test_desktop_save.py` | Desktop add-and-connect screens and save safety |
+| `test_env_text.py`, `test_env_backups.py`, `test_projectfs.py`, `test_config_storage.py` | Env text, backups, safe project writes, config storage |
 | `test_provider_detection.py` | Provider pattern matching |
 | `test_providers.py` | `pushkey_providers` module, 20 tests |
 | `test_cli.py` | CLI commands, 26 tests |

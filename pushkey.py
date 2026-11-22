@@ -96,6 +96,9 @@ from pushkey_crypto import (
 )
 from pushkey_vault import migrate_vault_to_v3
 from pushkey_vault import load_vault, save_vault, load_config, save_config, replace_encrypted_vault_bytes, VaultBusyError
+from pushkey_vault import update_config, ConfigUnreadableError, VaultConflictError
+import pushkey_connect
+import pushkey_connect_migrate
 from pushkey_health import HealthSidecarError, HealthUnavailableError, read_health_sidecar, encode_health_document, publish_saved_vault
 from pushkey_tiers import (
     _LICENSE_CACHE, _LICENSE_GRACE_DAYS,
@@ -1124,16 +1127,20 @@ def _ensure_gitignore_env(project_dir: Path) -> None:
 
 
 def inject_env_file(project_path, vault, key_names=None, target_env="all"):
-    """Update .env surgically — only touch keys being written, preserve everything else."""
+    """Update .env surgically — only touch keys being written, preserve everything else.
+
+    ``key_names`` must name the keys to write: an empty list (or None) is refused
+    instead of meaning "every key".
+    """
     from pushkey_env import mutate_env_file
+
+    if not key_names:
+        raise ValueError("no keys given")
 
     def _env_match(key_env):
         return target_env == "all" or key_env == "all" or key_env == target_env
 
-    if key_names:
-        names = [k for k in key_names if k in vault and _env_match(vault[k].get("env", "all"))]
-    else:
-        names = [k for k, v in vault.items() if _env_match(v.get("env", "all"))]
+    names = [k for k in key_names if k in vault and _env_match(vault[k].get("env", "all"))]
     if not names:
         return True
     mutate_env_file(
@@ -1335,6 +1342,41 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
     if anchor:
         kw["anchor"] = anchor
     return ctk.CTkButton(parent, **kw)
+
+
+#: The project menu's last entry in the add-key window.
+_ADD_FOLDER_LABEL = "Add a project folder\u2026"
+
+
+#: Space left free around a dialog that is as big as the screen allows (taskbar, title bar).
+_SCREEN_MARGIN = 80
+
+
+def _clamp_to_screen(width, height, screen_width, screen_height, scale=1.0, margin=_SCREEN_MARGIN):
+    """``(width, height)`` cut to the screen minus ``margin`` real pixels.
+
+    ``width``/``height`` are window units (what ``geometry`` takes, which CTk multiplies by
+    ``scale``), so the screen limit is divided by ``scale`` too.
+    """
+    scale = scale or 1.0
+    return (min(width, int((screen_width - margin) / scale)),
+            min(height, int((screen_height - margin) / scale)))
+
+
+def _fit_window(win, width=None, min_height=0):
+    """Size a dialog to what is in it, at the current display scaling, never past the screen.
+
+    ``winfo_req*`` are real pixels while ``geometry``/``minsize`` of a CTkToplevel multiply by the
+    window scaling, so divide first (otherwise 125% scaling would be applied twice).
+    """
+    import math
+    win.update_idletasks()
+    scale = win._get_window_scaling()
+    w = max(int(width or 0), math.ceil(win.winfo_reqwidth() / scale))
+    h = max(int(min_height), math.ceil(win.winfo_reqheight() / scale))
+    w, h = _clamp_to_screen(w, h, win.winfo_screenwidth(), win.winfo_screenheight(), scale)
+    win.minsize(w, h)
+    win.geometry(f"{w}x{h}")
 
 
 def _parse_iso(s):
@@ -2014,17 +2056,18 @@ SECTION_HELP = {
     ),
     "projects": (
         "Projects",
-        "Link a folder on disk to keys in your vault.\n\n"
-        "Pushkey writes a .env file into the linked folder whenever you add "
-        "or rotate a matching key, so your code always has the latest values "
-        "without you copy-pasting.\n\n"
-        "• Browse → pick a folder → name auto-fills\n"
-        "• TARGET ENV filters which keys flow in (e.g. only PROD keys)\n"
-        "• ASSIGNED count shows how many keys flow into this project\n"
-        "• AUTO-MATCH AVAILABLE means Pushkey found candidates by name "
-        "but you haven't approved them yet — click Assign Keys\n"
-        "• Sync .env writes the file now; CI Sync pushes to GitHub/Vercel/Railway\n\n"
-        "Pushkey always adds .env to the project's .gitignore."
+        "Link a folder on disk, then choose which keys go into it.\n\n"
+        "Pushkey writes a key into a project only when you have connected that key "
+        "to the project. Nothing is written into a folder automatically.\n\n"
+        "• Browse → pick a folder → name fills in\n"
+        "• ENVIRONMENT is a label: Pushkey asks you to confirm before a key "
+        "from another environment is connected\n"
+        "• Assign Keys chooses which keys are connected to the folder\n"
+        "• Sync .env writes the connected keys into the project's env file now; "
+        "Pushkey also updates them when you add or rotate a connected key\n"
+        "• CI Sync pushes the connected keys to GitHub/Vercel/Railway\n"
+        "• Remove stops Pushkey managing the folder; files in it are not changed\n\n"
+        "Pushkey adds the env file to the project's .gitignore."
     ),
     "security": (
         "Security",
@@ -2160,7 +2203,259 @@ class RecoverySetupDialog(ctk.CTkToplevel):
                 self._err_lbl.configure(text="Failed to initialize vault — please try again")
             return
         self.destroy()
-        self._on_confirmed(self._password, {}, vault_key)
+        # The loaded vault (not a bare {}) carries the revision every later save needs.
+        self._on_confirmed(self._password, vault, vault_key)
+
+
+#: Config keys the shared project store owns; the desktop's own saves never write them.
+_PROJECT_OWNED_CONFIG_KEYS = ("projects", "projects_legacy", "connect_schema", "connect_notice", "last_project")
+
+
+_CONNECT_ERROR_TEXT = {
+    "project_exists": "That folder is already a project.",
+    "project_not_registered": "That folder is not a Pushkey project yet. Add it in Projects first.",
+    "migration_pending": "Pushkey is still updating your projects. Unlock Pushkey with your master password once, then try again.",
+    "var_taken": "Another key already writes to that variable in that file.",
+    "file_tracked_by_git": "That file is committed to git, so Pushkey will not write secrets into it.",
+    "vault_changed": "The vault changed in another Pushkey window or tool. Please try again.",
+    "vault_unavailable": "The vault could not be read. Please lock and unlock Pushkey.",
+    "key_not_found": "That key is not in your vault any more.",
+    "connection_not_found": "That key is not connected to this project any more.",
+    "invalid_var": "That is not a valid variable name.",
+    "invalid_env_file": "Pushkey will only write to .env files (for example .env or .env.local).",
+    "read_failed": "The env file could not be read.",
+    "backup_failed": "Pushkey could not back up the env file, so it did not change it.",
+    "confirmation_required": "This connection needs your confirmation first.",
+    "config_unreadable": "Your Pushkey settings file is unreadable. Please try again.",
+    "config_busy": "Your Pushkey settings file is busy. Please try again in a moment.",
+    "key_exists": "A key with that name already exists.",
+    "no_backup_key": "No backup key is stored for this key.",
+    "write_failed": "The env file could not be written.",
+}
+
+
+def _connect_error_text(error):
+    """Plain text for an error the connect core raises. Names only, never a value."""
+    code = getattr(error, "code", None)
+    if code is None:
+        code = str(error) or error.__class__.__name__
+    if code == "project_limit":
+        limit = (getattr(error, "detail", None) or {}).get("limit")
+        return ("You have reached the number of projects your plan includes"
+                + (f" ({limit})." if limit is not None else "."))
+    if code in _CONNECT_ERROR_TEXT:
+        return _CONNECT_ERROR_TEXT[code]
+    reason = getattr(error, "reason", None)  # a refused project path
+    if isinstance(reason, str) and reason:
+        return f"That folder cannot be used: {reason}."
+    return f"Pushkey could not do that ({code})."
+
+
+def _connect_confirm_text(name, needs, record, entry):
+    """Question shown before a connection that needs a confirmation. Names only."""
+    lines = []
+    if "env_mismatch" in needs:
+        key_env = (entry or {}).get("env") or "another environment"
+        lines.append(f"'{name}' is marked {key_env}, but this project is {record.get('environment') or 'dev'}.")
+    if "public_prefix" in needs:
+        lines.append(f"'{name}' would be written to a variable that frameworks publish in the browser, "
+                     "where anyone can read it.")
+    lines.append("Connect it anyway?")
+    return "\n\n".join(lines)
+
+
+_SYNC_STATE_TEXT = {
+    "up_to_date": "up to date",
+    "out_of_date": "will be updated",
+    "not_in_file": "will be added",
+    "file_missing": "the file will be created",
+    "folder_missing": "folder is missing",
+    "not_ignored": "will be added to .gitignore",
+    "not_written": "cannot be written",
+}
+
+
+def _same_folder(a, b):
+    """True when two path strings name the same folder (separators, case on Windows)."""
+    return (isinstance(a, str) and isinstance(b, str)
+            and os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b)))
+
+
+def _project_scan_roots(config):
+    """Folders of the registered projects that exist; the config key is the folder."""
+    return {path for path in pushkey_connect.registered_projects(config) if os.path.isdir(path)}
+
+
+def _merge_foreign_vault_entries(local_vault, incoming):
+    """Merge vault entries that came from outside this computer (a backup or a team export).
+
+    The values, notes and so on arrive, but ``projects`` and ``connections`` are folders
+    on the other machine: they never decide where a secret is written here. A key that
+    is new here arrives with both empty; a key that already exists keeps this computer's
+    own links. ``incoming`` is not changed.
+    """
+    for name, entry in incoming.items():
+        merged = dict(entry) if isinstance(entry, dict) else entry
+        if isinstance(merged, dict):
+            local = local_vault.get(name)
+            for field in ("projects", "connections"):
+                kept = local.get(field) if isinstance(local, dict) else None
+                merged[field] = kept if isinstance(kept, list) else []
+        local_vault[name] = merged
+
+
+def _project_connections(vault, path):
+    """``[(key name, connection)]`` for the connections that write into folder ``path``."""
+    rows = []
+    for name, entry in vault.items():
+        if not isinstance(entry, dict):
+            continue
+        for conn in entry.get("connections") or []:
+            if isinstance(conn, dict) and _same_folder(conn.get("project"), path):
+                rows.append((name, conn))
+    return rows
+
+
+#: What a shared-core call can raise that the desktop turns into a message.
+_CORE_ERRORS = (pushkey_connect.ConnectError, ConfigUnreadableError, VaultBusyError,
+                VaultConflictError, ValueError, OSError)
+
+
+_EXTRA_CONFIRM_TEXT = {
+    "env_mismatch": "This key is for another environment. Continue?",
+    "public_prefix": "This name is bundled into browser code. Continue?",
+}
+
+
+def _add_connect_default(has_suggestion, key_exists):
+    """Whether "Connect to a project" starts ticked: a suggested project, and a key that is new.
+
+    An existing key is a replacement: its connected files are updated anyway, and a new
+    connection must be asked for.
+    """
+    return bool(has_suggestion) and not key_exists
+
+
+def _used_in_rows(status_list):
+    """Rows of the USED IN block: ``(project name, file, variable, state, reason)`` per connection."""
+    return [(s.project_name, s.file, s.var, s.state, s.reason) for s in status_list]
+
+
+#: state -> (pill label, palette key, offers "Update now"); palette keys are the health pill colours.
+_USED_IN_STATE = {
+    "up_to_date": ("Up to date", "green", False),
+    "out_of_date": ("Out of date", "amber", True),
+    "not_in_file": ("Not in the file yet", "amber", True),
+    "not_ignored": ("Not in .gitignore", "amber", False),
+    "not_written": ("Not written", "red", True),
+    "file_missing": ("File missing", "red", False),
+    "folder_missing": ("Folder not on this computer", "red", False),
+}
+
+
+def _used_in_pill(state):
+    """``(pill label, palette key, offers 'Update now')`` for a connection state."""
+    return _USED_IN_STATE.get(state, ("Unknown", "text3", False))
+
+
+def _connect_preview_lines(preview):
+    """What a connect would do, in plain words: the core's exact line first, then the facts."""
+    lines = [preview.line]
+    if preview.change == "add":
+        lines.append(f"Adds {preview.var} to {preview.file}. The other lines stay as they are.")
+    elif preview.change == "replace":
+        lines.append(f"Replaces {preview.var} in {preview.file}. The other lines stay as they are.")
+    else:
+        lines.append(f"{preview.file} already holds this value.")
+    if preview.gitignore_change:
+        lines.append(f"{preview.file} will be added to .gitignore.")
+    else:
+        lines.append(f"{preview.file} is already ignored by git.")
+    for code in preview.needs_confirm:
+        text = _EXTRA_CONFIRM_TEXT.get(code)
+        if text:
+            lines.append(text.replace(" Continue?", " You will be asked to confirm."))
+    return lines
+
+
+def _sync_outcome_text(result):
+    """One result of a sync as a short phrase (never a value)."""
+    if result.reason is None:
+        return "Updated" if result.change != "none" else "Already up to date"
+    if result.reason == "folder_missing":
+        return "Skipped: folder not on this computer"
+    return _CONNECT_ERROR_TEXT.get(result.reason) or f"Could not be written ({result.reason})"
+
+
+def _sync_results_lines(results, registered):
+    """``(project name, file, outcome text, ok)`` per result of a sync; names only."""
+    rows = []
+    for result in results:
+        record = {}
+        for path, rec in registered.items():
+            if _same_folder(path, result.project):
+                record = rec
+                break
+        name = record.get("name") or Path(result.project).name or result.project
+        rows.append((name, result.file, _sync_outcome_text(result),
+                     result.reason in (None, "folder_missing")))
+    return rows
+
+
+def _connect_notice_view(notice, config, vault):
+    """What the migration notice modal shows, or None when there is nothing to show.
+
+    A dict: ``title``, ``intro``, ``rows`` (``(registry key, project name, "· N keys")``),
+    ``extras`` (one short paragraph per other list; names only) and ``footer``.
+    """
+    if not isinstance(notice, dict):
+        return None
+
+    def items(name):
+        value = notice.get(name)
+        return value if isinstance(value, list) else []
+
+    def pair(item):
+        return " / ".join(str(part) for part in item) if isinstance(item, (list, tuple)) else str(item)
+
+    nl = "\n"
+    registered = pushkey_connect.registered_projects(config or {})
+    rows = []
+    for path in (str(p) for p in items("every_key_projects")):
+        key = next((k for k in registered if _same_folder(k, path)), None)
+        name = (registered.get(key) or {}).get("name") or Path(path).name or path
+        count = len({k for k, _conn in _project_connections(vault or {}, key or path)})
+        rows.append((key or path, name, f"· {count} key{'s' if count != 1 else ''}"))
+    extras = []
+    if items("env_skipped"):
+        extras.append(
+            "These keys were not connected because their environment did not match "
+            "the project's (project / key):" + nl + nl.join(pair(i) for i in items("env_skipped")))
+    if items("unusable"):
+        extras.append(
+            "These projects have no usable folder and were not moved:"
+            + nl + nl.join(str(p) for p in items("unusable")))
+    if items("unregistered"):
+        extras.append(
+            "These keys allow a folder that is not a registered project (key / folder):"
+            + nl + nl.join(pair(i) for i in items("unregistered")))
+    if not rows and not extras:
+        return None
+    if rows:
+        none_yet = all(row[2] == "· 0 keys" for row in rows)
+        title = f"{len(rows)} project{'s' if len(rows) != 1 else ''} used to get every key"
+        tail = ({1: "This one has none yet:", 2: "These two have none yet:"}.get(len(rows), "These have none yet:")
+                if none_yet else "Check which keys each one gets:")
+        intro = ("Before this update, a project with no keys picked received every key in your vault. "
+                 "Now a project only gets the keys you connect to it. " + tail)
+        footer = ("Their .env files are not changed. "
+                  "This notice stays until you hide it, in the app, the web app and the CLI.")
+    else:
+        title = "Some projects need a look"
+        intro = "Some things could not be carried over when your projects were updated."
+        footer = ("No .env files were changed. "
+                  "This notice stays until you hide it, in the app, the web app and the CLI.")
+    return {"title": title, "intro": intro, "rows": rows, "extras": extras, "footer": footer}
 
 
 class AppFrame(ctk.CTkFrame):
@@ -2369,8 +2664,332 @@ class AppFrame(ctk.CTkFrame):
             delay += 250
 
     def save(self):
-        save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
-        save_config(self.config)
+        """Save the vault, then the desktop's own settings. True when the vault was saved.
+
+        Another Pushkey window or tool may have saved the vault since this one loaded
+        it. That is a conflict, not an error: the vault is reloaded from disk, the user
+        is told to repeat the last change, and nothing is written (False).
+        """
+        try:
+            save_vault_and_publish(self.vault, self.password, vault_key=getattr(self, 'vault_key', None))
+        except VaultConflictError:
+            self._reload_after_conflict()
+            return False
+        self._save_config()
+        return True
+
+    def _reload_after_conflict(self):
+        """Replace this window's vault with what is on disk (same dict, new revision)."""
+        try:
+            loaded = load_vault(self.password)
+            if not loaded:
+                raise RuntimeError("vault_reload_failed")
+            fresh, key = loaded
+            pushkey_connect.adopt_vault(self.vault, fresh)
+            self.vault_key = key
+        except Exception:
+            messagebox.showwarning(
+                "Pushkey", "The vault could not be reloaded. Please lock and unlock Pushkey.")
+            return
+        messagebox.showwarning(
+            "Pushkey",
+            "The vault changed in another Pushkey window or tool. "
+            "It has been reloaded; please repeat your last change.")
+        try:
+            self._invalidate_tabs("keys", "projects", "dashboard")
+        except Exception:
+            pass  # the vault is already reloaded; a stale screen is the lesser problem
+
+    def _save_config(self, *, quiet=False):
+        """Write the desktop's own settings without touching the project store.
+
+        Every key except the project-owned ones is copied into a fresh read of
+        config.json under the config lock, so projects registered by another Pushkey
+        tool survive. The project-owned keys of ``self.config`` are then refreshed from
+        what is on disk. True when saved; False (config in memory unchanged, one
+        warning unless ``quiet``) when config.json is unreadable or busy.
+        """
+        owned = _PROJECT_OWNED_CONFIG_KEYS
+        # One shallow snapshot (atomic under the GIL); the write is built from it, so a
+        # UI-thread change to self.config mid-save cannot break the scan.
+        snapshot = dict(self.config)
+        own = {k: v for k, v in snapshot.items() if k not in owned}
+
+        def mutate(on_disk):
+            on_disk.update(own)
+            return {k: on_disk[k] for k in owned if k in on_disk}
+
+        try:
+            from_disk = update_config(mutate)
+        except ConfigUnreadableError as error:
+            if not quiet:
+                messagebox.showwarning(
+                    "Pushkey", f"Settings could not be saved: {error or 'config_unreadable'}")
+            return False
+        # Assign key by key from the disk copy. Never pop then restore: the UI thread
+        # reads self.config["projects"] directly and must never find it missing.
+        for k in owned:
+            if k in from_disk:
+                self.config[k] = from_disk[k]
+            else:
+                self.config.pop(k, None)
+        return True
+
+    # ── Shared project store (pushkey_connect) ───────────────────
+
+    def _core_args(self):
+        """Credentials every shared-core call gets: this session's key, password and vault."""
+        return {"vault_key": getattr(self, "vault_key", None), "password": self.password,
+                "target": self.vault}
+
+    def _reload_config(self):
+        """Refresh the project-owned config keys from disk after a core call.
+
+        Assigned key by key (never pop-then-restore) so the UI thread never finds
+        ``projects`` missing; the desktop's own settings in memory are left alone.
+        """
+        try:
+            fresh = load_config(strict=True)
+        except Exception as error:
+            # An unreadable file is not an empty one: keep the project data in memory as it is.
+            log_event(f"config unreadable, project data kept from memory ({error or 'config_unreadable'})")
+            return
+        for k in _PROJECT_OWNED_CONFIG_KEYS:
+            if k in fresh:
+                self.config[k] = fresh[k]
+            else:
+                self.config.pop(k, None)
+
+    def _run_sync(self, **selector):
+        """``sync`` through the shared core: ``(projects written, error texts, keys written)``.
+
+        ``selector`` is ``key_name=``, ``key_names=`` or ``project=``. Only keys that
+        have connections are written; a core refusal comes back as one error text.
+        """
+        results, error = self._sync_results(**selector)
+        if error is not None:
+            return 0, [error], []
+        projects, keys, errors = set(), [], []
+        for result in results:
+            if result.reason is None:
+                projects.add(result.project)
+                keys.append(result.key)
+            elif result.reason != "folder_missing":
+                label = Path(result.project).name or result.project
+                text = _CONNECT_ERROR_TEXT.get(result.reason) or f"could not be written ({result.reason})"
+                errors.append(f"{label}: {text}")
+        return len(projects), errors, keys
+
+    def _sync_results(self, **selector):
+        """``sync`` through the shared core: ``(results, error text or None)``.
+
+        ``selector`` is ``key_name=``, ``key_names=`` or ``project=`` (``key_name`` and
+        ``project`` together limit it to one connection's project). A core refusal comes
+        back as the error text, with no results.
+        """
+        try:
+            results = pushkey_connect.sync(actor="desktop", **selector, **self._core_args())
+        except _CORE_ERRORS as error:
+            return [], _connect_error_text(error)
+        self._reload_config()
+        return results, None
+
+    def _show_sync_results(self, title, headline, results, error=None):
+        """One dialog: ``headline``, then a line per file Pushkey wrote (project, file, outcome).
+
+        Names and outcomes only, never a value. A warning when anything failed.
+        """
+        registered = pushkey_connect.registered_projects(self.config)
+        lines = [headline]
+        good = error is None
+        rows = _sync_results_lines(results, registered)
+        if rows:
+            lines.append("")
+            for name, file, outcome, ok in rows:
+                lines.append(f"{name}: {file} - {outcome}")
+                good = good and ok
+        if error is not None:
+            lines += ["", f"The connected files were not updated. {error}"]
+        (messagebox.showinfo if good else messagebox.showwarning)(title, "\n".join(lines))
+
+    def _stamp_written(self, key_name, results):
+        """Record the first/last use of ``key_name`` when a sync wrote its value somewhere."""
+        if any(r.reason is None and r.key == key_name for r in results):
+            self._stamp_keys_used([key_name])
+
+    def _add_wants_connection(self):
+        """True when the add-key window's "Connect to a project" box is ticked."""
+        box = getattr(self, "add_conn_on", None)
+        return bool(box is not None and box.get())
+
+    def _add_connection_choice(self):
+        """``(project path, file, variable)`` the add-key window has chosen, or None if incomplete."""
+        label = self.add_conn_project.get()
+        path = getattr(self, "_add_conn_paths", {}).get(label)
+        file = (self.add_conn_file.get() or "").strip()
+        var = (self.add_conn_var.get() or "").strip()
+        if not (path and file and var):
+            return None
+        return path, file, var
+
+    def _submit_add_key(self, win):
+        """The add-key window's Save action: closes ``win`` only when the key was saved."""
+        saved = self.add_key()
+        if saved:
+            win.destroy()
+        return saved
+
+    def _register_folder_for_add(self, folder):
+        """Register ``folder`` as a project from the add-key window; its path, or None."""
+        if not folder:
+            return None
+        try:
+            canonical, _record = pushkey_connect.register_project(folder)
+        except pushkey_connect.ConnectError as error:
+            self._reload_config()
+            if error.code == "project_limit":
+                # The plan's upgrade prompt; it returns True only if there is room after all.
+                if not self._gate("max_projects", len(pushkey_connect.registered_projects(self.config))):
+                    return None
+            messagebox.showwarning("Project not added", _connect_error_text(error))
+            return None
+        except (ConfigUnreadableError, ValueError, OSError) as error:
+            messagebox.showerror("Project not added", _connect_error_text(error))
+            return None
+        self._reload_config()
+        self._invalidate_tabs("projects", "dashboard")
+        return canonical
+
+    def _project_label(self, path):
+        """The registered name of project folder ``path`` (its folder name when it has none)."""
+        registered = pushkey_connect.registered_projects(self.config)
+        record = registered.get(path)
+        if record is None:
+            record = next((rec for key, rec in registered.items() if _same_folder(key, path)), None)
+        return (record or {}).get("name") or Path(path).name or path
+
+    def _used_in_update_now(self, key, project):
+        """USED IN "Update now": rewrite this key's connections in one project."""
+        label = self._project_label(project)
+        results, error = self._sync_results(key_name=key, project=project)
+        self._stamp_written(key, results)
+        self._invalidate_tabs("keys", "projects", "dashboard")
+        self._render_key_rows()
+        self._show_sync_results("Update now", f"'{key}' in {label}", results, error)
+
+    def _used_in_disconnect(self, key, project, file, var):
+        """USED IN "Disconnect": stop writing a key to one file; the line in the file stays."""
+        label = self._project_label(project)
+        if not messagebox.askyesno(
+                "Disconnect?",
+                f"Stop writing '{key}' to {file} in {label}?\n\n"
+                f"The line in {file} is left as it is. Pushkey just stops updating it."):
+            return
+        try:
+            pushkey_connect.disconnect(
+                key_name=key, project=project, file=file, var=var, remove_line=False,
+                actor="desktop", **self._core_args())
+        except pushkey_connect.ConnectError as error:
+            if error.code != "connection_not_found":  # already gone: nothing to undo
+                messagebox.showerror("Not disconnected", _connect_error_text(error))
+        except _CORE_ERRORS as error:
+            messagebox.showerror("Not disconnected", _connect_error_text(error))
+        self._reload_config()
+        self._invalidate_tabs("keys", "projects", "dashboard")
+        self._render_key_rows()
+
+    def _apply_project_assignment(self, path, selected):
+        """Make the keys in ``selected`` the keys connected to project ``path``.
+
+        New ones go through ``connect(write=False)`` (nothing is written to a file;
+        Sync .env does that), the ones no longer selected through ``disconnect``. A
+        connection that needs confirmation (another environment, a browser-bundled
+        variable) asks first. Returns ``{"added", "removed", "declined", "errors"}``.
+        """
+        record = pushkey_connect.registered_projects(self.config).get(path) or {}
+        default_file = record.get("default_file") or ".env"
+        wanted = {name for name in selected if name in self.vault}
+        current = {}
+        for name, conn in _project_connections(self.vault, path):
+            if conn.get("file") == default_file and conn.get("var") == name:
+                current[name] = conn
+        outcome = {"added": [], "removed": [], "declined": [], "errors": []}
+        known_errors = (pushkey_connect.ConnectError, ConfigUnreadableError, ValueError, OSError)
+        core = self._core_args()
+        for name in sorted(wanted - set(current)):
+            confirmed = ()
+            while True:
+                try:
+                    pushkey_connect.connect(
+                        key_name=name, project=path, write=False, confirmed=confirmed,
+                        actor="desktop", **core)
+                    outcome["added"].append(name)
+                except pushkey_connect.ConnectError as error:
+                    needs = error.detail.get("needs") or []
+                    if error.code == "confirmation_required" and needs and not confirmed:
+                        if messagebox.askyesno(
+                                "Connect anyway?", _connect_confirm_text(name, needs, record,
+                                                                          self.vault.get(name))):
+                            confirmed = tuple(needs)
+                            continue
+                        outcome["declined"].append(name)
+                    else:
+                        outcome["errors"].append(f"{name}: {_connect_error_text(error)}")
+                except known_errors as error:
+                    outcome["errors"].append(f"{name}: {_connect_error_text(error)}")
+                break
+        for name in sorted(set(current) - wanted):
+            conn = current[name]
+            try:
+                pushkey_connect.disconnect(
+                    key_name=name, project=path, file=conn["file"], var=conn["var"],
+                    actor="desktop", **core)
+                outcome["removed"].append(name)
+            except pushkey_connect.ConnectError as error:
+                if error.code == "connection_not_found":
+                    outcome["removed"].append(name)  # already gone
+                else:
+                    outcome["errors"].append(f"{name}: {_connect_error_text(error)}")
+            except known_errors as error:
+                outcome["errors"].append(f"{name}: {_connect_error_text(error)}")
+        self._reload_config()
+        self._invalidate_tabs("projects", "keys", "dashboard")
+        return outcome
+
+    def _save_ci_fields(self, path, platform, creds):
+        """Keep the non-secret CI fields on project ``path``'s record (never a token)."""
+        fields = {k: v for k, v in creds.items()
+                  if not any(word in k.lower() for word in ("token", "secret", "password"))}
+        fields["ci_platform"] = platform
+        return self._update_project_record(path, fields)
+
+    def _try_update_project_record(self, path, fields):
+        """Set extra fields on one registered project's record (``update_config`` on that record).
+
+        Never a whole-config save. Returns ``(saved, error code or None)``: a project that
+        is no longer registered gives ``(False, "project_not_registered")``.
+        """
+
+        def mutate(config):
+            record = (config.get("projects") or {}).get(path)
+            if not isinstance(record, dict):
+                return False
+            record.update(fields)
+            return True
+
+        try:
+            saved = update_config(mutate)
+        except (ConfigUnreadableError, OSError) as error:
+            return False, str(error) or "config_unreadable"
+        self._reload_config()
+        return saved, (None if saved else "project_not_registered")
+
+    def _update_project_record(self, path, fields):
+        """``_try_update_project_record`` with a warning when the write failed. True when saved."""
+        saved, code = self._try_update_project_record(path, fields)
+        if not saved and code != "project_not_registered":
+            messagebox.showwarning("Pushkey", f"Settings could not be saved: {code}")
+        return saved
 
     def _schedule_health_refresh(self):
         if not self.winfo_exists():
@@ -2443,7 +3062,7 @@ class AppFrame(ctk.CTkFrame):
         new_mode = "light" if _CURRENT_THEME == "dark" else "dark"
         set_theme(new_mode)
         self.config["theme"] = new_mode
-        save_config(self.config)
+        self._save_config()
         if self.app is not None:
             # Full rebuild on theme switch. The earlier in-place recolor
             # only re-skinned the major chrome containers and left every
@@ -2451,8 +3070,8 @@ class AppFrame(ctk.CTkFrame):
             # top bar stayed white in dark mode and white lines bled
             # through. Rebuilding the AppFrame guarantees every widget
             # picks up the new C palette consistently.
-            pw, vault = self.password, self.vault
-            self.master.after(0, lambda: self.app.reload_app(pw, vault))
+            pw, vault, vault_key = self.password, self.vault, self.vault_key
+            self.master.after(0, lambda: self.app.reload_app(pw, vault, vault_key))
         else:
             self._theme_btn.configure(text="☀" if new_mode == "dark" else "☾")
 
@@ -2615,7 +3234,7 @@ class AppFrame(ctk.CTkFrame):
 
             def _on_toggle():
                 self.config[cfg_key] = var.get()
-                save_config(self.config)
+                self._save_config()
 
             ctk.CTkSwitch(row, text="", variable=var, command=_on_toggle,
                           width=44, height=22,
@@ -2831,8 +3450,7 @@ class AppFrame(ctk.CTkFrame):
                 status_lbl.configure(text="Paste your new key value above")
                 return
             win.destroy()
-            self._apply_rotation(name, val)
-            self._invalidate_tabs("dashboard", "keys", "timeline")
+            self._apply_rotation(name, val, skip_empty_dialog=True)
             if remaining:
                 self.after(300, lambda: self._prompt_rotation_queue(remaining))
 
@@ -3103,7 +3721,7 @@ class AppFrame(ctk.CTkFrame):
             # Persist non-secret settings
             self.config.setdefault("sso_settings", {}).update(
                 {"provider": p, "client_id": client_id, "issuer": issuer})
-            save_config(self.config)
+            self._save_config()
 
             status_lbl.configure(text="Starting device flow…", text_color=C["amber"])
             win.update()
@@ -3180,7 +3798,7 @@ class AppFrame(ctk.CTkFrame):
             # write-loss this guards against.
             cloud_cfg = self.config.setdefault("cloud", {})
             cloud_cfg["conflict_etag"] = conflict.current_etag
-            save_config(self.config)
+            self._save_config(quiet=silent)
             if not silent:
                 raise RuntimeError(
                     "Cloud sync conflict: the vault was changed on another "
@@ -3191,7 +3809,7 @@ class AppFrame(ctk.CTkFrame):
         cloud_cfg["last_synced"] = datetime.now().isoformat()
         cloud_cfg["etag"] = etag
         cloud_cfg.pop("conflict_etag", None)
-        save_config(self.config)
+        self._save_config(quiet=silent)
 
     # ── Cloud tab renderer ────────────────────────────────────────
     def render_cloud(self):
@@ -3267,7 +3885,7 @@ class AppFrame(ctk.CTkFrame):
                 "endpoint": entries["endpoint"].get().strip(),
                 "token":    entries["token"].get().strip(),
             })
-            save_config(self.config)
+            self._save_config()
             status_lbl.configure(text="Settings saved.", text_color=C["green"])
 
         btn_row = ctk.CTkFrame(pad, fg_color="transparent")
@@ -3709,7 +4327,8 @@ class AppFrame(ctk.CTkFrame):
             for k, key_data in team_vault.items():
                 if k in permissions:
                     key_data["_rbac"] = permissions[k]
-            self.vault.update(team_vault)
+            # Another person's project links are folders on their machine: not trusted here.
+            _merge_foreign_vault_entries(self.vault, team_vault)
             self.save()
             self._invalidate_tabs("dashboard", "keys", "timeline")
             win.destroy()
@@ -3748,15 +4367,15 @@ class AppFrame(ctk.CTkFrame):
             messagebox.showerror("Failed", "Could not decrypt. Wrong password or corrupted file.")
             return
         imported_vault = data.get("vault", {})
-        imported_config = data.get("config", {})
         new_keys = [k for k in imported_vault if k not in self.vault]
         updated = [k for k in imported_vault if k in self.vault and imported_vault[k]["value"] != self.vault[k]["value"]]
         if not messagebox.askyesno("Import", f"Found {len(imported_vault)} keys.\n{len(new_keys)} new, {len(updated)} different.\n\nMerge into current vault?"):
             return
-        self.vault.update(imported_vault)
-        for proj, info in imported_config.get("projects", {}).items():
-            if proj not in self.config.get("projects", {}):
-                self.config.setdefault("projects", {})[proj] = info
+        # The backup's project links are paths from the machine it was made on: a new key
+        # arrives with none, a key this computer has keeps its own.
+        _merge_foreign_vault_entries(self.vault, imported_vault)
+        # The backup's project list is not merged: projects are registered here, on
+        # this computer, through the shared project store.
         self.save()
         self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Imported", f"Merged {len(new_keys)} new + {len(updated)} updated keys.")
@@ -3921,10 +4540,7 @@ class AppFrame(ctk.CTkFrame):
         env = info.get("env", "all")
         rotation_count = info.get("rotation_count", 0)
         # Project count — how many linked projects reference this key name
-        proj_count = sum(
-            1 for p in self.config.get("projects", {}).values()
-            if name in (p.get("keys") or [])
-        )
+        proj_count = len(info.get("projects") or [])
         # Age in days
         age_days = (datetime.now() - created_dt).days if created_dt else None
 
@@ -4627,7 +5243,7 @@ class AppFrame(ctk.CTkFrame):
         healthy  = sum(1 for _, v in real_keys if health_status(v) == "healthy")
         warning  = sum(1 for _, v in real_keys if health_status(v) == "warning")
         critical = sum(1 for _, v in real_keys if health_status(v) == "critical")
-        projects = len(self.config.get("projects", {}))
+        projects = len(pushkey_connect.registered_projects(self.config))
         key_limit = tier_limits().get("max_keys")
 
         # ── Page header ──
@@ -5409,9 +6025,6 @@ class AppFrame(ctk.CTkFrame):
         rotated_ts = info.get("rotated", "")
         val        = info["value"]
         revealed   = name in self.revealed
-        raw_projs  = info.get("projects", [])
-        projects   = [p.get("name", str(p)) if isinstance(p, dict) else str(p)
-                      for p in raw_projs]
 
         if rotated_ts:
             try:
@@ -5485,19 +6098,6 @@ class AppFrame(ctk.CTkFrame):
         _meta_cell(1, 0, "CREATED", created)
         _meta_cell(1, 1, "ROTATED", rotated_str, rotated_col)
 
-        # Project tags
-        if projects:
-            ctk.CTkLabel(left, text="PROJECTS", font=(_UI_FONT, 9, "bold"),
-                         text_color=C["text3"]).pack(anchor="w", pady=(2, 2))
-            pills_row = ctk.CTkFrame(left, fg_color="transparent")
-            pills_row.pack(fill="x")
-            for proj in projects[:6]:
-                tag = ctk.CTkFrame(pills_row, fg_color=C["bg3"], corner_radius=10,
-                                   border_width=1, border_color=C["border2"])
-                tag.pack(side="left", padx=(0, 4), pady=1)
-                ctk.CTkLabel(tag, text=proj, font=(_UI_FONT, 9),
-                             text_color=C["accent"]).pack(padx=6, pady=1)
-
         # Vertical divider
         ctk.CTkFrame(body, fg_color=C["border"], width=1,
                      corner_radius=0).pack(side="left", fill="y", pady=8)
@@ -5556,13 +6156,79 @@ class AppFrame(ctk.CTkFrame):
                  fg_color=C["red_bg"], text_color=C["red"],
                  width=126, height=28, border=False).pack(fill="x")
 
+        # USED IN: where this key is written, full width under both panes
+        self._render_used_in(inner_bg, name)
+
         # Inline rotation sub-panel (if pending)
         if self._rotate_pending and self._expanded_key == name:
             self._render_rotate_subpanel(inner_bg, name)
 
+    def _render_used_in(self, parent, name):
+        """USED IN: one row per connection of key ``name`` (project, file, variable, state, actions)."""
+        used = ctk.CTkFrame(parent, fg_color="transparent")
+        used.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(used, text="USED IN", font=(_UI_FONT, 9, "bold"),
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 4))
+        try:
+            statuses = pushkey_connect.status(self.vault, self.config, key_name=name)
+        except Exception:
+            ctk.CTkLabel(used, text="Could not read this key's projects", font=FONT_XS,
+                         text_color=C["text3"], anchor="w").pack(anchor="w")
+            return
+        rows = _used_in_rows(statuses)
+        if not rows:
+            ctk.CTkLabel(
+                used, text="Not used in any project yet. Connect it from Add or the project's Keys screen.",
+                font=FONT_XS, text_color=C["text3"], anchor="w").pack(anchor="w")
+            return
+        tints = {"green": C["green_bg"], "amber": C["amber_bg"], "red": C["red_bg"]}
+        for status, (proj_name, file, var, state, reason) in zip(statuses, rows):
+            label, colour, can_update = _used_in_pill(state)
+            row = ctk.CTkFrame(used, fg_color=C["bg3"], corner_radius=4, border_width=1,
+                               border_color=C["border"])
+            row.pack(fill="x", pady=2)
+            row.columnconfigure(2, weight=1)
+            ctk.CTkLabel(row, text=proj_name, font=(_UI_FONT, 11, "bold"), text_color=C["text"],
+                         anchor="w", width=100).grid(row=0, column=0, sticky="w", padx=(10, 6), pady=(6, 0 if reason else 6))
+            ctk.CTkLabel(row, text=file, font=(_MONO_FONT, 10), text_color=C["text2"],
+                         anchor="w", width=150).grid(row=0, column=1, sticky="w", padx=6, pady=(6, 0 if reason else 6))
+            ctk.CTkLabel(row, text=var, font=(_MONO_FONT, 10), text_color=C["text2"],
+                         anchor="w").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 0 if reason else 6))
+            pill = ctk.CTkFrame(row, fg_color=tints.get(colour, C["bg4"]), corner_radius=10,
+                                border_width=1, border_color=C[colour])
+            pill.grid(row=0, column=3, sticky="e", padx=6, pady=(6, 0 if reason else 6))
+            ctk.CTkLabel(pill, text=label, font=(_UI_FONT, 9, "bold"),
+                         text_color=C[colour]).pack(padx=8, pady=1)
+            actions = ctk.CTkFrame(row, fg_color="transparent")
+            actions.grid(row=0, column=4, sticky="e", padx=(6, 8), pady=(6, 0 if reason else 6))
+            if can_update:
+                make_btn(actions, "Update now",
+                         lambda k=name, p=status.project: self._used_in_update_now(k, p),
+                         fg_color="transparent", text_color=C["accent"], width=84, height=24
+                         ).pack(side="left", padx=(0, 4))
+            make_btn(actions, "Disconnect",
+                     lambda k=name, s=status: self._used_in_disconnect(k, s.project, s.file, s.var),
+                     fg_color="transparent", text_color=C["text3"], width=84, height=24
+                     ).pack(side="left")
+            if reason:
+                ctk.CTkLabel(row, text=_CONNECT_ERROR_TEXT.get(reason) or reason, font=FONT_XS,
+                             text_color=C["text3"], anchor="w", justify="left", wraplength=640
+                             ).grid(row=1, column=0, columnspan=5, sticky="w", padx=10, pady=(0, 6))
+
     def _inline_inject(self, name: str):
-        self._auto_inject_key(name)
+        entry = self.vault.get(name)
+        if not (isinstance(entry, dict) and entry.get("connections")):
+            messagebox.showinfo(
+                "Not connected",
+                f"'{name}' is not connected to any project yet.\n\n"
+                "Open Projects, choose Assign Keys on a project and tick this key.")
+            return
+        count, errors = self._auto_inject_key(name)
         self._invalidate_tabs("dashboard", "keys", "timeline")
+        if errors:
+            messagebox.showwarning("Sync finished with problems", "\n".join(errors))
+        else:
+            messagebox.showinfo("Synced", f"'{name}' written to {count} project(s).")
 
     # ── Dual-rotation handlers ─────────────────────────────────────────────────
 
@@ -5629,7 +6295,7 @@ class AppFrame(ctk.CTkFrame):
                  width=80, height=32).pack(side="left", padx=4)
 
     def _promote_backup_key(self, name: str):
-        """Atomically rotate active→backup, clear backup slot, prompt to add new backup."""
+        """Make the stored backup key the active one, then rewrite the key's connected files."""
         info = self.vault.get(name, {})
         if not info.get("dual_rotation") or not info.get("next_value"):
             messagebox.showerror("Error", "No backup key stored for this key.")
@@ -5637,27 +6303,38 @@ class AppFrame(ctk.CTkFrame):
         if not messagebox.askyesno(
             "Promote Backup Key",
             f"Promote the backup key to active for '{name}'?\n\n"
-            "• Active key will be discarded from Pushkey\n"
-            "• Backup key becomes the new active value\n"
-            "• Backup slot will be empty (you'll need to add a new backup)\n\n"
+            "\u2022 The backup key becomes the new active value\n"
+            "\u2022 The old active value moves to this key's history\n"
+            "\u2022 Backup slot will be empty (you'll need to add a new backup)\n"
+            "\u2022 Every file this key is connected to is updated\n\n"
             "After confirming, revoke the OLD key at your provider dashboard.",
         ):
             return
-        old_value = self.vault[name]["value"]
-        self.vault[name]["value"] = self.vault[name]["next_value"]
-        self.vault[name]["rotated"] = datetime.now().strftime("%Y-%m-%d")
-        self.vault[name]["next_value"] = None
-        self.vault[name]["next_added"] = None
-        self.save()
+
+        def mutate(fresh):
+            entry = fresh.get(name)
+            if not isinstance(entry, dict) or not entry.get("dual_rotation") or not entry.get("next_value"):
+                raise pushkey_connect.ConnectError("no_backup_key", {"key": name})
+            pushkey_connect.replace_value(entry, entry["next_value"])
+            entry["next_value"] = None
+            entry["next_added"] = None
+
+        try:
+            pushkey_connect.commit(mutate, **self._core_args())
+        except _CORE_ERRORS as error:
+            messagebox.showerror("Not promoted", f"'{name}' was not changed. {_connect_error_text(error)}")
+            return
         log_event(f"backup promoted to active: {name}")
-        self._invalidate_tabs("keys", "dashboard", "timeline")
+        results, error = self._sync_results(key_name=name)
+        self._stamp_written(name, results)
+        self._invalidate_tabs("keys", "dashboard", "timeline", "projects")
         self._render_key_rows()
-        messagebox.showinfo(
+        self._show_sync_results(
             "Rotation Complete",
             f"'{name}' rotated to backup key.\n\n"
             "Next step: revoke the old key at your provider,\n"
             "then add a new backup key to maintain the rotation cycle.",
-        )
+            results, error)
 
     def _show_rotate_subpanel(self, name: str):
         self._rotate_pending = True
@@ -5668,6 +6345,18 @@ class AppFrame(ctk.CTkFrame):
         self._rotate_pending = False
         self._rotate_result = None
         self._render_key_rows()
+
+    def _inline_rotate(self, name, new_val):
+        """The inline strip's Confirm: the green "Rotated" strip only after the value was saved.
+
+        On a refused save the error dialog is already up; the input stays for another try.
+        """
+        if not self._apply_rotation(name, new_val, skip_empty_dialog=True):
+            return False
+        self._rotate_pending = False
+        self._rotate_result = new_val
+        self._render_key_rows()
+        return True
 
     def _render_rotate_subpanel(self, parent_frame, name: str):
         if self._rotate_result is not None:
@@ -5728,10 +6417,7 @@ class AppFrame(ctk.CTkFrame):
             new_val = inp_var.get().strip()
             if not new_val:
                 return
-            self._apply_rotation(n, new_val)
-            self._rotate_pending = False
-            self._rotate_result = new_val
-            self._render_key_rows()
+            self._inline_rotate(n, new_val)
 
         def _cancel():
             self._rotate_pending = False
@@ -5775,36 +6461,54 @@ class AppFrame(ctk.CTkFrame):
     def _show_add_key_modal(self):
         win = ctk.CTkToplevel(self)
         win.title("New Key")
-        win.geometry("520x360")
+        win.geometry("900x520")  # replaced by _fit_window once the content is built
         win.configure(fg_color=C["bg2"])
         win.transient(self)
         win.grab_set()
         win.lift()
+        self._add_win = win
+        self._add_conn_touched = False   # the user ticked / unticked "Connect to a project"
+        self._add_conn_picked = False    # the user chose a project from the menu
+        self._add_conn_job = None
+        self._add_conn_last_label = ""
+        self._add_conn_var_list = None
+        self._add_conn_height = None
+        self._add_conn_paths = {}
 
         ctk.CTkLabel(win, text="Add New Key", font=FONT_H2,
-                     text_color=C["text"]).pack(anchor="w", padx=24, pady=(20, 16))
+                     text_color=C["text"]).pack(anchor="w", padx=24, pady=(20, 14))
+
+        # Two columns, as in the mockup: the key on the left, "Connect to a project" on the right.
+        top = ctk.CTkFrame(win, fg_color="transparent")
+        top.pack(fill="x", padx=24)
+        top.columnconfigure(0, weight=1, uniform="addtop")
+        top.columnconfigure(1, weight=1, uniform="addtop")
+        left = ctk.CTkFrame(top, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="new", padx=(0, 12))
+        right = ctk.CTkFrame(top, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="new", padx=(12, 0))
 
         def field(parent, label, widget_fn):
             f = ctk.CTkFrame(parent, fg_color="transparent")
-            f.pack(fill="x", padx=24, pady=(0, 10))
+            f.pack(fill="x", pady=(0, 10))
             ctk.CTkLabel(f, text=label, font=FONT_XS,
                          text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
             return widget_fn(f)
 
-        self.add_name = field(win, "KEY NAME", lambda p: ctk.CTkEntry(
+        self.add_name = field(left, "KEY NAME", lambda p: ctk.CTkEntry(
             p, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
             border_color=C["border2"], placeholder_text="OPENAI_API_KEY",
         ))
         self.add_name.pack(fill="x", ipady=4)
 
-        self.add_value = field(win, "VALUE", lambda p: ctk.CTkEntry(
+        self.add_value = field(left, "VALUE", lambda p: ctk.CTkEntry(
             p, font=FONT_MONO_SM, fg_color=C["bg3"], text_color=C["text"],
             border_color=C["border2"], show="●", placeholder_text="sk-...",
         ))
         self.add_value.pack(fill="x", ipady=4)
 
-        row2 = ctk.CTkFrame(win, fg_color="transparent")
-        row2.pack(fill="x", padx=24, pady=(0, 10))
+        row2 = ctk.CTkFrame(left, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 10))
 
         cf = ctk.CTkFrame(row2, fg_color="transparent")
         cf.pack(side="left", padx=(0, 12), fill="x", expand=True)
@@ -5827,24 +6531,270 @@ class AppFrame(ctk.CTkFrame):
             ef, values=ENV_LEVELS,
             fg_color=C["bg3"], button_color=C["bg4"],
             button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_XS,
+            command=lambda _choice: self._schedule_add_connect_refresh(0),
         )
         self.add_env.set("all")
         self.add_env.pack(fill="x")
 
+        self._build_add_connect_section(right)
+
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
-        btn_row.pack(fill="x", padx=24, pady=(4, 0))
-        make_btn(btn_row, "Add Key", lambda: (self.add_key(), win.destroy()),
-                 fg_color=C["accent"], text_color=C["bg"],
-                 height=36).pack(side="left", padx=(0, 8))
+        btn_row.pack(fill="x", padx=24, pady=(6, 20))
+        self._add_save_btn = make_btn(btn_row, "Save", lambda: self._submit_add_key(win),
+                                      fg_color=C["accent"], text_color=C["bg"], height=36)
+        self._add_save_btn.pack(side="left", padx=(0, 8))
         make_btn(btn_row, "Cancel", win.destroy,
                  fg_color=C["btn"], text_color=C["text2"],
                  height=36).pack(side="left")
 
         self.add_name.focus_set()
         self.add_name.bind("<Return>", lambda e: self.add_value.focus_set())
-        self.add_value.bind("<Return>", lambda e: (self.add_key(), win.destroy()))
+        self.add_value.bind("<Return>", lambda e: self._submit_add_key(win))
+        self.add_name.bind("<KeyRelease>", lambda e: self._schedule_add_connect_refresh(), add="+")
+        self.add_value.bind("<KeyRelease>", lambda e: self._schedule_add_connect_refresh(), add="+")
+        self._refresh_add_connect()
+
+    # ── Add-key window: "Connect to a project" ────────────────────
+
+    def _build_add_connect_section(self, parent):
+        card = ctk.CTkFrame(parent, fg_color=C["surface"], corner_radius=8,
+                            border_width=1, border_color=C["border"])
+        card.pack(fill="x")
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=14, pady=(10, 4))
+        self.add_conn_on = ctk.CTkCheckBox(
+            head, text="Connect to a project", font=FONT_H3, text_color=C["text"],
+            fg_color=C["accent"], hover_color=C["accent2"], border_color=C["border2"],
+            checkmark_color=C["bg"], command=self._on_add_conn_toggle)
+        self.add_conn_on.pack(side="left")
+        self._add_conn_note = ctk.CTkLabel(
+            card, text="Saved in the vault only. Nothing is written to a project.",
+            font=FONT_XS, text_color=C["text3"], anchor="w")
+        body = self._add_conn_body = ctk.CTkFrame(card, fg_color="transparent")
+
+        cols = ctk.CTkFrame(body, fg_color="transparent")
+        cols.pack(fill="x", padx=14)
+        cols.columnconfigure(0, weight=1, uniform="addcols")
+        cols.columnconfigure(1, weight=1, uniform="addcols")
+
+        pf = ctk.CTkFrame(cols, fg_color="transparent")
+        pf.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        ctk.CTkLabel(pf, text="PROJECT", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+        self.add_conn_project = ctk.CTkOptionMenu(
+            pf, values=[_ADD_FOLDER_LABEL], command=self._on_add_conn_project, dynamic_resizing=False,
+            fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
+            text_color=C["text"], font=FONT_XS)
+        self.add_conn_project.pack(fill="x")
+        self._add_proj_hint = ctk.CTkLabel(pf, text="", font=FONT_XS, text_color=C["text3"],
+                                           anchor="w", justify="left", wraplength=170)
+        self._add_proj_hint.pack(anchor="w", pady=(2, 0))
+
+        self._add_file_col = ctk.CTkFrame(cols, fg_color="transparent")
+        self._add_file_col.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        ctk.CTkLabel(self._add_file_col, text="FILE IN THE PROJECT", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(0, 3))
+        self.add_conn_file = ctk.CTkOptionMenu(
+            self._add_file_col, values=[".env"], command=lambda _v: self._refresh_add_connect(),
+            dynamic_resizing=False, fg_color=C["bg3"], button_color=C["bg4"],
+            button_hover_color=C["btn_hover"], text_color=C["text"], font=FONT_MONO_SM)
+        self.add_conn_file.pack(fill="x")
+        self._add_file_hint = ctk.CTkLabel(self._add_file_col, text="", font=FONT_XS, text_color=C["text3"],
+                                           anchor="w", justify="left", wraplength=170)
+        self._add_file_hint.pack(anchor="w", pady=(2, 0))
+
+        self._add_detail = ctk.CTkFrame(body, fg_color="transparent")
+        self._add_detail.pack(fill="x", padx=14)
+        ctk.CTkLabel(self._add_detail, text="VARIABLE NAME THE PROJECT READS", font=FONT_XS,
+                     text_color=C["text3"]).pack(anchor="w", pady=(10, 3))
+        self.add_conn_var = tk.StringVar(value="")
+        self._add_var_frame = ctk.CTkFrame(self._add_detail, fg_color="transparent")
+        self._add_var_frame.pack(fill="x")
+        self._add_preview_box = ctk.CTkFrame(self._add_detail, fg_color=C["accent_dim"], corner_radius=8,
+                                             border_width=1, border_color=C["accent"])
+        self._add_preview_box.pack(fill="x", pady=(10, 12))
+
+    def _add_conn_labels(self):
+        """``{menu label: project path}`` for the registered projects; labels are unique."""
+        registered = pushkey_connect.registered_projects(self.config)
+        labels = {}
+        for path in sorted(registered, key=lambda p: ((registered[p].get("name") or Path(p).name or p).lower(), p)):
+            label = registered[path].get("name") or Path(path).name or path
+            if label in labels:
+                label = f"{label} ({path})"
+            labels[label] = path
+        return labels
+
+    def _schedule_add_connect_refresh(self, delay=300):
+        """Re-run suggestions and the preview shortly after typing stops."""
+        try:
+            if self._add_conn_job is not None:
+                self.after_cancel(self._add_conn_job)
+            self._add_conn_job = self.after(delay, self._refresh_add_connect)
+        except Exception:
+            pass
+
+    def _on_add_conn_toggle(self):
+        self._add_conn_touched = True
+        self._refresh_add_connect()
+
+    def _on_add_conn_project(self, choice):
+        win = self._add_win
+        if choice == _ADD_FOLDER_LABEL:
+            home = Path.home()
+            start = home / "OneDrive" / "Desktop"
+            start = start if start.exists() else (home / "Desktop" if (home / "Desktop").exists() else home)
+            folder = filedialog.askdirectory(title="Select project folder", initialdir=str(start), parent=win)
+            path = self._register_folder_for_add(folder) if folder else None
+            if path:
+                self._add_conn_picked = True
+                label = next((lbl for lbl, p in self._add_conn_labels().items() if p == path), "")
+                self.add_conn_project.set(label or self._add_conn_last_label or _ADD_FOLDER_LABEL)
+                if not self.add_conn_on.get():
+                    self.add_conn_on.select()
+                    self._add_conn_touched = True
+            else:
+                self.add_conn_project.set(self._add_conn_last_label or _ADD_FOLDER_LABEL)
+        else:
+            self._add_conn_picked = True
+        self._refresh_add_connect()
+
+    def _refresh_add_connect(self):
+        """Bring the connect section up to date: suggestions, variable choices, the preview line.
+
+        Runs when the window opens and after the name, value, environment, project or file
+        changes. Reads the vault and the env file; writes nothing.
+        """
+        win = getattr(self, "_add_win", None)
+        try:
+            if win is None or not win.winfo_exists():
+                return
+        except Exception:
+            return
+        self._add_conn_job = None
+        labels = self._add_conn_labels()
+        self._add_conn_paths = labels
+        name = self.add_name.get().strip().upper().replace(" ", "_")
+        value = self.add_value.get().strip()
+        env = self.add_env.get()
+        chosen = labels.get(self.add_conn_project.get())
+
+        def ask(project):
+            try:
+                return pushkey_connect.suggest(
+                    self.vault, self.config, key_name=name or "NEW_KEY", value=value or None,
+                    cwd=os.getcwd(), project=project)
+            except _CORE_ERRORS:
+                return pushkey_connect.Suggestion(projects=[], files=[], vars=[])
+
+        sug = ask(chosen)
+        if not self._add_conn_picked:
+            default = sug.projects[0][0] if sug.projects else next(iter(labels.values()), None)
+            if default != chosen:
+                chosen = default
+                sug = ask(chosen)
+        exists = bool(name) and name in self.vault
+        if not self._add_conn_touched:
+            if _add_connect_default(bool(sug.projects), exists):
+                self.add_conn_on.select()
+            else:
+                self.add_conn_on.deselect()
+        on = bool(self.add_conn_on.get())
+        self._add_conn_note.configure(text=(
+            "This key already exists. Saving replaces its value and updates the files it is connected to."
+            if exists else "Saved in the vault only. Nothing is written to a project."))
+
+        # Project menu (registered projects, then the "add a folder" entry).
+        self.add_conn_project.configure(values=list(labels) + [_ADD_FOLDER_LABEL])
+        chosen_label = next((lbl for lbl, p in labels.items() if p == chosen), _ADD_FOLDER_LABEL)
+        self.add_conn_project.set(chosen_label)
+        self._add_conn_last_label = chosen_label
+        reasons = {p: why for p, why in sug.projects}
+        self._add_proj_hint.configure(text=f"Suggested: {reasons[chosen]}" if chosen in reasons else "")
+
+        # File menu.
+        file_values = [f for f, _why in sug.files] or [".env"]
+        file = self.add_conn_file.get()
+        if file not in file_values:
+            file = file_values[0]
+        self.add_conn_file.configure(values=file_values)
+        self.add_conn_file.set(file)
+        file_reason = dict(sug.files).get(file)
+        self._add_file_hint.configure(text=f"Suggested: {file_reason}" if file_reason else "")
+
+        # Variable choices (a radio list: names can be long).
+        var_list = list(sug.vars)
+        if var_list != self._add_conn_var_list:
+            self._add_conn_var_list = var_list
+            for child in self._add_var_frame.winfo_children():
+                child.destroy()
+            names = [n for n, _why in var_list]
+            if self.add_conn_var.get() not in names:
+                self.add_conn_var.set(names[0] if names else "")
+            if not var_list:
+                ctk.CTkLabel(self._add_var_frame, text="Type a key name to choose the variable.",
+                             font=FONT_XS, text_color=C["text3"], anchor="w").pack(anchor="w")
+            for var_name, why in var_list:
+                row = ctk.CTkFrame(self._add_var_frame, fg_color="transparent")
+                row.pack(fill="x", pady=1)
+                ctk.CTkRadioButton(
+                    row, text=var_name, value=var_name, variable=self.add_conn_var, font=FONT_MONO_SM,
+                    text_color=C["text"], fg_color=C["accent"], hover_color=C["accent2"],
+                    border_color=C["border2"], radiobutton_width=18, radiobutton_height=18,
+                    command=self._refresh_add_connect).pack(side="left")
+                ctk.CTkLabel(row, text=why, font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(8, 0))
+        var = self.add_conn_var.get()
+
+        # The preview.
+        lines, ready, failed = [], False, False
+        if on and chosen and name and value and var:
+            try:
+                lines = _connect_preview_lines(pushkey_connect.preview(
+                    self.vault, self.config, key_name=name, project=chosen, file=file, var=var,
+                    value=value, env=env))
+                ready = True
+            except _CORE_ERRORS as error:
+                lines, failed = [_connect_error_text(error)], True
+        elif on and chosen:
+            lines = ["Enter a key name and value to see what will be saved."]
+        for child in self._add_preview_box.winfo_children():
+            child.destroy()
+        for i, line in enumerate(lines):
+            ctk.CTkLabel(
+                self._add_preview_box, text=line, anchor="w", justify="left", wraplength=360,
+                font=FONT_H3 if (i == 0 and ready) else FONT_XS,
+                text_color=C["red"] if failed else (C["text"] if i == 0 else C["text2"]),
+            ).pack(anchor="w", padx=12, pady=(10 if i == 0 else 2, 10 if i == len(lines) - 1 else 0))
+
+        # What shows: the body when ticked, the "vault only" note otherwise.
+        self._add_file_col.grid() if labels else self._add_file_col.grid_remove()
+        if labels:
+            self._add_detail.pack(fill="x", padx=14)
+        else:
+            self._add_detail.pack_forget()
+        if on:
+            self._add_conn_note.pack_forget()
+            self._add_conn_body.pack(fill="x", padx=2, pady=(0, 6))
+        else:
+            self._add_conn_body.pack_forget()
+            self._add_conn_note.pack(fill="x", padx=14, pady=(0, 12))
+        self._add_save_btn.configure(
+            text="Save & connect" if on else "Save",
+            state="normal" if (not on or ready) else "disabled")
+        win.update_idletasks()
+        needed = win.winfo_reqheight()
+        if needed != self._add_conn_height:
+            self._add_conn_height = needed
+            _fit_window(win, width=900)
 
     def add_key(self):
+        """Save the key typed into the add-key window. True when it was saved, False when not.
+
+        The window closes only on True (see ``_submit_add_key``). A new key goes in through the
+        vault commit (it reloads first, so it cannot overwrite what another tool saved); with
+        "Connect to a project" ticked it goes through ``connect`` instead, which also writes the
+        project's env file. An existing name is a rotation: replace the value, then rewrite its
+        connected files and show one dialog with a line per file.
+        """
         name = self.add_name.get().strip().upper().replace(" ", "_")
         value = self.add_value.get().strip()
         category = self.add_cat.get()
@@ -5852,51 +6802,112 @@ class AppFrame(ctk.CTkFrame):
 
         if not name or not value:
             messagebox.showwarning("Missing info", "Enter both a key name and value")
-            return
+            return False
 
+        is_new = name not in self.vault
         # Only gate new keys, not rotations of existing
-        if name not in self.vault:
+        if is_new:
             real_keys = [k for k in self.vault if not k.startswith("_")]
             if not self._gate("max_keys", len(real_keys)):
-                return
+                return False
+
+        choice = None
+        if self._add_wants_connection():
+            choice = self._add_connection_choice()
+            if choice is None:
+                messagebox.showwarning(
+                    "Connect to a project",
+                    "Choose a project, a file and a variable, or untick \"Connect to a project\".")
+                return False
+
+        if not is_new and not messagebox.askyesno(
+                "Rotate key?",
+                f"'{name}' already exists.\n\nReplace with new value?\n(Old value saved as backup)"):
+            return False
 
         provider = detect_provider(name, value)
-        now = datetime.now().isoformat()
+        core = self._core_args()
+        results, error = [], None
+        try:
+            confirmed = []
+            if choice is not None:
+                project, file, var = choice
+                shown = pushkey_connect.preview(
+                    self.vault, self.config, key_name=name, project=project, file=file, var=var,
+                    value=value, env=env)
+                for code in shown.needs_confirm:
+                    if not messagebox.askyesno(
+                            "Confirm", _EXTRA_CONFIRM_TEXT.get(code, f"{code}. Continue?")):
+                        return False  # a "No" cancels the whole save
+                    confirmed.append(code)
+            if is_new and choice is None:
+                now = datetime.now().isoformat()
 
-        if name in self.vault:
-            if not messagebox.askyesno("Rotate key?", f"'{name}' already exists.\n\nReplace with new value?\n(Old value saved as backup)"):
-                return
-            old_val = self.vault[name]["value"]
-            self.vault[name].setdefault("history", [])
-            self.vault[name]["history"].insert(0, {"value": old_val, "retired": now})
-            self.vault[name]["history"] = self.vault[name]["history"][:10]
-            self.vault[name]["previous"] = old_val
-            self.vault[name]["value"] = value
-            self.vault[name]["rotated"] = now
-            self.vault[name]["rotation_count"] = self.vault[name].get("rotation_count", 0) + 1
-            msg = f"{name} rotated successfully"
-        else:
-            self.vault[name] = {
-                "value": value, "category": category, "provider": provider,
-                "created": now, "rotated": None, "rotation_count": 0, "previous": None,
-                "env": env,
-            }
-            msg = f"{name} added"
+                def add(fresh):
+                    if name in fresh:  # another tool added it since this window loaded the vault
+                        raise pushkey_connect.ConnectError("key_exists", {"key": name})
+                    fresh[name] = {
+                        "value": value, "category": category, "provider": provider,
+                        "created": now, "rotated": None, "rotation_count": 0, "previous": None,
+                        "env": env, "projects": [], "connections": [], "notes": "",
+                    }
 
-        self.save()
-        injected, errors = self._auto_inject_key(name)
-        if injected:
-            msg += f" and synced to {injected} project(s)"
-        if errors:
-            msg += f"\n\nSync failed for {len(errors)} project(s):\n" + "\n".join(errors)
+                pushkey_connect.commit(add, **core)
+                headline = f"{name} added"
+            elif is_new:
+                outcome = pushkey_connect.connect(
+                    key_name=name, project=project, file=file, var=var, value=value,
+                    provider=provider, env=env, confirmed=confirmed, write=True,
+                    actor="desktop", **core)
+                results = [outcome]
+                self._keep_category(name, category)
+                self._stamp_written(name, results)
+                headline = f"{name} added and connected"
+            else:
+                if choice is not None:
+                    pushkey_connect.connect(
+                        key_name=name, project=project, file=file, var=var, value=value,
+                        replace=True, env=env, confirmed=confirmed, write=True,
+                        actor="desktop", **core)
+                else:
+                    def rotate(fresh):
+                        entry = fresh.get(name)
+                        if not isinstance(entry, dict):
+                            raise pushkey_connect.ConnectError("key_not_found", {"key": name})
+                        pushkey_connect.replace_value(entry, value)
+
+                    pushkey_connect.commit(rotate, **core)
+                results, error = self._sync_results(key_name=name)
+                self._stamp_written(name, results)
+                headline = f"{name} rotated successfully"
+        except _CORE_ERRORS as exc:
+            messagebox.showerror("Could not save", _connect_error_text(exc))
+            return False
 
         try:
             self.add_name.delete(0, "end")
             self.add_value.delete(0, "end")
         except Exception:
             pass
-        self._invalidate_tabs("dashboard", "keys", "timeline")
-        messagebox.showinfo("Done", msg)
+        self._reload_config()
+        self._invalidate_tabs("dashboard", "keys", "timeline", "projects")
+        self._show_sync_results("Done", headline, results, error)
+        return True
+
+    def _keep_category(self, name, category):
+        """Store the chosen category on a key ``connect`` just created (it has no such field).
+
+        Cosmetic and best effort: the key itself is already saved, so a failure here is ignored
+        (the key then shows under General).
+        """
+        def mutate(fresh):
+            if isinstance(fresh.get(name), dict):
+                fresh[name]["category"] = category
+
+        try:
+            pushkey_connect.commit(mutate, **self._core_args())
+        except _CORE_ERRORS:
+            pass
 
     def add_group_manual(self, prefill_group=None):
         """Dialog to add keys to a new or existing group."""
@@ -6084,7 +7095,6 @@ class AppFrame(ctk.CTkFrame):
                 messagebox.showwarning("Nothing added", "Fill in at least one key name and value.", parent=win)
                 return
 
-            self._refresh_all_projects()
             self.save()
             win.destroy()
             self._invalidate_tabs("dashboard", "keys", "timeline")
@@ -6173,7 +7183,6 @@ class AppFrame(ctk.CTkFrame):
                 added.append(name)
 
         self.save()
-        self._refresh_all_projects()
         self._invalidate_tabs("dashboard", "keys", "timeline")
         messagebox.showinfo("Scan Complete",
             f"✓ Imported {len(added)} key(s) from {len(files)} file(s)\n\n"
@@ -6259,7 +7268,6 @@ class AppFrame(ctk.CTkFrame):
                 added.append(name)
 
         self.save()
-        self._refresh_all_projects()
         injected, _ = self._auto_inject_keys_bulk([e["name"] for e in confirmed])
 
         msg = f"Imported {len(added)} key(s)"
@@ -6329,40 +7337,28 @@ class AppFrame(ctk.CTkFrame):
         return win.selected
 
     def _auto_inject_keys_bulk(self, key_names):
-        count = 0
-        errors = []
-        for proj_name, proj_info in self.config.get("projects", {}).items():
-            proj_keys = proj_info.get("keys", [])
-            relevant_keys = [k for k in key_names if k in proj_keys or not proj_keys]
-            if relevant_keys:
-                path = proj_info.get("path")
-                if path and os.path.isdir(path):
-                    try:
-                        inject_env_file(path, self.vault, proj_keys if proj_keys else None,
-                                        target_env=proj_info.get("target_env", "all"))
-                        self._stamp_keys_used(relevant_keys)
-                        count += 1
-                    except Exception as e:
-                        errors.append(f"{proj_name}: {e}")
+        """Rewrite the connections of ``key_names`` (a connection is the only thing written).
+
+        Returns ``(projects written, error texts)``.
+        """
+        names = [k for k in key_names if k in self.vault]
+        if not names:
+            return 0, []
+        count, errors, written = self._run_sync(key_names=names)
+        if written:
+            self._stamp_keys_used(sorted(set(written)))
         return count, errors
 
     def _auto_inject_key(self, key_name):
-        count = 0
-        errors = []
-        for proj_name, proj_info in self.config.get("projects", {}).items():
-            proj_keys = proj_info.get("keys", [])
-            if key_name in proj_keys or not proj_keys:
-                path = proj_info.get("path")
-                if path and os.path.isdir(path):
-                    keys_to_write = proj_keys if proj_keys else None
-                    try:
-                        inject_env_file(path, self.vault, keys_to_write,
-                                        target_env=proj_info.get("target_env", "all"))
-                        self._stamp_keys_used([key_name])
-                        count += 1
-                    except Exception as e:
-                        log_event(f"env inject failed for {path}: {e}")
-                        errors.append(f"{proj_name}: {e}")
+        """Rewrite the connections of one key after an add or a rotation.
+
+        A key with no connections writes nothing. Returns ``(projects written, error texts)``.
+        """
+        if key_name not in self.vault:
+            return 0, []
+        count, errors, written = self._run_sync(key_name=key_name)
+        if written:
+            self._stamp_keys_used([key_name])
         return count, errors
 
     def _stamp_keys_used(self, key_names):
@@ -6420,26 +7416,34 @@ class AppFrame(ctk.CTkFrame):
             self.save()
             self._invalidate_tabs("dashboard", "keys", "timeline")
 
-    def _apply_rotation(self, name, new_value):
-        info = self.vault[name]
-        now = datetime.now().isoformat()
-        old_val = info["value"]
-        info.setdefault("history", [])
-        info["history"].insert(0, {"value": old_val, "retired": now})
-        info["history"] = info["history"][:10]
-        info["previous"] = old_val
-        info["value"] = new_value
-        info["rotated"] = now
-        info["rotation_count"] = info.get("rotation_count", 0) + 1
-        self.save()
-        injected, errors = self._auto_inject_key(name)
-        self._invalidate_tabs("dashboard", "keys", "timeline")
-        msg = f"{name} rotated"
-        if injected:
-            msg += f" and synced to {injected} project(s)"
-        if errors:
-            msg += f"\n\nSync failed for {len(errors)} project(s):\n" + "\n".join(errors)
-        return msg
+    def _apply_rotation(self, name, new_value, headline=None, title="Rotated",
+                        skip_empty_dialog=False):
+        """Replace a key's value, rewrite its connected files and show one results dialog.
+
+        The value goes in through the vault commit (reload, replace, save); the old value moves
+        to the key's history. True when the new value was saved; False after an error dialog.
+        ``skip_empty_dialog``: for callers that confirm the rotation themselves (the inline
+        strip, the rotation queue), show no dialog when no file was involved and nothing failed.
+        """
+        def mutate(fresh):
+            entry = fresh.get(name)
+            if not isinstance(entry, dict):
+                raise pushkey_connect.ConnectError("key_not_found", {"key": name})
+            pushkey_connect.replace_value(entry, new_value)
+
+        try:
+            pushkey_connect.commit(mutate, **self._core_args())
+        except _CORE_ERRORS as error:
+            messagebox.showerror(
+                "Not rotated", f"'{name}' was not changed. {_connect_error_text(error)}")
+            return False
+        results, error = self._sync_results(key_name=name)
+        self._stamp_written(name, results)
+        self._invalidate_tabs("dashboard", "keys", "timeline", "projects")
+        if skip_empty_dialog and not results and error is None:
+            return True
+        self._show_sync_results(title, headline or f"{name} rotated", results, error)
+        return True
 
     def rotate_key(self, name):
         if not self._rbac_check(name, "can_rotate"):
@@ -6499,8 +7503,7 @@ class AppFrame(ctk.CTkFrame):
                     return
                 if result.new_value and not result.partial:
                     win.destroy()
-                    msg = self._apply_rotation(name, result.new_value)
-                    messagebox.showinfo("Auto-Rotated", msg)
+                    self._apply_rotation(name, result.new_value, title="Auto-Rotated")
                 elif result.partial:
                     # Anthropic: old key deactivated, need new key pasted
                     status_lbl.configure(text=result.error or "Old key deactivated. Paste new key below.", text_color=C["amber"])
@@ -6533,8 +7536,7 @@ class AppFrame(ctk.CTkFrame):
                 messagebox.showwarning("Empty", "Paste the new key value")
                 return
             win.destroy()
-            msg = self._apply_rotation(name, val)
-            messagebox.showinfo("Rotated", msg)
+            self._apply_rotation(name, val)
 
         new_val.bind("<Return>", lambda e: do_rotate())
         make_btn(win, "Save & Sync", do_rotate, fg_color=C["green_bg"], text_color=C["green"],
@@ -6609,8 +7611,9 @@ class AppFrame(ctk.CTkFrame):
                                         parent=win):
                 return
             win.destroy()
-            msg = self._apply_rotation(name, old_val)
-            messagebox.showinfo("Rolled Back", f"Rolled back to entry #{entry_idx + 1}.\n{msg}")
+            self._apply_rotation(
+                name, old_val, title="Rolled Back",
+                headline=f"{name} rolled back to entry #{entry_idx + 1}.")
 
         for i, entry in enumerate(history):
             row = ctk.CTkFrame(scroll, fg_color=C["surface"], corner_radius=4)
@@ -7131,9 +8134,7 @@ class AppFrame(ctk.CTkFrame):
 
     def _run_scan(self):
         findings = []
-        projects = self.config.get("projects", {})
-        scan_roots = {info["path"] for info in projects.values()
-                      if info.get("path") and os.path.isdir(info["path"])}
+        scan_roots = _project_scan_roots(self.config)
         if not scan_roots:
             return findings
 
@@ -7183,8 +8184,7 @@ class AppFrame(ctk.CTkFrame):
             return findings
 
         import subprocess
-        scan_roots = {info["path"] for info in self.config.get("projects", {}).values()
-                      if info.get("path") and os.path.isdir(info["path"])}
+        scan_roots = _project_scan_roots(self.config)
 
         for root in scan_roots:
             # Check it's a git repo
@@ -7639,7 +8639,7 @@ class AppFrame(ctk.CTkFrame):
         form.pack(fill="x", pady=(0, 16))
 
         ctk.CTkLabel(form, text="Link a project folder", font=FONT_H3, text_color=C["text"]).pack(anchor="w", padx=12, pady=(10, 2))
-        ctk.CTkLabel(form, text="Click Browse, pick your project folder — name and path fill in automatically.",
+        ctk.CTkLabel(form, text="Click Browse, pick your project folder — name and path fill in automatically. Nothing is written into it until you connect keys.",
                      font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=12, pady=(0, 10))
 
         # Path row
@@ -7667,14 +8667,14 @@ class AppFrame(ctk.CTkFrame):
         # Target env for this project
         r2e = ctk.CTkFrame(form, fg_color="transparent")
         r2e.pack(fill="x", padx=12, pady=(0, 6))
-        ctk.CTkLabel(r2e, text="TARGET ENV  (only inject keys matching this env)",
+        ctk.CTkLabel(r2e, text="ENVIRONMENT  (a label: you confirm before a key from another environment is connected)",
                      font=FONT_XS, text_color=C["text3"]).pack(anchor="w")
         self.proj_env = ctk.CTkOptionMenu(
-            r2e, values=ENV_LEVELS,
+            r2e, values=ENV_LEVELS[1:],
             fg_color=C["bg3"], button_color=C["bg4"], button_hover_color=C["btn_hover"],
             text_color=C["text"], font=FONT_XS, width=120,
         )
-        self.proj_env.set("all")
+        self.proj_env.set("dev")
         self.proj_env.pack(anchor="w", ipady=2)
 
         r2b = ctk.CTkFrame(form, fg_color="transparent")
@@ -7683,46 +8683,49 @@ class AppFrame(ctk.CTkFrame):
         make_btn(r2b, "Import from .env", self._import_env_file, fg_color=C["btn"], text_color=C["accent"], width=140).pack(side="left", padx=(8, 0))
 
         # Project list
-        projects = self.config.get("projects", {})
+        projects = pushkey_connect.registered_projects(self.config)
         if not projects:
-            ctk.CTkLabel(pad, text="No projects linked yet.\nAdd a project folder above, and Pushkey will\nauto-write .env files when you add or rotate keys.",
+            ctk.CTkLabel(pad, text="No projects linked yet.\nAdd a project folder above, then use Assign Keys to choose\nwhich keys Pushkey writes into it.",
                          font=FONT, text_color=C["text3"], justify="center").pack(pady=30)
             return
 
         ctk.CTkLabel(pad, text="LINKED PROJECTS", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", pady=(0, 6))
 
-        for proj_name, proj_info in sorted(projects.items()):
-            self._draw_project_card(pad, proj_name, proj_info)
+        for proj_path, proj_info in sorted(
+                projects.items(),
+                key=lambda item: (str(item[1].get("name") or item[0]).lower(), item[0])):
+            self._draw_project_card(pad, proj_path, proj_info)
 
-    def _draw_project_card(self, parent, proj_name, proj_info):
+    def _draw_project_card(self, parent, proj_path, proj_info):
         """Linked-project card matching the lifecycle card visual language:
         neon-edge wrapper with status-tinted bg, identity row + path,
         icon-led stat strip with ALL relevant per-project info, then an
         icon-labeled action row.
+
+        ``proj_path`` is the registry key (the folder); the title is the record's name.
         """
         from datetime import datetime as _dt
         from pathlib import Path as _Path
 
-        proj_keys = proj_info.get("keys", [])
-        matched = self._auto_match_keys(proj_name)
-        has_keys = len(proj_keys) > 0
-        partial = not has_keys and len(matched) > 0
-        path_str = proj_info.get("path", "")
-        added_iso = proj_info.get("added")
-        target_env = proj_info.get("target_env", "all")
+        proj_name = proj_info.get("name") or _Path(proj_path).name or proj_path
+        connections = _project_connections(self.vault, proj_path)
+        connected_keys = sorted({name for name, _ in connections})
+        has_keys = len(connected_keys) > 0
+        path_str = proj_path
+        added_iso = proj_info.get("created")
+        target_env = proj_info.get("environment") or "dev"
+        default_file = proj_info.get("default_file") or ".env"
 
         # Status
         if has_keys:
             status_col, status_bg, status_lbl = C["green"], C["green_bg"], "ACTIVE"
-        elif partial:
-            status_col, status_bg, status_lbl = C["amber"], C["amber_bg"], "NEEDS ASSIGN"
         else:
-            status_col, status_bg, status_lbl = C["red"], C["red_bg"], "EMPTY"
+            status_col, status_bg, status_lbl = C["amber"], C["amber_bg"], "NO KEYS CONNECTED"
 
         # Derived state
         path_obj = _Path(path_str) if path_str else None
         path_exists = path_obj.exists() if path_obj else False
-        env_file = path_obj / ".env" if path_obj else None
+        env_file = path_obj / default_file if path_obj else None
         env_exists = env_file.exists() if env_file else False
         env_size = env_file.stat().st_size if env_exists else 0
         added_dt = _parse_iso(added_iso)
@@ -7742,7 +8745,7 @@ class AppFrame(ctk.CTkFrame):
         ctk.CTkLabel(head, text=proj_name, font=(_UI_FONT, 15, "bold"),
                      text_color=C["text"]).pack(side="left", padx=(4, 10))
 
-        if target_env != "all":
+        if target_env:
             env_col = ENV_COLORS.get(target_env, C["text3"])
             env_pill = ctk.CTkFrame(head, fg_color=C.get(f"{target_env}_bg", C["bg3"]),
                                     corner_radius=8, border_width=1,
@@ -7783,15 +8786,13 @@ class AppFrame(ctk.CTkFrame):
                          text_color=color).pack(side="left", padx=(4, 0))
 
         _stat("key",
-              f"{len(proj_keys)} key{'s' if len(proj_keys) != 1 else ''} assigned",
+              f"{len(connected_keys)} key{'s' if len(connected_keys) != 1 else ''} connected",
               status_col if has_keys else C["text3"])
-        if matched and not has_keys:
-            _stat("plus", f"{len(matched)} auto-match available", C["amber"])
         if env_exists:
             kb = max(1, env_size // 1024)
-            _stat("check", f".env present ({kb}KB)", C["green"])
+            _stat("check", f"{default_file} present ({kb}KB)", C["green"])
         elif path_exists:
-            _stat("x", ".env not written yet", C["amber"])
+            _stat("x", f"{default_file} not written yet", C["amber"])
         if added_days is not None:
             age_str = ("today" if added_days == 0 else
                        "yesterday" if added_days == 1 else
@@ -7815,20 +8816,20 @@ class AppFrame(ctk.CTkFrame):
             ).pack(side="left", padx=(0, 6))
 
         _act("refresh", "Sync .env",
-             lambda p=proj_name: self.sync_project(p),
+             lambda p=proj_path: self.sync_project(p),
              C["accent"], "#FFFFFF")
         _act("folder", "CI Sync",
-             lambda p=proj_name: self.ci_sync_project(p),
+             lambda p=proj_path: self.ci_sync_project(p),
              C["btn"], C["accent"], border=True)
         _act("key", "Assign Keys",
-             lambda p=proj_name: self.assign_keys_to_project(p),
+             lambda p=proj_path: self.assign_keys_to_project(p),
              C["btn"], C["text2"], border=True)
 
         # Push Remove to the right
         ctk.CTkButton(
             btn_f, text="  Remove", image=icon("trash", 14, C["red"]),
             compound="left",
-            command=lambda p=proj_name: self.remove_project(p),
+            command=lambda p=proj_path: self.remove_project(p),
             fg_color=C["red_bg"], text_color=C["red"],
             hover_color=C["btn_hover"],
             font=FONT_BTN, corner_radius=6, height=30,
@@ -7856,154 +8857,100 @@ class AppFrame(ctk.CTkFrame):
             messagebox.showwarning("Invalid path", f"Folder not found:\n{path}")
             return
 
-        proj_count = len(self.config.get("projects", {}))
-        if not self._gate("max_projects", proj_count):
-            return
-
-        if "projects" not in self.config:
-            self.config["projects"] = {}
-
-        target_env = self.proj_env.get() if hasattr(self, "proj_env") else "all"
-        matched = self._auto_match_keys(name)
-        self.config["projects"][name] = {
-            "path": path,
-            "keys": matched,
-            "added": datetime.now().isoformat(),
-            "target_env": target_env,
-        }
-
+        environment = (self.proj_env.get() if hasattr(self, "proj_env") else "dev") or "dev"
         try:
-            inject_env_file(path, self.vault, target_env=target_env)
-        except Exception as e:
-            messagebox.showwarning("Sync warning", f"Could not write .env:\n{e}")
+            canonical, _record = pushkey_connect.register_project(path, name=name)
+        except pushkey_connect.ConnectError as error:
+            self._reload_config()
+            if error.code == "project_limit":
+                # The plan's upgrade prompt; it returns True only if there is room after all.
+                if not self._gate("max_projects", len(pushkey_connect.registered_projects(self.config))):
+                    return
+            messagebox.showwarning("Project not added", _connect_error_text(error))
+            return
+        except (ConfigUnreadableError, ValueError, OSError) as error:
+            messagebox.showerror("Project not added", _connect_error_text(error))
+            return
+        self._reload_config()
+        if environment != "dev":
+            saved, code = self._try_update_project_record(canonical, {"environment": environment})
+            if not saved:
+                # The project stays registered; only its environment label is missing.
+                self.proj_name.delete(0, "end")
+                self.proj_path_var.set("")
+                self._invalidate_tabs("projects", "dashboard")
+                self.render_projects()
+                messagebox.showerror(
+                    "Project added",
+                    f"The project was added, but its environment could not be saved: {code}")
+                return
 
-        self.save()
         self.proj_name.delete(0, "end")
         self.proj_path_var.set("")
+        self._invalidate_tabs("projects", "dashboard")
         self.render_projects()
-        messagebox.showinfo("Linked", f"'{name}' linked and .env written to:\n{path}")
+        messagebox.showinfo(
+            "Linked",
+            f"'{name}' added.\n\nNo keys are connected to it yet. Use Assign Keys to choose "
+            f"which keys Pushkey writes into:\n{canonical}")
 
-    def _refresh_project_keys(self, proj_name):
-        proj = self.config["projects"].get(proj_name)
-        if not proj:
-            return []
-        matched = set(self._auto_match_keys(proj_name))
-        current = set(proj.get("keys", []))
-        new_keys = matched - current
-        if new_keys:
-            proj["keys"] = sorted(current | matched)
-            self.save()
-        return sorted(new_keys)
-
-    def _refresh_all_projects(self):
-        for proj_name in list(self.config.get("projects", {}).keys()):
-            self._refresh_project_keys(proj_name)
-
-    def sync_project(self, proj_name):
-        proj = self.config["projects"].get(proj_name)
-        if not proj:
+    def sync_project(self, proj_path):
+        """Sync .env: write the project's connected variables after one confirmation."""
+        record = pushkey_connect.registered_projects(self.config).get(proj_path)
+        if record is None:
+            messagebox.showerror("Project not found", "That project is not registered any more.")
             return
-
-        path = proj["path"]
-        if not os.path.isdir(path):
-            messagebox.showerror("Folder not found", f"The project folder no longer exists:\n{path}\n\nUpdate the path in Projects.")
+        name = record.get("name") or Path(proj_path).name or proj_path
+        if not os.path.isdir(proj_path):
+            messagebox.showerror(
+                "Folder not found",
+                f"The project folder no longer exists:\n{proj_path}\n\nRemove the project or restore the folder.")
             return
-
-        new_keys = self._refresh_project_keys(proj_name)
-        assigned = set(proj.get("keys", []))
-        keys_to_write = sorted(k for k in assigned if k in self.vault)
-
-        win = ctk.CTkToplevel(self)
-        win.title("Confirm Sync")
-        win.geometry("520x480")
-        win.configure(fg_color=C["bg2"])
-        win.transient(self)
-        win.grab_set()
-
-        ctk.CTkLabel(win, text="Confirm .env Sync", font=FONT_H2, text_color=C["text"]).pack(pady=(14, 4), padx=16, anchor="w")
-
-        folder_f = ctk.CTkFrame(win, fg_color=C["surface"], corner_radius=4)
-        folder_f.pack(fill="x", padx=16, pady=(4, 8))
-        ctk.CTkLabel(folder_f, text="WRITING TO", font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(8, 2))
-        ctk.CTkLabel(folder_f, text=os.path.join(path, ".env"), font=FONT_MONO_SM,
-                     text_color=C["green"], wraplength=460, justify="left").pack(anchor="w", padx=10, pady=(0, 8))
-
-        if new_keys:
-            ctk.CTkLabel(win, text=f"+ {len(new_keys)} newly matched key(s) added since last sync",
-                         font=FONT_XS, text_color=C["amber"]).pack(anchor="w", padx=16, pady=(0, 4))
-
-        # Read existing .env to detect rotations
-        env_path = os.path.join(path, ".env")
-        existing_env = {}
+        rows = _project_connections(self.vault, proj_path)
+        if not rows:
+            messagebox.showinfo(
+                "Nothing to sync",
+                f"No keys are connected to '{name}' yet.\n\nUse Assign Keys to choose which keys "
+                "Pushkey writes into this folder.")
+            return
         try:
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        result = _parse_env_line(line)
-                        if result:
-                            existing_env[result[0]] = result[1]
-        except Exception:
-            pass
+            states = {(c.key, c.file, c.var): c.state
+                      for c in pushkey_connect.status(self.vault, self.config, project=proj_path)}
+        except (pushkey_connect.ConnectError, ValueError, OSError):
+            states = {}
+        lines = []
+        for key_name, conn in rows:
+            state = _SYNC_STATE_TEXT.get(states.get((key_name, conn.get("file"), conn.get("var"))), "")
+            lines.append(f"  {key_name}  ->  {conn.get('file')} as {conn.get('var')}"
+                         + (f"   ({state})" if state else ""))
+        text = (f"Write {len(rows)} connected variable(s) into '{name}'?\n\n" + "\n".join(lines)
+                + f"\n\nFolder: {proj_path}\n\nOnly the connected variables are written; everything else in "
+                "the file is kept. The old file is backed up first.")
+        if not messagebox.askyesno("Confirm Sync", text):
+            return
+        count, errors, written = self._run_sync(project=proj_path)
+        if written:
+            self._stamp_keys_used(sorted(set(written)))
+        self._invalidate_tabs("projects", "keys", "dashboard")
+        self.render_projects()
+        if errors:
+            messagebox.showwarning(
+                "Sync finished with problems",
+                f"{len(written)} variable(s) written.\n\n" + "\n".join(errors))
+        else:
+            messagebox.showinfo("Synced", f"Env file written in:\n{proj_path}\n\n{len(written)} variable(s) synced.")
 
-        def mask(val):
-            if not val: return "●●●●"
-            return "●" * min(8, max(4, len(val) - 4)) + val[-4:]
-
-        rotating = [k for k in keys_to_write if k in existing_env and existing_env[k] != self.vault[k]["value"]]
-        adding   = [k for k in keys_to_write if k not in existing_env]
-        unchanged= [k for k in keys_to_write if k in existing_env and existing_env[k] == self.vault[k]["value"]]
-
-        ctk.CTkLabel(win, text=f"KEYS TO WRITE  ({len(keys_to_write)})", font=FONT_XS,
-                     text_color=C["text3"]).pack(anchor="w", padx=16, pady=(0, 4))
-
-        keys_scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=4, height=200)
-        keys_scroll.pack(fill="x", padx=16, pady=(0, 8))
-
-        for k in keys_to_write:
-            new_val = self.vault[k]["value"]
-            row = ctk.CTkFrame(keys_scroll, fg_color=C["surface"], corner_radius=4)
-            row.pack(fill="x", pady=1)
-
-            if k in rotating:
-                # Before → After
-                old_val = existing_env[k]
-                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["amber"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
-                ctk.CTkLabel(row, text=mask(old_val), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(side="left")
-                ctk.CTkLabel(row, text=" → ", font=FONT_XS, text_color=C["text3"]).pack(side="left")
-                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["amber"], anchor="w").pack(side="left")
-                ctk.CTkLabel(row, text="rotate", font=FONT_XS, text_color=C["amber"]).pack(side="right", padx=8)
-            elif k in adding:
-                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["green"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
-                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["green"], anchor="w").pack(side="left")
-                ctk.CTkLabel(row, text="new", font=FONT_XS, text_color=C["green"]).pack(side="right", padx=8)
-            else:
-                ctk.CTkLabel(row, text=k, font=FONT_MONO_SM, text_color=C["text2"], anchor="w", width=200).pack(side="left", padx=(8, 4), pady=5)
-                ctk.CTkLabel(row, text=mask(new_val), font=FONT_MONO_SM, text_color=C["text3"], anchor="w").pack(side="left")
-                ctk.CTkLabel(row, text="unchanged", font=FONT_XS, text_color=C["text3"]).pack(side="right", padx=8)
-
-        btn_f = ctk.CTkFrame(win, fg_color="transparent")
-        btn_f.pack(fill="x", padx=16, pady=12)
-
-        def confirm():
-            win.destroy()
-            try:
-                inject_env_file(path, self.vault, keys_to_write if keys_to_write else None,
-                                target_env=proj.get("target_env", "all"))
-                self._stamp_keys_used(keys_to_write)
-                log_event(f"sync: wrote {len(keys_to_write)} keys to {path}/.env")
-                messagebox.showinfo("Synced", f".env written to:\n{path}\n\n{len(keys_to_write)} key(s) synced.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to write .env:\n{e}")
-
-        make_btn(btn_f, "Confirm & Write .env", confirm, fg_color=C["green_bg"], text_color=C["green"], width=160).pack(side="left")
-        make_btn(btn_f, "Cancel", win.destroy, width=80).pack(side="left", padx=(8, 0))
-
-    def ci_sync_project(self, proj_name):
+    def ci_sync_project(self, proj_path):
         if not self._gate("ci_sync"):
             return
-        proj = self.config["projects"].get(proj_name, {})
-        assigned = set(proj.get("keys", []))
-        keys_to_sync = {k: self.vault[k]["value"] for k in assigned if k in self.vault}
+        proj = pushkey_connect.registered_projects(self.config).get(proj_path)
+        if proj is None:
+            messagebox.showerror("Project not found", "That project is not registered any more.")
+            return
+        proj_name = proj.get("name") or Path(proj_path).name or proj_path
+        keys_to_sync = {conn["var"]: self.vault[name]["value"]
+                        for name, conn in _project_connections(self.vault, proj_path)
+                        if name in self.vault and isinstance(conn.get("var"), str)}
 
         win = ctk.CTkToplevel(self)
         win.title(f"☁️ CI Sync — {proj_name}")
@@ -8058,7 +9005,7 @@ class AppFrame(ctk.CTkFrame):
             for key, label, secret in PLATFORM_FIELDS.get(plat, []):
                 ctk.CTkLabel(fields_frame, text=label.upper(),
                              font=FONT_XS, text_color=C["text3"]).pack(anchor="w", padx=10, pady=(6, 0))
-                saved = proj.get(key, "")
+                saved = pushkey_connect.registered_projects(self.config).get(proj_path, {}).get(key, "")
                 e = ctk.CTkEntry(fields_frame, font=FONT_MONO_SM, fg_color=C["bg3"],
                                  text_color=C["text"], show="*" if secret else "",
                                  border_color=C["border2"])
@@ -8077,12 +9024,8 @@ class AppFrame(ctk.CTkFrame):
         def do_sync():
             plat = platform_var.get()
             creds = {k: e.get().strip() for k, e in field_entries.items()}
-            # Persist non-secret creds
-            for k, v in creds.items():
-                if "token" not in k:
-                    proj[k] = v
-            proj["ci_platform"] = plat
-            save_config(self.config)
+            # Persist non-secret creds on this project's record (never a token)
+            self._save_ci_fields(proj_path, plat, creds)
 
             status_lbl.configure(text="Syncing…", text_color=C["amber"])
             win.update()
@@ -8121,13 +9064,15 @@ class AppFrame(ctk.CTkFrame):
         make_btn(win, "☁️ Push to Cloud", do_sync,
                  fg_color=C["accent"], text_color="white", width=180, height=34).pack(pady=12)
 
-    def _auto_match_keys(self, proj_name):
-        prefix = re.sub(r"[^A-Z0-9]", "_", proj_name.upper())
-        prefix = re.sub(r"_+", "_", prefix).strip("_")
-        return [k for k in self.vault if k == prefix or k.startswith(prefix + "_")]
-
-    def assign_keys_to_project(self, proj_name):
-        if not self.vault:
+    def assign_keys_to_project(self, proj_path):
+        """Choose which keys are connected to a project (nothing is written until Sync .env)."""
+        record = pushkey_connect.registered_projects(self.config).get(proj_path)
+        if record is None:
+            messagebox.showerror("Project not found", "That project is not registered any more.")
+            return
+        proj_name = record.get("name") or Path(proj_path).name or proj_path
+        names = sorted(k for k in self.vault if not k.startswith("_"))
+        if not names:
             messagebox.showinfo("No keys", "Add some keys first, then assign them to projects.")
             return
 
@@ -8138,52 +9083,64 @@ class AppFrame(ctk.CTkFrame):
         win.transient(self)
         win.grab_set()
 
+        default_file = record.get("default_file") or ".env"
         ctk.CTkLabel(win, text=f"Select keys for {proj_name}", font=FONT_H3,
                      text_color=C["text"]).pack(pady=(12, 4), padx=12, anchor="w")
-        ctk.CTkLabel(win, text="Unchecked keys won't be written to this project's .env",
+        ctk.CTkLabel(win, text=f"Only checked keys are connected to this project's {default_file}.",
                      font=FONT_XS, text_color=C["text3"]).pack(padx=12, anchor="w", pady=(0, 8))
 
-        current_keys = set(self.config["projects"][proj_name].get("keys", []))
-        matched = set(self._auto_match_keys(proj_name))
+        current_keys = {name for name, conn in _project_connections(self.vault, proj_path)
+                        if conn.get("file") == default_file and conn.get("var") == name}
         checks = {}
 
         scroll = ctk.CTkScrollableFrame(win, fg_color=C["bg"], corner_radius=0)
         scroll.pack(fill="both", expand=True, padx=12)
 
-        for section_keys, label, color in [
-            (sorted(matched), "AUTO-MATCHED", C["green"]),
-            (sorted(k for k in self.vault if k not in matched), "OTHER KEYS", C["text3"]),
-        ]:
-            if not section_keys:
-                continue
-            ctk.CTkLabel(scroll, text=label, font=FONT_XS, text_color=color).pack(anchor="w", pady=(8, 2), padx=4)
-            for key_name in section_keys:
-                checked = key_name in current_keys or (not current_keys and key_name in matched)
-                var = ctk.BooleanVar(value=checked)
-                checks[key_name] = var
-                row = ctk.CTkFrame(scroll, fg_color="transparent")
-                row.pack(fill="x")
-                ctk.CTkCheckBox(
-                    row, text=key_name, variable=var, font=FONT_MONO_SM,
-                    text_color=C["green"] if key_name in matched else C["text"],
-                    fg_color=C["accent"], hover_color=C["accent2"],
-                    border_color=C["border2"], checkmark_color="white",
-                ).pack(side="left", anchor="w", pady=1, padx=4)
+        for key_name in names:
+            var = ctk.BooleanVar(value=key_name in current_keys)
+            checks[key_name] = var
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(fill="x")
+            ctk.CTkCheckBox(
+                row, text=key_name, variable=var, font=FONT_MONO_SM,
+                text_color=C["text"],
+                fg_color=C["accent"], hover_color=C["accent2"],
+                border_color=C["border2"], checkmark_color="white",
+            ).pack(side="left", anchor="w", pady=1, padx=4)
 
         def save_assignment():
             selected = [n for n, v in checks.items() if v.get()]
-            self.config["projects"][proj_name]["keys"] = selected
-            self.save()
+            outcome = self._apply_project_assignment(proj_path, selected)
             win.destroy()
             self.render_projects()
+            if outcome["errors"]:
+                messagebox.showwarning("Some keys were not changed", "\n".join(outcome["errors"]))
+            elif outcome["added"] or outcome["removed"]:
+                messagebox.showinfo(
+                    "Saved",
+                    f"{len(outcome['added'])} key(s) connected, {len(outcome['removed'])} disconnected.\n\n"
+                    "Nothing was written to the folder yet. Use Sync .env to write the connected keys.")
 
         make_btn(win, "Save", save_assignment, fg_color=C["accent"], text_color="white", width=140).pack(pady=12)
 
-    def remove_project(self, proj_name):
-        if messagebox.askyesno("Remove?", f"Unlink '{proj_name}'?\n\nThis won't delete the .env file, just stops syncing."):
-            del self.config["projects"][proj_name]
-            self.save()
-            self.render_projects()
+    def remove_project(self, proj_path):
+        record = pushkey_connect.registered_projects(self.config).get(proj_path) or {}
+        proj_name = record.get("name") or Path(proj_path).name or proj_path
+        if not messagebox.askyesno(
+                "Remove?",
+                f"Remove '{proj_name}' from Pushkey?\n\n"
+                "Pushkey will stop managing this folder. Files in it are not changed.\n"
+                "Connections between your keys and this folder are removed."):
+            return
+        try:
+            pushkey_connect.unregister_project(proj_path, **self._core_args())
+        except (pushkey_connect.ConnectError, ConfigUnreadableError, ValueError, OSError) as error:
+            messagebox.showerror("Project not removed", _connect_error_text(error))
+            return
+        finally:
+            self._reload_config()
+        self._invalidate_tabs("projects", "keys", "dashboard")
+        self.render_projects()
 
     def _import_env_file(self):
         filepath = filedialog.askopenfilename(
@@ -8271,7 +9228,7 @@ class AppFrame(ctk.CTkFrame):
                     "created": _dt.now().isoformat(),
                     "rotated": None,
                     "provider": prov_name,
-                    "env": "production",
+                    "env": "prod",
                     "projects": [],
                     "notes": f"Imported from {filename}",
                     "source": "env_import",
@@ -8561,6 +9518,7 @@ class PushkeyApp:
                 try:
                     self.frame.add_value.delete(0, "end")
                     self.frame.add_value.insert(0, value)
+                    self.frame._schedule_add_connect_refresh(0)
                 except Exception:
                     pass
 
@@ -8589,13 +9547,120 @@ class PushkeyApp:
         self.switch(LoginFrame, on_login=self.on_login, on_start_fresh=self.show_login)
 
     def on_login(self, pw, vault, vault_key=None):
+        self._migrate_at_login(pw, vault, vault_key)
         write_health_sidecar(vault)
         self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self, vault_key=vault_key)
+        self._show_connect_notice(vault)
         self._start_clip_watcher(vault)
 
-    def reload_app(self, pw, vault):
+    def _migrate_at_login(self, pw, vault, vault_key):
+        """Run the one-time project migration for this master-password login.
+
+        Never blocks the login: an unreadable or busy config.json, or any other
+        failure, is one warning and the desktop carries on. ``vault`` is brought up
+        to date in place, so the first save from this window is not a conflict.
+        """
+        try:
+            pushkey_connect_migrate.ensure_migrated(vault_key=vault_key, password=pw, target=vault)
+        except ConfigUnreadableError:
+            messagebox.showwarning(
+                "Pushkey",
+                "Projects could not be migrated: your Pushkey settings file is unreadable "
+                "or busy. Everything else works.")
+        except Exception as error:
+            reason = error.code if isinstance(error, pushkey_connect.ConnectError) else type(error).__name__
+            messagebox.showwarning(
+                "Pushkey", f"Projects could not be migrated ({reason}). Everything else works.")
+
+    def _show_connect_notice(self, vault=None):
+        """Tell the user, until they hide it, what the migration could not carry over (names only)."""
+        try:
+            config = load_config()
+        except Exception:
+            return
+        if vault is None:
+            vault = getattr(getattr(self, "frame", None), "vault", None)
+        view = _connect_notice_view(config.get("connect_notice"), config, vault)
+        if view is None:
+            return
+        self._open_connect_notice(view)
+
+    def _open_connect_notice(self, view):
+        """The notice as a small modal. Only "Hide this notice" dismisses it for good.
+
+        "Later" and the window's own X close it and leave the notice for the next login.
+        """
+        win = ctk.CTkToplevel(self.root)
+        win.title("Projects were updated")
+        win.geometry("560x420")  # replaced by _fit_window once the content is built
+        win.configure(fg_color=C["bg"])
+        win.transient(self.root)
+        win.grab_set()
+        win.lift()
+        win.protocol("WM_DELETE_WINDOW", lambda: self._notice_later(win))
+
+        card = ctk.CTkFrame(win, fg_color=C["bg2"], corner_radius=12, border_width=1, border_color=C["amber"])
+        card.pack(fill="both", expand=True, padx=24, pady=24)
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=22, pady=20)
+        ctk.CTkLabel(inner, text=view["title"], font=(_UI_FONT, 17, "bold"), text_color=C["text"],
+                     anchor="w", justify="left", wraplength=470).pack(anchor="w", pady=(0, 10))
+        ctk.CTkLabel(inner, text=view["intro"], font=FONT, text_color=C["text2"], anchor="w",
+                     justify="left", wraplength=470).pack(anchor="w", pady=(0, 8))
+        for path, name, count_text in view["rows"]:
+            row = ctk.CTkFrame(inner, fg_color="transparent")
+            row.pack(fill="x")
+            ctk.CTkFrame(row, fg_color=C["border"], height=2, corner_radius=0).pack(fill="x")
+            line = ctk.CTkFrame(row, fg_color="transparent")
+            line.pack(fill="x", pady=8)
+            ctk.CTkLabel(line, text=name, font=(_UI_FONT, 12, "bold"), text_color=C["text"]).pack(side="left")
+            ctk.CTkLabel(line, text=count_text, font=FONT_XS, text_color=C["text3"]).pack(side="left", padx=(8, 0))
+            make_btn(line, "Pick keys", lambda p=path: self._notice_pick_keys(p),
+                     fg_color="transparent", text_color=C["accent"], width=96, height=30
+                     ).pack(side="right")
+        for paragraph in view["extras"]:
+            ctk.CTkLabel(inner, text=paragraph, font=FONT_XS, text_color=C["text2"], anchor="w",
+                         justify="left", wraplength=470).pack(anchor="w", pady=(10, 0))
+        ctk.CTkLabel(inner, text=view["footer"], font=FONT_XS, text_color=C["text3"], anchor="w",
+                     justify="left", wraplength=470).pack(anchor="w", pady=(12, 12))
+        buttons = ctk.CTkFrame(inner, fg_color="transparent")
+        buttons.pack(fill="x")
+        make_btn(buttons, "Later", lambda: self._notice_later(win), fg_color="transparent",
+                 text_color=C["text2"], width=90, height=36).pack(side="right")
+        make_btn(buttons, "Hide this notice", lambda: self._notice_hide(win), fg_color="transparent",
+                 text_color=C["text3"], width=140, height=36).pack(side="right", padx=(0, 8))
+        _fit_window(win, width=560)
+
+    def _notice_pick_keys(self, path):
+        """The notice's "Pick keys": the assign-keys dialog for that project."""
+        frame = getattr(self, "frame", None)
+        if isinstance(frame, AppFrame):
+            frame.assign_keys_to_project(path)
+
+    def _notice_later(self, win):
+        """"Later" (and the window's X): close the notice and keep it for next time."""
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def _notice_hide(self, win):
+        """"Hide this notice": the one thing that dismisses it for good."""
+        try:
+            pushkey_connect_migrate.dismiss_notice()
+        except Exception:
+            messagebox.showwarning(
+                "Pushkey", "The notice could not be hidden. It will show again next time.")
+            return
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def reload_app(self, pw, vault, vault_key=None):
         self.root.configure(fg_color=C["bg"])
-        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self)
+        self.switch(AppFrame, password=pw, vault=vault, on_lock=self.show_login, app=self,
+                    vault_key=vault_key)
 
 
 def _cli_main(args):
@@ -8610,7 +9675,7 @@ def _cli_main(args):
     p_inj = sub.add_parser("inject", help="Write .env to a folder")
     p_inj.add_argument("path", help="Project folder path")
     p_inj.add_argument("--env", default="all", choices=ENV_LEVELS, help="Target environment")
-    p_inj.add_argument("--keys", nargs="*", help="Specific key names to inject (default: all)")
+    p_inj.add_argument("--keys", nargs="+", required=True, help="Key names to inject (required)")
 
     # pushkey list [--env dev]
     p_lst = sub.add_parser("list", help="List keys and health status")
@@ -8649,7 +9714,7 @@ def _cli_main(args):
             raise SystemExit(1)
         try:
             inject_env_file(path, vault, key_names=ns.keys, target_env=ns.env)
-            written = [k for k in (ns.keys or vault.keys())
+            written = [k for k in ns.keys
                        if k in vault and (ns.env == "all" or vault[k].get("env", "all") in ("all", ns.env))]
             print(f"OK  wrote {len(written)} key(s) to {path}/.env")
         except Exception as e:

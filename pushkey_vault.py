@@ -7,8 +7,9 @@ import secrets
 import shutil
 import threading
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
+from typing import Callable, TypeVar
 
 import pushkey_shared as _s
 from pushkey_locking import FileLockTimeout, bounded_file_lock
@@ -538,7 +539,41 @@ def save_vault_with_key(vault, vault_key: bytes, *, expected_revision=None):
             tmp.unlink(missing_ok=True)
 
 
-def load_config():
+class ConfigUnreadableError(RuntimeError):
+    """config.json cannot be safely read or locked.
+
+    The message is the reason: "config_unreadable" (the file exists but is not a
+    readable config) or "config_busy" (another writer holds the config lock).
+    """
+
+
+_T = TypeVar("_T")
+
+#: How long update_config waits for another writer. Read at call time.
+_CONFIG_LOCK_TIMEOUT_SECONDS = 5.0
+
+
+def _decrypt_config(raw):
+    return AESGCM(_config_key()).decrypt(raw[:12], raw[12:], None)
+
+
+def load_config(*, strict: bool = False):
+    """Load config.json.
+
+    Lenient (the default, used by every read-only caller): a missing file and a
+    file that cannot be read both give {"projects": {}}. That is unsafe as the
+    first half of a read-modify-write, because saving the empty default over a
+    damaged file silently wipes every project.
+
+    strict=True: only a missing file (FileNotFoundError) gives the empty
+    default. An existing file that cannot be read, does not decrypt, does not
+    hold a JSON object, or whose "projects" is not a dict raises
+    ConfigUnreadableError("config_unreadable") and is left untouched. A strict
+    read never writes, so it is safe outside config_lock; a legacy plaintext
+    file is returned as parsed and re-encrypted by update_config's own save.
+    """
+    if strict:
+        return _load_config_strict()
     if not _s.CONFIG_FILE.exists():
         return {"projects": {}}
     raw = _s.CONFIG_FILE.read_bytes()
@@ -547,10 +582,7 @@ def load_config():
     # decryption first; only a file that does not decrypt is treated as a
     # legacy plaintext JSON config and migrated.
     try:
-        key = _config_key()
-        nonce, ct = raw[:12], raw[12:]
-        plaintext = AESGCM(key).decrypt(nonce, ct, None)
-        return json.loads(plaintext)
+        return json.loads(_decrypt_config(raw))
     except Exception:
         pass
     if raw.lstrip()[:1] == b"{":
@@ -563,11 +595,101 @@ def load_config():
     return {"projects": {}}
 
 
+def _load_config_strict():
+    """Return the config dict from disk, or raise ConfigUnreadableError.
+
+    "Missing" is decided by the read itself, not by exists(): exists() is also
+    False for ENOTDIR, ELOOP and WinError 123/1921, and treating those as an
+    empty registry would let the next save wipe a config we could not see.
+    The decision to raise is made after the try blocks: ConfigUnreadableError is
+    a RuntimeError and must not be swallowed by their broad excepts.
+    """
+    try:
+        raw = _s.CONFIG_FILE.read_bytes()
+    except FileNotFoundError:
+        return {"projects": {}}
+    except OSError as error:
+        raise ConfigUnreadableError("config_unreadable") from error
+    data = None
+    try:
+        data = json.loads(_decrypt_config(raw))
+    except Exception:
+        pass
+    if data is None and raw.lstrip()[:1] == b"{":
+        try:
+            data = json.loads(raw)  # legacy plaintext; update_config re-encrypts it
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        raise ConfigUnreadableError("config_unreadable")
+    if not isinstance(data.setdefault("projects", {}), dict):
+        raise ConfigUnreadableError("config_unreadable")
+    return data
+
+
 def save_config(config):
+    """Encrypt config and replace config.json atomically and durably.
+
+    Takes no lock: callers that read first must use update_config. Each call
+    writes its own uniquely named temp file next to config.json (the pid is in
+    the name for humans; mkstemp makes it unique per call, so threads of one
+    process never share it). The temp file is synced before the replace and the
+    folder after it, and is removed if anything fails.
+    """
     _s.ensure_vault_dir()
     key = _config_key()
     nonce = secrets.token_bytes(12)
     ct = AESGCM(key).encrypt(nonce, json.dumps(config, indent=2).encode(), None)
-    tmp = _s.CONFIG_FILE.with_suffix(".tmp")
-    tmp.write_bytes(nonce + ct)
-    os.replace(str(tmp), str(_s.CONFIG_FILE))
+    config_dir = _s.CONFIG_FILE.parent
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(config_dir), prefix=f"config.{os.getpid()}.", suffix=".tmp"
+    )
+    tmp = type(_s.CONFIG_FILE)(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(nonce + ct)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp), str(_s.CONFIG_FILE))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_parent(config_dir)
+
+
+@contextmanager
+def config_lock():
+    """Hold the cross-process config write lock (VAULT_DIR/.config.lock).
+
+    Not reentrant: nesting it, or calling update_config inside it, waits out the
+    timeout and then raises ConfigUnreadableError("config_busy"). Only a timeout
+    while acquiring is relabelled; anything raised in the body passes through.
+    """
+    _s.ensure_vault_dir()
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                bounded_file_lock(
+                    _s.VAULT_DIR / ".config.lock",
+                    timeout_seconds=_CONFIG_LOCK_TIMEOUT_SECONDS,
+                )
+            )
+        except FileLockTimeout:
+            raise ConfigUnreadableError("config_busy") from None
+        yield
+
+
+def update_config(mutate: Callable[[dict], _T]) -> _T:
+    """Read-modify-write config.json under config_lock and return mutate's result.
+
+    mutate receives the strictly loaded config dict and changes it in place. If
+    the file exists but cannot be read, ConfigUnreadableError is raised and
+    nothing is written. If mutate raises, nothing is written and the exception
+    propagates. mutate must not call update_config or config_lock: the lock is
+    held for the whole call and is not reentrant.
+    """
+    with config_lock():
+        config = load_config(strict=True)
+        result = mutate(config)
+        save_config(config)
+        return result

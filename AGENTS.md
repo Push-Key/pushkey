@@ -17,6 +17,7 @@ When driving Pushkey via MCP, choose the rotation/add path by key lifetime:
 | Short-lived (dev, test, sandbox, throwaway) | `add_key` / `rotate_key` / `set_backup_key` over MCP | Fast, plaintext exposure acceptable when key is disposable |
 | Long-lived (prod, shared, anything you'd rotate on a schedule) | Local CLI (`pushkey add` / `rotate` / `set-backup`, getpass) | Secret never reaches LLM provider or chat transcript |
 | Long-lived, agent-driven rotation | Pre-stage backup via CLI, then `rotate_to_backup(name)` over MCP | Only the *name* crosses the LLM channel |
+| Connect an existing key to a project | `preview_connection(name, project_path, file?, var?)`, then `connect_key(name, project_path, file?, var?, confirm?)` over MCP | Names and paths only: no secret crosses the chat. `connect_key` needs the `write` and `inject` scopes; `confirm` takes `env_mismatch` and `public_prefix` and only after a person has seen the preview |
 
 Plaintext MCP write tools (`add_key`, `rotate_key`, `set_backup_key`) return a
 `warning` field. Agents MUST surface that warning to the user when the call
@@ -56,6 +57,17 @@ No linting config, project uses no formatter/linter config files.
 ## Updating the Desktop Icon (Windows)
 
 **CRITICAL, read this before touching the desktop icon. Six attempts failed because of folder confusion before this was documented.**
+
+> **Smart App Control blocks freshly built exes (found 2026-11-22).** On this machine Smart App Control is on
+> (`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy` value `VerifiedAndReputablePolicyState` = 1). A
+> PyInstaller build is unsigned, so Windows refuses to start it: `Start-Process` fails with "An Application
+> Control policy has blocked this file" and Code Integrity logs events 3033/3077 ("did not meet the Enterprise
+> signing level requirements") in `Microsoft-Windows-CodeIntegrity/Operational`. The July builds in `dist\` and in
+> `Desktop\Pushkey\` were blocked this way; only the older May `Desktop\Pushkey.exe` still starts.
+> **Before Step 3, start the new exe once from `dist\`. If Windows blocks it, do NOT copy it over the desktop exe:**
+> that replaces the one working copy with a blocked one. Keep a copy of the working desktop exe first. Until
+> builds are code-signed, the desktop shortcut runs the app from source (`pythonw.exe pushkey.py`, working
+> directory = the repo).
 
 ### Why this is non-obvious
 
@@ -99,7 +111,7 @@ for r1 in pe.DIRECTORY_ENTRY_RESOURCE.entries:
 ```
 If it prints fewer sizes than the source `.ico` had, the cache wasn't cleared, try again.
 
-**Step 3, Copy the fresh `.exe` over the desktop copy. Resolve real desktop via API:**
+**Step 3, Copy the fresh `.exe` over the desktop copy, but only if it starts (see the Smart App Control note above). Resolve real desktop via API:**
 ```powershell
 Get-Process -Name "Pushkey" -ErrorAction SilentlyContinue | Stop-Process -Force
 $realDesktop = [Environment]::GetFolderPath('Desktop')   # NOT $env:USERPROFILE\Desktop
@@ -162,10 +174,12 @@ Vault entry point: `load_vault(password)` → `(dict, key)`, `save_vault(dict, p
 
 `vault.enc` decrypts to a JSON dict:
 ```
-{key_name: {value, created, rotated, provider, env, projects: [...], notes}}
+{key_name: {value, created, rotated, provider, env, projects: [...], connections: [{project, file, var, added}], notes}}
 ```
 
-`~/.pushkey/config.json` holds project paths and key assignments (encrypted separately).
+`rotated` is a date on older entries and a `%Y-%m-%dT%H:%M:%S` timestamp on entries written by rotate, promote or connect (readers accept both). `connections` says which project file and variable receive the key; `projects` is the older allowlist.
+
+`~/.pushkey/config.json` holds the registered projects, keyed by absolute folder path (`{name, created, default_file, environment}`), plus `connect_schema`, `connect_notice`, `last_project` and `projects_legacy` (the desktop's old name-keyed entries after the one-time migration). It is encrypted separately and written with mode 0600 on POSIX. Connections live in the vault entry, not here.
 `~/.pushkey/health.json` is a public sidecar, no secrets, just health status + timestamps.
 
 ### Tier/License System (`pushkey_tiers.py`)
@@ -190,8 +204,10 @@ PushkeyApp
     │             # forecast heatmap + upcoming rotations, activity feed
     ├── All Keys  # search bar + env filter pills, grouped key rows with
     │             # health/env pills + inline action buttons
-    ├── Projects  # status-pill cards (ACTIVE / NEEDS ASSIGN / EMPTY) with
-    │             # icon-labeled action buttons
+    ├── Projects  # status-pill cards (ACTIVE / NO KEYS CONNECTED) listing the
+    │             # keys connected to each project, with icon-labeled action buttons
+    │             # (an expanded key on All Keys has a USED IN block: one row per
+    │             # connection with its state, "Update now" and "Disconnect")
     ├── Security  # vault scan, git history scan, policy groups
     ├── Cloud     # sync status, devices, conflict resolution
     └── Timeline  # 3 sub-tabs:
@@ -216,7 +232,7 @@ PushkeyApp
   transparent PIL image at requested size.
 - Public API: `load_icon(name, size, color)` → PIL Image (cached per name+size+color).
 - `pushkey.py` wraps it in `icon(name, size, color)` → `CTkImage` (also cached).
-- **PyInstaller MUST be told about it via `--hidden-import`** because the import is wrapped in a try/except for dev resilience. All 6 submodules (`pushkey_shared`, `pushkey_crypto`, `pushkey_vault`, `pushkey_tiers`, `pushkey_providers`, `pushkey_icons`) are wired in `build_exe.py`.
+- **PyInstaller MUST be told about it via `--hidden-import`** because the import is wrapped in a try/except for dev resilience. All 6 original submodules (`pushkey_shared`, `pushkey_crypto`, `pushkey_vault`, `pushkey_tiers`, `pushkey_providers`, `pushkey_icons`) are wired in `build_exe.py`, and so are the newer ones (`pushkey_env`, `pushkey_locking`, `pushkey_health`, `pushkey_projectfs`, `pushkey_connect`, `pushkey_connect_migrate`). A new module must also be added to `py-modules` in `pyproject.toml` and to `hiddenimports` in `Pushkey.spec` (the spec currently lacks `pushkey_locking` and `pushkey_health`).
 
 **Theme switching** (`AppFrame._toggle_theme` → `_apply_theme_inplace`)
 - Does NOT destroy + rebuild AppFrame (that was the old slowdown). Instead it
@@ -280,7 +296,7 @@ PushkeyApp
 
 - Master password **never** stored; vault decrypted in memory only.
 - Cloud sync sends only AES-GCM ciphertext, server is zero-knowledge.
-- `.env` injection always adds `.env` to project's `.gitignore`.
+- Connecting or syncing a file always lists that exact file in the project's `.gitignore` first, and refuses a file git tracks. Key values never leave `pushkey_connect` in results, logs, audit lines or health.
 - Audit log entries are individually encrypted (length-prefixed binary format).
 - Team exports embed ephemeral salt in payload; recipient derives key from shared password, not persisted salt.
 
@@ -298,6 +314,10 @@ Test files:
 | `test_key_rotation.py` | Rotation timestamps, history |
 | `test_env_injection.py` | `.env` merge, gitignore dedup |
 | `test_multi_project.py` | Project link/unlink |
+| `test_connect_core.py`, `test_connect_flow.py`, `test_connect_migrate.py` | Add-and-connect core: registry, preview, connect, sync, migration |
+| `test_cli_connect.py`, `test_local_api_connect.py`, `test_mcp_connect.py` | Add-and-connect in the CLI, local API and MCP server |
+| `test_desktop_projects.py`, `test_desktop_save.py` | Desktop add-and-connect screens and save safety |
+| `test_env_text.py`, `test_env_backups.py`, `test_projectfs.py`, `test_config_storage.py` | Env text, backups, safe project writes, config storage |
 | `test_provider_detection.py` | Provider pattern matching |
 | `test_providers.py` | `pushkey_providers` module (20 tests) |
 | `test_cli.py` | CLI commands (26 tests) |

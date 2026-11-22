@@ -18,9 +18,9 @@ import threading
 import hashlib
 import base64
 import tempfile
-import stat
 import copy
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Literal
 from urllib.parse import urlsplit
@@ -34,17 +34,22 @@ from pydantic import BaseModel, ConfigDict, Field
 import json
 
 import pushkey_shared as _s
+import pushkey_projectfs as _pfs
+import pushkey_connect as _pc
+import pushkey_connect_migrate as _pcm
+import pushkey_vault as _pv
+from pushkey_connect import ConnectError
 from pushkey_crypto import (
     _V3_MAGIC,
     _deserialize_vault,
     _migrate_vault,
     decrypt_data_v3,
     generate_recovery_code,
+    log_event,
     VaultAuthenticationError,
     VaultFormatError,
     VaultIntegrityError,
 )
-from pushkey_env import mutate_env_file, sanitize_env_value
 from pushkey_vault import (
     MAX_VAULT_BYTES,
     load_vault,
@@ -54,6 +59,7 @@ from pushkey_vault import (
     rekey_v3_password,
     save_vault,
     replace_encrypted_vault_bytes,
+    ConfigUnreadableError,
     VaultBusyError,
 )
 from pushkey_health import HealthSidecarError, HealthUnavailableError, publish_saved_vault
@@ -82,6 +88,19 @@ class UnlockBody(StrictBody):
     recovery_code: Optional[str] = Field(default=None, min_length=1, max_length=256)
 
 
+Confirmation = Literal["env_mismatch", "public_prefix"]
+
+
+class ConnectBody(StrictBody):
+    """Where a key goes when it is added: a registered project, and optionally the
+    env file and variable (defaults: the project's default file, the key name)."""
+
+    project: str = Field(min_length=1, max_length=4096)
+    file: Optional[str] = Field(default=None, max_length=1024)
+    var: Optional[str] = Field(default=None, max_length=256)
+    confirmed: list[Confirmation] = Field(default_factory=list, max_length=2)
+
+
 class KeyCreate(StrictBody):
     name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
     value: str = Field(min_length=1, max_length=65536)
@@ -89,6 +108,7 @@ class KeyCreate(StrictBody):
     env: Literal["dev", "test", "staging", "prod", "all"] = "dev"
     notes: str = Field(default="", max_length=4096)
     overwrite: bool = False
+    connect: Optional[ConnectBody] = None
 
 
 class KeyUpdate(StrictBody):
@@ -110,8 +130,41 @@ class ProjectCreate(StrictBody):
     name: Optional[str] = Field(default=None, max_length=256)
 
 
-class ProjectAssign(StrictBody):
+class ProjectKeys(StrictBody):
     keys: list[str] = Field(max_length=512)
+
+
+class ProjectAssign(ProjectKeys):
+    confirmed: list[Confirmation] = Field(default_factory=list, max_length=2)
+
+
+class ConnectionRef(StrictBody):
+    key: str = Field(min_length=1, max_length=256)
+    project: str = Field(min_length=1, max_length=4096)
+    file: Optional[str] = Field(default=None, max_length=1024)
+    var: Optional[str] = Field(default=None, max_length=256)
+
+
+class ConnectionPreview(ConnectionRef):
+    # For a key that is not saved yet (the add flow previews before it saves).
+    value: Optional[str] = Field(default=None, min_length=1, max_length=65536)
+    env: Optional[Literal["dev", "test", "staging", "prod", "all"]] = None
+
+
+class ConnectionCreate(ConnectionRef):
+    confirmed: list[Confirmation] = Field(default_factory=list, max_length=2)
+
+
+class ConnectionDelete(StrictBody):
+    key: str = Field(min_length=1, max_length=256)
+    project: str = Field(min_length=1, max_length=4096)
+    file: str = Field(min_length=1, max_length=1024)
+    var: str = Field(min_length=1, max_length=256)
+
+
+class ConnectionSync(StrictBody):
+    key: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    project: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 
 class InjectBody(StrictBody):
@@ -287,83 +340,177 @@ def _verify_static_manifest(static: str) -> dict:
         raise RuntimeError("bundled web app integrity verification failed") from exc
 
 
+def _http_error(err: "_pfs.ProjectPathError") -> HTTPException:
+    return HTTPException(err.status, err.reason)
+
+
+#: ConnectError code -> HTTP status. The response detail is always the code.
+_CONNECT_STATUS = {
+    "migration_pending": 409,
+    "config_unreadable": 503,
+    "config_busy": 503,
+    "key_exists": 409,
+    "key_not_found": 404,
+    "project_not_registered": 404,
+    "var_taken": 409,
+    "confirmation_required": 409,
+    "file_tracked_by_git": 400,
+    "vault_changed": 409,
+    "vault_unavailable": 423,
+    "project_exists": 409,
+    "project_limit": 402,
+    "connection_not_found": 404,
+    "invalid_var": 400,
+    "invalid_env_file": 400,
+    "read_failed": 500,
+    "backup_failed": 500,
+}
+
+
+def _error_status_and_body(exc: Exception) -> tuple[int, dict]:
+    """``(status, JSON body)`` for an error the connect core raises.
+
+    The body carries the stable code and, for ``confirmation_required``, the
+    confirmations still missing. Nothing else from the error (names, paths) is
+    echoed, and no key value ever is.
+    """
+    if isinstance(exc, ConnectError):
+        body: dict = {"detail": exc.code}
+        if exc.code == "confirmation_required":
+            body["needs"] = list(exc.detail.get("needs", []))
+        return _CONNECT_STATUS.get(exc.code, 500), body
+    if isinstance(exc, ConfigUnreadableError):
+        reason = str(exc)
+        return 503, {"detail": reason if reason in ("config_unreadable", "config_busy") else "config_unreadable"}
+    if isinstance(exc, _pfs.ProjectPathError):
+        return exc.status, {"detail": exc.reason}
+    return 500, {"detail": "internal error"}
+
+
+def _core_credentials(sess) -> dict:
+    """The credentials the connect core is given for this session.
+
+    The master password goes in only for a password session: a recovery session
+    stores its recovery code in ``sess.password``, and handing that to a vault
+    save would re-encrypt the vault under the recovery code. A token session
+    never holds a password. ``target`` is the session's vault, kept current by
+    the core after every save.
+    """
+    return {
+        "vault_key": sess.vault_key,
+        "password": sess.password if sess.auth_method == "password" else None,
+        "target": sess.vault,
+    }
+
+
+def _core_actor(sess) -> str:
+    """The name audit lines carry for this session."""
+    if sess.auth_method == "password":
+        return "local-api"
+    if sess.auth_method == "agent_token":
+        return "local-api agent-token"
+    return "local-api recovery"
+
+
+def _may_inject(sess) -> bool:
+    """Whether this session may write project files (the inject scope, or the master password)."""
+    return sess.auth_method == "password" or (
+        sess.auth_method == "agent_token" and "inject" in sess.scopes
+    )
+
+
+def _check_key_name(name: str) -> None:
+    """Names starting with ``_`` are vault metadata, never keys (as in every key route)."""
+    if name.startswith("_"):
+        raise ConnectError("key_not_found", {"key": name})
+
+
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _connection_rows(entry) -> list[dict]:
+    """``{project, file, var}`` of each well-formed connection of a vault entry."""
+    connections = entry.get("connections") if isinstance(entry, dict) else None
+    rows = []
+    for conn in connections if isinstance(connections, list) else []:
+        if isinstance(conn, dict) and all(isinstance(conn.get(part), str) for part in ("project", "file", "var")):
+            rows.append({"project": conn["project"], "file": conn["file"], "var": conn["var"]})
+    return rows
+
+
+def _require_registered(config: dict, raw_path: str) -> str:
+    """The registered key of the project folder ``raw_path`` names.
+
+    Raises ConnectError ``migration_pending`` for a store that is not migrated yet and
+    ``project_not_registered`` for a folder that is not a registered project.
+    """
+    if not _pc.is_migrated(config):
+        raise ConnectError("migration_pending")
+    canonical = _pfs.canonical_project_path(raw_path, must_exist=False)
+    for key in _pc.registered_projects(config):
+        if _path_key(key) == _path_key(canonical):
+            return key
+    raise ConnectError("project_not_registered", {"project": canonical})
+
+
+def _set_warning(response: Response, *warnings: Optional[str]) -> None:
+    """Report the core's warnings (health publication, last_error) in ``X-Pushkey-Warning``."""
+    values = list(dict.fromkeys(warning for warning in warnings if warning))
+    if values:
+        response.headers["X-Pushkey-Warning"] = ",".join(values)
+
+
+def _result_warnings(results) -> list[Optional[str]]:
+    return [warning for result in results for warning in (result.health_warning, result.warning)]
+
+
+def _replace_value_of(fresh: dict, name: str, new_value: str) -> dict:
+    """Rotate-style replacement on a freshly loaded vault (the commit's mutate step)."""
+    entry = fresh.get(name)
+    if not isinstance(entry, dict):
+        raise ConnectError("key_not_found", {"key": name})
+    _pc.replace_value(entry, new_value)
+    return entry
+
+
 def _canonical_project_path(raw: str, *, must_exist: bool = True) -> str:
     """Return a canonical absolute project directory, rejecting ambiguous paths."""
-    if not raw or "\x00" in raw or any(ord(ch) < 32 for ch in raw):
-        raise HTTPException(400, "invalid project path")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise HTTPException(400, "project path must be absolute")
     try:
-        resolved = path.resolve(strict=must_exist)
-    except (OSError, RuntimeError):
-        raise HTTPException(400, "invalid project path") from None
-    if must_exist and not resolved.is_dir():
-        raise HTTPException(400, "project directory not found")
-    return str(resolved)
+        return _pfs.canonical_project_path(raw, must_exist=must_exist)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _is_link_or_reparse(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    attrs = getattr(info, "st_file_attributes", 0)
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(info.st_mode) or bool(attrs & reparse)
+    return _pfs.is_link_or_reparse(path)
 
 
 def _project_identity(project: Path) -> tuple[int, int]:
-    info = project.stat()
-    return (info.st_dev, info.st_ino)
+    return _pfs.project_identity(project)
 
 
 def _assert_project_target(
     project: Path, registered: str, target: Path, expected_identity: tuple[int, int]
 ) -> None:
-    if _canonical_project_path(str(project)) != registered:
-        raise HTTPException(409, "project path changed during write")
-    if _is_link_or_reparse(project) or _is_link_or_reparse(target):
-        raise HTTPException(400, "refusing link or reparse-point project target")
-    if target.parent.resolve(strict=True) != Path(registered):
-        raise HTTPException(400, "project target escapes registered directory")
-    if _project_identity(project) != expected_identity:
-        raise HTTPException(409, "project directory identity changed during write")
+    try:
+        relpath = target.relative_to(project).as_posix()
+    except ValueError:
+        raise HTTPException(400, "project target escapes registered directory") from None
+    try:
+        _pfs.resolve_project_target(registered, relpath, expected_identity)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _atomic_project_write(
     registered: str, filename: str, data: bytes, expected_identity: Optional[tuple[int, int]] = None
 ) -> None:
-    """Write a fixed project file without following links or exposing partial data."""
-    project = Path(registered)
-    target = project / filename
-    identity = expected_identity or _project_identity(project)
-    _assert_project_target(project, registered, target, identity)
-    fd, temporary = tempfile.mkstemp(prefix=f".{filename}.pushkey-", dir=project)
-    temp_path = Path(temporary)
+    """Write a project file without following links or exposing partial data."""
     try:
-        with os.fdopen(fd, "wb", closefd=True) as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _assert_project_target(project, registered, target, identity)
-        if _is_link_or_reparse(temp_path):
-            raise HTTPException(409, "temporary project target changed")
-        os.replace(temp_path, target)
-        _assert_project_target(project, registered, target, identity)
-        try:
-            directory_fd = os.open(
-                str(project),
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
-    finally:
-        temp_path.unlink(missing_ok=True)
+        _pfs.atomic_project_write(registered, filename, data, expected_identity)
+    except _pfs.ProjectPathError as err:
+        raise _http_error(err) from None
 
 
 def _canonicalize_registered_projects(cfg: dict, vault: Optional[dict] = None) -> bool:
@@ -394,6 +541,11 @@ def _canonicalize_registered_projects(cfg: dict, vault: Optional[dict] = None) -
                 assigned = entry.get("projects")
                 if isinstance(assigned, list):
                     entry["projects"] = [replacements.get(item, item) for item in assigned]
+                connections = entry.get("connections")
+                if isinstance(connections, list):
+                    for conn in connections:
+                        if isinstance(conn, dict) and conn.get("project") in replacements:
+                            conn["project"] = replacements[conn["project"]]
     return changed
 
 
@@ -439,6 +591,13 @@ def create_app() -> FastAPI:
             for error in exc.errors()
         ]
         return JSONResponse(status_code=400, content={"detail": "invalid request", "fields": fields})
+
+    async def connect_error(_: Request, exc: Exception):
+        status_code, content = _error_status_and_body(exc)
+        return JSONResponse(status_code=status_code, content=content)
+
+    for error_type in (ConnectError, ConfigUnreadableError, _pfs.ProjectPathError):
+        app.add_exception_handler(error_type, connect_error)
 
     port = _resolve_port()
     allowed_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"] if port else ["http://testserver"]
@@ -636,7 +795,27 @@ def create_app() -> FastAPI:
             raise HTTPException(401, "invalid credentials")
         method = "password" if body.password else "recovery"
         sess.unlock(vault, vault_key, secret, method=method)
+        # Only a master-password unlock may change the project store, and only when
+        # there is a vault file (a missing one must not be created by an unlock).
+        if method == "password" and _s.VAULT_FILE.exists():
+            _migrate_project_store(sess)
         return {"locked": False, "key_count": len(vault), "can_write": sess.can_write, "auth_method": method}
+
+    def _migrate_project_store(sess: _Session) -> None:
+        """Run the one-time project store migration; the unlock never fails because of it.
+
+        A damaged or busy config, a busy vault or a failed save all leave the store as it
+        was (the next password unlock tries again); project routes then answer 503 or 409.
+        The log line names the error type and, for the core's own errors, its code.
+        """
+        try:
+            with app.state.project_lock:
+                _pcm.ensure_migrated(
+                    vault_key=sess.vault_key, password=sess.password, target=sess.vault
+                )
+        except Exception as error:
+            code = f": {error}" if isinstance(error, (ConnectError, ConfigUnreadableError)) else ""
+            log_event(f"local-api: project store migration skipped ({type(error).__name__}{code})")
 
     @app.post("/api/lock")
     def post_lock(_: None = Depends(require_token)):
@@ -662,6 +841,7 @@ def create_app() -> FastAPI:
                 "dual_rotation": bool(data.get("dual_rotation")),
                 "has_backup": bool(data.get("next_value")),
                 "history_count": len(data.get("history", []) or []),
+                "connections": len(_connection_rows(data)),
                 "team_role": data.get("team_role"),
                 "masked": _mask(data.get("value", "")),
             })
@@ -743,9 +923,12 @@ def create_app() -> FastAPI:
         committed while we held the in-process lock -- the cross-writer secret
         loss this transaction exists to prevent.
         """
-        from pushkey_vault import load_config, save_config
-        with app.state.project_lock:
-            cfg = load_config()
+        from pushkey_vault import save_config
+        # The config lock keeps this read-modify-write apart from the connect core's own
+        # config writers (register, migrate); a strict read refuses a damaged config
+        # (ConfigUnreadableError -> 503) instead of treating it as empty and saving over it.
+        with app.state.project_lock, _pv.config_lock():
+            cfg = _pv.load_config(strict=True)
             original_cfg = copy.deepcopy(cfg)
             original_vault = copy.deepcopy(sess.vault)
             cfg_bytes = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
@@ -773,26 +956,91 @@ def create_app() -> FastAPI:
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d")
 
+    def _after_value_change(sess: _Session, name: str) -> tuple[dict, list[Optional[str]]]:
+        """Bring a key's connected files up to date after its value changed.
+
+        Returns ``(response fields, warnings)``. A session that may write project files
+        (the master password, or an agent token with the inject scope) syncs and reports
+        ``synced``; any other agent token lists the connections it could not write in
+        ``not_synced``. The value is already saved when this runs, so a sync that cannot
+        start (an unreadable config, a store not yet migrated) is reported as
+        ``sync_error`` and never turns the successful change into an error (a retry
+        would change the key twice).
+        """
+        if not _may_inject(sess):
+            return {"not_synced": _connection_rows(sess.vault.get(name))}, []
+        try:
+            results = _pc.sync(
+                key_name=name, actor=_core_actor(sess), **_core_credentials(sess)
+            )
+        except Exception as error:
+            # A code only: the class name of anything unexpected, never its message.
+            code = (
+                error.code if isinstance(error, ConnectError)
+                else str(error) if isinstance(error, ConfigUnreadableError)
+                else type(error).__name__
+            )
+            return {"synced": [], "sync_error": code}, []
+        return {"synced": [asdict(result) for result in results]}, _result_warnings(results)
+
     @app.post("/api/keys", status_code=201)
     def create_key(body: KeyCreate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         import pushkey_providers as _prov
         if body.name.startswith("_"):
             raise HTTPException(400, "key names cannot start with '_'")
-        if body.name in sess.vault and not body.overwrite:
+        exists = body.name in sess.vault
+        if exists and not body.overwrite:
             raise HTTPException(409, f"key '{body.name}' exists; pass overwrite=true to replace")
-        provider = body.provider or _prov.detect_provider(body.name, body.value) or "Unknown"
-        now = _now_date()
-        sess.vault[body.name] = {
-            "value": body.value,
-            "created": now,
-            "rotated": now,
-            "provider": provider,
-            "env": body.env,
-            "projects": [],
-            "notes": body.notes,
-        }
-        _save(sess, response)
-        return {"name": body.name, "provider": provider, "env": body.env}
+        if body.connect is not None and not _may_inject(sess):
+            # Connecting writes a project file: an agent token needs the inject scope for it.
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "agent token missing required scope: inject"
+            )
+        if not exists and body.connect is None:
+            provider = body.provider or _prov.detect_provider(body.name, body.value) or "Unknown"
+            now = _now_date()
+            sess.vault[body.name] = {
+                "value": body.value,
+                "created": now,
+                "rotated": now,
+                "provider": provider,
+                "env": body.env,
+                "projects": [],
+                "notes": body.notes,
+            }
+            _save(sess, response)
+            return {"name": body.name, "provider": provider, "env": body.env}
+
+        # Connecting, or replacing a key that exists: the core reloads the vault, saves it
+        # and writes the files. An overwrite keeps the key's connections (and its provider,
+        # env and notes, as a rotation does) and brings every connected file up to date.
+        credentials, actor = _core_credentials(sess), _core_actor(sess)
+        with app.state.project_lock:
+            warnings: list[Optional[str]] = []
+            connection = None
+            if body.connect is not None:
+                connection = _pc.connect(
+                    key_name=body.name, project=body.connect.project, file=body.connect.file,
+                    var=body.connect.var, value=body.value, replace=body.overwrite,
+                    provider=body.provider, env=body.env, notes=body.notes,
+                    confirmed=body.connect.confirmed, write=True, actor=actor, **credentials,
+                )
+                warnings += [connection.health_warning, connection.warning]
+            else:
+                saved = _pc.commit(
+                    lambda fresh: _replace_value_of(fresh, body.name, body.value), **credentials
+                )
+                warnings.append(saved.health_warning)
+            follow_up: dict = {}
+            if exists:
+                follow_up, more = _after_value_change(sess, body.name)
+                warnings += more
+            entry = sess.vault.get(body.name) or {}
+        _set_warning(response, *warnings)
+        result = {"name": body.name, "provider": entry.get("provider"), "env": entry.get("env")}
+        if connection is not None:
+            result["connection"] = asdict(connection)
+        return {**result, **follow_up}
 
     @app.patch("/api/keys/{name}")
     def update_key(name: str, body: KeyUpdate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
@@ -819,14 +1067,18 @@ def create_app() -> FastAPI:
     def rotate_key(name: str, body: RotateBody, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
-        entry = sess.vault[name]
-        old_val = entry.get("value", "")
-        entry.setdefault("history", []).insert(0, {"value": old_val, "retired": _now_date()})
-        entry["history"] = entry["history"][:10]
-        entry["value"] = body.new_value
-        entry["rotated"] = _now_date()
-        _save(sess, response)
-        return {"name": name, "rotated": entry["rotated"], "history_count": len(entry["history"])}
+        credentials = _core_credentials(sess)
+        with app.state.project_lock:
+            saved = _pc.commit(
+                lambda fresh: _replace_value_of(fresh, name, body.new_value), **credentials
+            )
+            follow_up, warnings = _after_value_change(sess, name)
+        entry = saved.value
+        _set_warning(response, saved.health_warning, *warnings)
+        return {
+            "name": name, "rotated": entry["rotated"], "history_count": len(entry["history"]),
+            **follow_up,
+        }
 
     @app.post("/api/keys/{name}/backup")
     def set_backup(name: str, body: BackupBody, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
@@ -845,24 +1097,28 @@ def create_app() -> FastAPI:
     def promote_backup(name: str, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
         if name.startswith("_") or name not in sess.vault:
             raise HTTPException(404, "key not found")
-        entry = sess.vault[name]
-        if not entry.get("next_value"):
-            raise HTTPException(400, "no backup key staged")
-        old_val = entry.get("value", "")
-        entry.setdefault("history", []).insert(0, {"value": old_val, "retired": _now_date()})
-        entry["history"] = entry["history"][:10]
-        entry["value"] = entry["next_value"]
-        entry["rotated"] = _now_date()
-        entry["next_value"] = None
-        entry["next_added"] = None
-        _save(sess, response)
-        return {"name": name, "rotated": entry["rotated"]}
+        def promote(fresh: dict) -> dict:
+            entry = fresh.get(name)
+            if not isinstance(entry, dict):
+                raise ConnectError("key_not_found", {"key": name})
+            if not entry.get("next_value"):
+                raise HTTPException(400, "no backup key staged")
+            _pc.replace_value(entry, entry["next_value"])
+            entry["next_value"] = None
+            entry["next_added"] = None
+            return entry
+
+        credentials = _core_credentials(sess)
+        with app.state.project_lock:
+            saved = _pc.commit(promote, **credentials)
+            follow_up, warnings = _after_value_change(sess, name)
+        _set_warning(response, saved.health_warning, *warnings)
+        return {"name": name, "rotated": saved.value["rotated"], **follow_up}
 
     # ── projects ──────────────────────────────────────────────────────────
 
     @app.get("/api/projects")
     def list_projects(response: Response, sess: _Session = Depends(require_scope("read")), _: None = Depends(require_token)):
-        from pushkey_vault import load_config, save_config
         vault_view = sess.vault
         if sess.can_write:
             cfg, _ = _persist_project_state(
@@ -874,150 +1130,269 @@ def create_app() -> FastAPI:
             )
         else:
             with app.state.project_lock:
-                cfg = copy.deepcopy(load_config())
+                cfg = copy.deepcopy(_pv.load_config(strict=True))
                 vault_view = copy.deepcopy(sess.vault)
             _canonicalize_registered_projects(cfg, vault_view)
-        projects = cfg.get("projects", {})
         result = []
-        for path, meta in projects.items():
-            assigned = [n for n, m in vault_view.items()
-                        if isinstance(m, dict) and path in (m.get("projects") or [])]
+        for path, meta in _pc.registered_projects(cfg).items():
+            names, count = [], 0
+            for name, entry in vault_view.items():
+                if name.startswith("_"):
+                    continue
+                here = [row for row in _connection_rows(entry) if _path_key(row["project"]) == _path_key(path)]
+                if here:
+                    names.append(name)
+                    count += len(here)
             result.append({
                 "path": path,
                 "name": meta.get("name", path.split("/")[-1].split("\\")[-1]),
-                "keys": assigned,
+                "keys": names,
                 "created": meta.get("created"),
+                "connections": count,
             })
         return {"projects": result, "count": len(result)}
 
     @app.post("/api/projects", status_code=201)
-    def create_project(body: ProjectCreate, response: Response, sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
-        from pushkey_vault import load_config, save_config
-        canonical = _canonical_project_path(body.path)
-        def mutate_create(current_cfg, current_vault):
-            _canonicalize_registered_projects(current_cfg, current_vault)
-            current_cfg.setdefault("projects", {})
-            if canonical in current_cfg["projects"]:
-                raise HTTPException(409, "project exists")
-            current_cfg["projects"][canonical] = {
-                "name": body.name or Path(canonical).name,
-                "created": _now_date(),
-            }
-        cfg, _ = _persist_project_state(sess, mutate_create, response=response)
-        return {"path": canonical, "name": cfg["projects"][canonical]["name"]}
+    def create_project(body: ProjectCreate, sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+        canonical, record = _pc.register_project(body.path, name=body.name)
+        return {"path": canonical, "name": record["name"]}
 
     @app.delete("/api/projects", status_code=204)
-    def delete_project(response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
-        from pushkey_vault import load_config, save_config
-        path = _canonical_project_path(path)
-        def mutate_delete(current_cfg, current_vault):
-            _canonicalize_registered_projects(current_cfg, current_vault)
-            if path not in current_cfg.get("projects", {}):
-                raise HTTPException(404, "project not found")
-            del current_cfg["projects"][path]
-            for entry in current_vault.values():
-                if isinstance(entry, dict):
-                    projs = entry.get("projects") or []
-                    if path in projs:
-                        projs.remove(path)
-                        entry["projects"] = projs
-        _persist_project_state(sess, mutate_delete, response=response)
+    def delete_project(response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_writable), _: None = Depends(require_token)):
+        with app.state.project_lock:
+            saved = _pc.unregister_project(path, **_core_credentials(sess))
+        _set_warning(response, saved.health_warning)
 
     @app.post("/api/projects/assign")
     def assign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
-        from pushkey_vault import load_config
-        path = _canonical_project_path(path)
-        def mutate_assign(current_cfg, current_vault):
-            _canonicalize_registered_projects(current_cfg, current_vault)
-            if path not in current_cfg.get("projects", {}):
-                raise HTTPException(404, "project not found")
-            missing = [k for k in body.keys if k not in current_vault or not isinstance(current_vault[k], dict)]
+        credentials, actor = _core_credentials(sess), _core_actor(sess)
+        with app.state.project_lock:
+            cfg = _pv.load_config(strict=True)
+            project = _require_registered(cfg, path)
+            missing = [
+                k for k in body.keys
+                if k.startswith("_") or not isinstance(sess.vault.get(k), dict)
+            ]
             if missing:
                 raise HTTPException(400, f"keys not in vault: {missing}")
-            for key in body.keys:
-                projects = current_vault[key].setdefault("projects", [])
-                if path not in projects:
-                    projects.append(path)
-        _persist_project_state(sess, mutate_assign, response=response)
-        return {"path": path, "assigned": body.keys}
+            # Every key is checked before the first one is connected, so a refusal
+            # (variable taken, confirmation missing, a tracked file) applies nothing.
+            needs = {
+                code
+                for k in body.keys
+                for code in _pc.preview(sess.vault, cfg, key_name=k, project=project).needs_confirm
+                if code not in body.confirmed
+            }
+            if needs:
+                raise ConnectError("confirmation_required", {"needs": sorted(needs)})
+            warnings: list[Optional[str]] = []
+            for k in body.keys:
+                result = _pc.connect(
+                    key_name=k, project=project, write=False, confirmed=body.confirmed,
+                    actor=actor, **credentials,
+                )
+                warnings += [result.health_warning, result.warning]
+        _set_warning(response, *warnings)
+        return {"path": project, "assigned": body.keys}
 
     @app.post("/api/projects/unassign")
-    def unassign_keys(body: ProjectAssign, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
-        path = _canonical_project_path(path)
-        from pushkey_vault import load_config
-        def mutate_unassign(current_cfg, current_vault):
-            _canonicalize_registered_projects(current_cfg, current_vault)
-            if path not in current_cfg.get("projects", {}):
-                raise HTTPException(404, "project not found")
-            for key in body.keys:
-                entry = current_vault.get(key)
-                if isinstance(entry, dict):
-                    projects = entry.get("projects") or []
-                    if path in projects:
-                        projects.remove(path)
-                        entry["projects"] = projects
-        _persist_project_state(sess, mutate_unassign, response=response)
-        return {"path": path, "unassigned": body.keys}
+    def unassign_keys(body: ProjectKeys, response: Response, path: str = Query(min_length=1, max_length=4096), sess: _Session = Depends(require_scope("write")), _: None = Depends(require_token)):
+        credentials, actor = _core_credentials(sess), _core_actor(sess)
+        with app.state.project_lock:
+            project = _require_registered(_pv.load_config(strict=True), path)
+            warnings: list[Optional[str]] = []
+            for k in body.keys:
+                if k.startswith("_"):
+                    continue
+                for row in _connection_rows(sess.vault.get(k)):
+                    if _path_key(row["project"]) == _path_key(project):
+                        saved = _pc.disconnect(
+                            key_name=k, project=project, file=row["file"], var=row["var"],
+                            actor=actor, **credentials,
+                        )
+                        warnings.append(saved.health_warning)
+            # A key left allowed for a project it has no connection to would still
+            # read as assigned: the allowlist entry goes with the last connection.
+            named = [k for k in dict.fromkeys(body.keys) if not k.startswith("_")]
+
+            def leftover(entry) -> bool:
+                return isinstance(entry, dict) and any(
+                    isinstance(p, str) and _path_key(p) == _path_key(project)
+                    for p in entry.get("projects") or []
+                )
+
+            if any(leftover(sess.vault.get(k)) for k in named):
+                def drop_allowlist(fresh: dict) -> None:
+                    for k in named:
+                        entry = fresh.get(k)
+                        if not leftover(entry) or any(
+                            _path_key(row["project"]) == _path_key(project)
+                            for row in _connection_rows(entry)
+                        ):
+                            continue
+                        entry["projects"] = [
+                            p for p in entry["projects"]
+                            if not (isinstance(p, str) and _path_key(p) == _path_key(project))
+                        ]
+
+                warnings.append(_pc.commit(drop_allowlist, **credentials).health_warning)
+        _set_warning(response, *warnings)
+        return {"path": project, "unassigned": body.keys}
 
     @app.post("/api/projects/inject")
     def inject_project(body: InjectBody, response: Response, path: str = Query(min_length=1, max_length=4096), write: bool = True, sess: _Session = Depends(require_scope("inject")), _: None = Depends(require_token)):
-        from pushkey_vault import load_config
-        path = _canonical_project_path(path)
-        cfg, _ = _persist_project_state(
-            sess,
-            lambda current_cfg, current_vault:
-                _canonicalize_registered_projects(current_cfg, current_vault),
-            response=response,
-            save_when=bool,
-        )
-        if path not in cfg.get("projects", {}):
-            raise HTTPException(404, "project not found")
-        proj = Path(path)
+        credentials, actor = _core_credentials(sess), _core_actor(sess)
+        with app.state.project_lock:
+            cfg = _pv.load_config(strict=True)
+            project = _require_registered(cfg, path)
+            connected: dict[str, list[dict]] = {}
+            for name, entry in sess.vault.items():
+                rows = [
+                    row for row in _connection_rows(entry)
+                    if not name.startswith("_") and _path_key(row["project"]) == _path_key(project)
+                ]
+                if rows:
+                    connected[name] = rows
 
-        if body.keys is None:
-            keys = [n for n, m in sess.vault.items()
-                    if isinstance(m, dict) and path in (m.get("projects") or [])]
-        else:
-            keys = body.keys
-            missing = [k for k in keys if k not in sess.vault]
-            if missing:
-                raise HTTPException(400, f"keys not in vault: {missing}")
+            if body.keys is None:
+                names = list(connected)
+            else:
+                missing = [
+                    k for k in body.keys
+                    if k.startswith("_") or not isinstance(sess.vault.get(k), dict)
+                ]
+                if missing:
+                    raise HTTPException(400, f"keys not in vault: {missing}")
+                unconnected = [k for k in body.keys if k not in connected]
+                if unconnected:
+                    raise HTTPException(400, f"keys not connected: {unconnected}")
+                names = list(dict.fromkeys(body.keys))
+            names = [
+                n for n in names
+                if body.env == "all" or sess.vault[n].get("env", "all") in ("all", body.env)
+            ]
+            env_file = str(Path(project) / (connected[names[0]][0]["file"] if names else ".env"))
 
-        def env_match(key_env: str) -> bool:
-            return body.env == "all" or key_env == "all" or key_env == body.env
-        keys = [k for k in keys if env_match(sess.vault[k].get("env", "all"))]
+            if not write:
+                # A dry run: which connected files would change, read from the files.
+                wanted = set(names)
+                would_write = ("out_of_date", "not_in_file", "file_missing")
+                injected = list(dict.fromkeys(
+                    state.key
+                    for state in _pc.status(sess.vault, cfg, project=project)
+                    if state.key in wanted and state.state in would_write
+                ))
+                return {"injected": injected, "skipped_existing": [], "env_file": env_file, "wrote": False}
 
-        env_path = proj / ".env"
-        if env_path.is_symlink():
-            raise HTTPException(400, "refusing to write through .env symlink")
-        safe_entries = {
-            k: {**sess.vault[k], "value": sanitize_env_value(sess.vault[k]["value"])}
-            for k in keys
-        }
-
-        identity = _project_identity(proj)
-        if write:
-            gitignore = proj / ".gitignore"
-            _assert_project_target(proj, path, env_path, identity)
-            _assert_project_target(proj, path, gitignore, identity)
-
-        def atomic_write(filename: str, data: bytes) -> None:
-            _atomic_project_write(path, filename, data, identity)
-
-        result = mutate_env_file(
-            proj,
-            safe_entries,
-            key_names=keys,
-            update_existing=False,
-            write=write,
-            atomic_write=atomic_write if write else None,
-        )
+            # One call for every named key: one write and one backup per file (a call per
+            # key would push the backup taken before the inject out of the few kept), and
+            # only keys from the listing above, which never holds a `_` entry.
+            results = (
+                _pc.sync(key_names=names, project=project, actor=actor, **credentials)
+                if names else []
+            )
+        _set_warning(response, *_result_warnings(results))
         return {
-            "injected": result.injected_names,
-            "skipped_existing": result.skipped_existing,
-            "env_file": result.env_file,
-            "wrote": write,
+            "injected": list(dict.fromkeys(r.key for r in results if r.written and r.change != "none")),
+            # A connected variable's value is always replaced; nothing is "kept" any more.
+            "skipped_existing": [],
+            "env_file": env_file,
+            "wrote": True,
+            "results": [asdict(result) for result in results],
         }
+
+    # ── connections ───────────────────────────────────────────────────────
+
+    @app.post("/api/connections/preview")
+    def preview_connection(body: ConnectionPreview, _: None = Depends(require_token), sess: _Session = Depends(require_scope("read"))):
+        if body.value is not None or body.env is not None:
+            # A value in the body is a secret the session is trying out: that needs a
+            # session that may write, the same check the write routes make.
+            require_scope("write")(sess)
+        _check_key_name(body.key)
+        cfg = _pv.load_config(strict=True)
+        if not _pc.is_migrated(cfg):
+            raise ConnectError("migration_pending")
+        return asdict(_pc.preview(
+            sess.vault, cfg, key_name=body.key, project=body.project, file=body.file,
+            var=body.var, value=body.value, env=body.env,
+        ))
+
+    @app.post("/api/connections", status_code=201)
+    def create_connection(
+        body: ConnectionCreate, response: Response, _: None = Depends(require_token),
+        sess: _Session = Depends(require_scope("write")),
+        _inject: _Session = Depends(require_scope("inject")),
+    ):
+        _check_key_name(body.key)
+        with app.state.project_lock:
+            result = _pc.connect(
+                key_name=body.key, project=body.project, file=body.file, var=body.var,
+                confirmed=body.confirmed, write=True, actor=_core_actor(sess),
+                **_core_credentials(sess),
+            )
+        _set_warning(response, result.health_warning, result.warning)
+        return asdict(result)
+
+    @app.delete("/api/connections")
+    def delete_connection(body: ConnectionDelete, response: Response, _: None = Depends(require_token), sess: _Session = Depends(require_scope("write"))):
+        _check_key_name(body.key)
+        with app.state.project_lock:
+            saved = _pc.disconnect(
+                key_name=body.key, project=body.project, file=body.file, var=body.var,
+                actor=_core_actor(sess), **_core_credentials(sess),
+            )
+        _set_warning(response, saved.health_warning)
+        return {
+            "key": body.key, "project": body.project, "file": body.file, "var": body.var,
+            "disconnected": True,
+        }
+
+    @app.get("/api/connections")
+    def list_connections(
+        key: Optional[str] = Query(default=None, min_length=1, max_length=256),
+        project: Optional[str] = Query(default=None, min_length=1, max_length=4096),
+        _: None = Depends(require_token), sess: _Session = Depends(require_scope("read")),
+    ):
+        if key is not None:
+            _check_key_name(key)
+            if not isinstance(sess.vault.get(key), dict):
+                raise ConnectError("key_not_found", {"key": key})
+        statuses = _pc.status(
+            sess.vault, _pv.load_config(strict=True), key_name=key, project=project
+        )
+        return {"connections": [asdict(state) for state in statuses if not state.key.startswith("_")]}
+
+    @app.post("/api/connections/sync")
+    def sync_connections(body: ConnectionSync, response: Response, _: None = Depends(require_token), sess: _Session = Depends(require_scope("inject"))):
+        if body.key is not None:
+            _check_key_name(body.key)
+        with app.state.project_lock:
+            results = _pc.sync(
+                key_name=body.key, project=body.project, actor=_core_actor(sess),
+                **_core_credentials(sess),
+            )
+        _set_warning(response, *_result_warnings(results))
+        return {"synced": [asdict(result) for result in results]}
+
+    @app.get("/api/connections/suggest")
+    def suggest_connection(
+        key: str = Query(min_length=1, max_length=256),
+        project: Optional[str] = Query(default=None, min_length=1, max_length=4096),
+        _: None = Depends(require_token), sess: _Session = Depends(require_scope("read")),
+    ):
+        _check_key_name(key)
+        return asdict(_pc.suggest(
+            sess.vault, _pv.load_config(strict=True), key_name=key, project=project
+        ))
+
+    @app.get("/api/connect/notice")
+    def get_connect_notice(_: None = Depends(require_token), sess: _Session = Depends(require_scope("read"))):
+        return {"notice": _pv.load_config(strict=True).get("connect_notice")}
+
+    @app.delete("/api/connect/notice", status_code=204)
+    def dismiss_connect_notice(_: None = Depends(require_token), sess: _Session = Depends(require_scope("write"))):
+        _pcm.dismiss_notice()
 
     # ── providers ─────────────────────────────────────────────────────────
 

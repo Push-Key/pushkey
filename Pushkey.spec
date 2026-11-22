@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('C:\\Users\\aware\\bots\\pushkey\\providers.json', '.'), ('C:\\Users\\aware\\bots\\pushkey\\pushkey.ico', '.'), ('C:\\Users\\aware\\bots\\pushkey\\pushkey_logo.png', '.')]
 binaries = []
-hiddenimports = ['pushkey_shared', 'pushkey_crypto', 'pushkey_vault', 'pushkey_tiers', 'pushkey_providers', 'pushkey_icons', 'pushkey_env', 'pushkey_local_api', 'pushkey_mcp', 'pushkey_agent_tokens']
+hiddenimports = ['pushkey_shared', 'pushkey_crypto', 'pushkey_vault', 'pushkey_tiers', 'pushkey_providers', 'pushkey_icons', 'pushkey_env', 'pushkey_local_api', 'pushkey_mcp', 'pushkey_agent_tokens', 'pushkey_projectfs', 'pushkey_connect', 'pushkey_connect_migrate']
 tmp_ret = collect_all('cryptography')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('customtkinter')

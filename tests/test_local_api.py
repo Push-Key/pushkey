@@ -345,8 +345,10 @@ def test_manifest_covers_every_static_asset(fresh_app):
 
 @pytest.fixture
 def unlocked(client, auth):
+    # env "all": assigning a key whose env differs from its project's (new projects are
+    # "dev") needs an explicit confirmation; tests/test_local_api_connect.py covers that.
     _seed_vault("master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD", {
-        "OPENAI_API_KEY": {"value": "sk-original", "env": "prod", "provider": "OpenAI",
+        "OPENAI_API_KEY": {"value": "sk-original", "env": "all", "provider": "OpenAI",
                            "rotated": "2026-01-01", "created": "2026-01-01", "projects": []},
     })
     r = client.post("/api/unlock", headers=auth, json={"password": "master-pw"})
@@ -532,6 +534,13 @@ def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
     project.mkdir()
     target = tmp_path / "outside.env"
     target.write_text("SAFE=1\n", encoding="utf-8")
+    assert unlocked.post("/api/projects", headers=auth, json={"path": str(project)}).status_code == 201
+    # Connected while .env is an ordinary (absent) file; the link appears afterwards.
+    assigned = unlocked.post(
+        "/api/projects/assign", headers=auth, params={"path": str(project)},
+        json={"keys": ["OPENAI_API_KEY"]},
+    )
+    assert assigned.status_code == 200, assigned.text
     try:
         (project / ".env").symlink_to(target)
     except (OSError, NotImplementedError):
@@ -539,16 +548,18 @@ def test_inject_rejects_env_symlink(unlocked, auth, tmp_path):
 
         shutil.rmtree(tmp_path, ignore_errors=True)
         pytest.skip("symlink creation unavailable")
-    unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
     r = unlocked.post(
         "/api/projects/inject", headers=auth,
         params={"path": str(project)}, json={},
     )
-    assert r.status_code == 400
+    # A refused file is that connection's result (written False, with the reason), not an error.
+    assert r.status_code == 200, r.text
+    assert r.json()["injected"] == []
+    assert [item["written"] for item in r.json()["results"]] == [False]
     assert target.read_text(encoding="utf-8") == "SAFE=1\n"
 
 
-def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch, fresh_app):
+def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     # Assert the setup calls. Ignoring them turns any setup failure into a
@@ -561,19 +572,23 @@ def test_gitignore_failure_prevents_env_secret_write(unlocked, auth, tmp_path, m
         json={"keys": ["OPENAI_API_KEY"]},
     )
     assert assigned.status_code < 400, assigned.text
-    original = fresh_app._atomic_project_write
+    import pushkey_projectfs
+
+    original = pushkey_projectfs.atomic_project_write
 
     def fail_ignore(registered, filename, data, expected_identity=None):
         if filename == ".gitignore":
             raise OSError("simulated disk failure")
         return original(registered, filename, data, expected_identity)
 
-    monkeypatch.setattr(fresh_app, "_atomic_project_write", fail_ignore)
-    with pytest.raises(OSError, match="disk failure"):
-        unlocked.post(
-            "/api/projects/inject", headers=auth,
-            params={"path": str(project)}, json={},
-        )
+    monkeypatch.setattr(pushkey_projectfs, "atomic_project_write", fail_ignore)
+    r = unlocked.post(
+        "/api/projects/inject", headers=auth,
+        params={"path": str(project)}, json={},
+    )
+    # The connect core reports a file failure as the connection's result instead of raising.
+    assert r.status_code == 200, r.text
+    assert [(item["written"], item["reason"]) for item in r.json()["results"]] == [(False, "write_failed")]
     assert not (project / ".env").exists()
 
 
@@ -615,23 +630,31 @@ def test_canonical_collision_rejected_without_data_loss(unlocked, auth, tmp_path
     assert len(load_config()["projects"]) == 2
 
 
-def test_project_transaction_rolls_back_config_and_session(unlocked, auth, tmp_path, monkeypatch):
+def test_failed_vault_save_leaves_config_vault_and_session_untouched(
+    unlocked, auth, tmp_path, monkeypatch
+):
+    # Registering a project writes only the config now (no vault save), so the failing
+    # vault save is reached through assign, which saves the connection into the vault.
     import pushkey_vault
     project = tmp_path / "rollback"
     project.mkdir()
-    before_config = _s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None
+    assert unlocked.post("/api/projects", headers=auth, json={"path": str(project)}).status_code == 201
+    before_config = _s.CONFIG_FILE.read_bytes()
     before_vault = _s.VAULT_FILE.read_bytes()
-    original = pushkey_vault.save_vault
 
     def fail_vault(*args, **kwargs):
         raise OSError("simulated vault save failure")
 
-    monkeypatch.setattr(pushkey_vault, "save_vault", fail_vault)
-    with pytest.raises(OSError, match="vault save failure"):
-        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
-    assert (_s.CONFIG_FILE.read_bytes() if _s.CONFIG_FILE.exists() else None) == before_config
+    with monkeypatch.context() as patched:
+        patched.setattr(pushkey_vault, "save_vault", fail_vault)
+        with pytest.raises(OSError, match="vault save failure"):
+            unlocked.post(
+                "/api/projects/assign", headers=auth, params={"path": str(project)},
+                json={"keys": ["OPENAI_API_KEY"]},
+            )
+    assert _s.CONFIG_FILE.read_bytes() == before_config
     assert _s.VAULT_FILE.read_bytes() == before_vault
-    monkeypatch.setattr(pushkey_vault, "save_vault", original)
+    assert unlocked.get("/api/keys/OPENAI_API_KEY", headers=auth).json()["projects"] == []
 
 
 def test_failed_vault_save_does_not_clobber_a_concurrent_writers_vault(
@@ -641,13 +664,14 @@ def test_failed_vault_save_does_not_clobber_a_concurrent_writers_vault(
 
     Reproduces the cross-writer loss: the GUI session is unlocked at revision A
     while a separate process (CLI/MCP) commits revision B; the GUI's next
-    project mutation then fails the revision check. The transaction rollback
-    must leave B on disk, not restore its pre-request snapshot A.
+    project mutation then fails the revision check. The failed save must leave B
+    on disk, not restore a pre-request snapshot of A.
     """
     import pushkey_vault
 
     project = tmp_path / "concurrent-writer"
     project.mkdir()
+    assert unlocked.post("/api/projects", headers=auth, json={"path": str(project)}).status_code == 201
     concurrent_vault = _s.VAULT_FILE.read_bytes() + b"\x00CONCURRENT-COMMIT-B"
 
     def commit_b_then_conflict(*args, **kwargs):
@@ -656,18 +680,26 @@ def test_failed_vault_save_does_not_clobber_a_concurrent_writers_vault(
         _s.VAULT_FILE.write_bytes(concurrent_vault)
         raise pushkey_vault.VaultConflictError("stale_vault_revision")
 
-    monkeypatch.setattr(pushkey_vault, "save_vault", commit_b_then_conflict)
-    with pytest.raises(pushkey_vault.VaultConflictError):
-        unlocked.post("/api/projects", headers=auth, json={"path": str(project)})
+    with monkeypatch.context() as patched:
+        patched.setattr(pushkey_vault, "save_vault", commit_b_then_conflict)
+        # The retry reloads the vault, which no longer opens: the route answers 423.
+        r = unlocked.post(
+            "/api/projects/assign", headers=auth, params={"path": str(project)},
+            json={"keys": ["OPENAI_API_KEY"]},
+        )
 
+    assert r.status_code == 423
+    assert r.json() == {"detail": "vault_unavailable"}
     assert _s.VAULT_FILE.read_bytes() == concurrent_vault, (
-        "rollback overwrote the concurrently committed vault with a stale snapshot"
+        "a failed save overwrote the concurrently committed vault with a stale snapshot"
     )
 
 
-def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path):
+def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
+    import pushkey_tiers
     from pushkey_vault import load_config
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "pro")  # the free plan has one project
     projects = [tmp_path / "concurrent-a", tmp_path / "concurrent-b"]
     for project in projects:
         project.mkdir()
@@ -684,18 +716,21 @@ def test_concurrent_project_mutations_do_not_lose_updates(unlocked, auth, tmp_pa
     assert all(str(project.resolve()) in stored for project in projects)
 
 
-def test_failed_transaction_cannot_rollback_later_success(
+def test_failed_assign_cannot_undo_a_concurrent_registration(
     unlocked, auth, tmp_path, monkeypatch
 ):
     from concurrent.futures import ThreadPoolExecutor
     import threading
+    import pushkey_tiers
     import pushkey_vault
     from pushkey_vault import load_config
 
+    monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "pro")  # the free plan has one project
     failing = tmp_path / "failure"
     succeeding = tmp_path / "success"
     failing.mkdir()
     succeeding.mkdir()
+    assert unlocked.post("/api/projects", headers=auth, json={"path": str(failing)}).status_code == 201
     entered = threading.Event()
     release = threading.Event()
     original = pushkey_vault.save_vault
@@ -717,7 +752,8 @@ def test_failed_transaction_cannot_rollback_later_success(
 
     def failure_request():
         return unlocked.post(
-            "/api/projects", headers=auth, json={"path": str(failing)}
+            "/api/projects/assign", headers=auth, params={"path": str(failing)},
+            json={"keys": ["OPENAI_API_KEY"]},
         )
 
     def success_request():
@@ -735,8 +771,9 @@ def test_failed_transaction_cannot_rollback_later_success(
         assert success_future.result().status_code == 201
 
     stored = load_config()["projects"]
-    assert str(failing.resolve()) not in stored
+    assert str(failing.resolve()) in stored
     assert str(succeeding.resolve()) in stored
+    assert not _load_vault("master-pw")[0]["OPENAI_API_KEY"].get("connections")
 
 
 def test_assign_keys_to_project(unlocked, auth, tmp_path):
@@ -812,22 +849,6 @@ def test_inject_writes_env_and_gitignore(unlocked, auth, tmp_path):
     assert "OPENAI_API_KEY=sk-original" in env_text
     gi = (tmp_path / "proj" / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in gi
-
-
-def test_inject_skips_existing_env_keys(unlocked, auth, tmp_path):
-    p = str(tmp_path / "proj")
-    (tmp_path / "proj").mkdir()
-    (tmp_path / "proj" / ".env").write_text("OPENAI_API_KEY=preexisting\n", encoding="utf-8")
-    r_register = unlocked.post("/api/projects", headers=auth, json={"path": p})
-    assert r_register.status_code == 201, r_register.text
-    r_assign = unlocked.post("/api/projects/assign", headers=auth, params={"path": p},
-                             json={"keys": ["OPENAI_API_KEY"]})
-    assert r_assign.status_code == 200, r_assign.text
-    r = unlocked.post("/api/projects/inject", headers=auth, params={"path": p}, json={})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["injected"] == []
-    assert "OPENAI_API_KEY" in body["skipped_existing"]
 
 
 # ── providers ─────────────────────────────────────────────────────
@@ -1196,7 +1217,7 @@ def token_seed(licensed_tier):
     """Seed a V3 vault and return (password, recovery) for minting tokens."""
     password, recovery = "master-pw", "PUSH-AAAA-BBBB-CCCC-DDDD"
     _seed_vault(password, recovery, {
-        "OPENAI_API_KEY": {"value": "sk-original", "env": "prod", "provider": "OpenAI",
+        "OPENAI_API_KEY": {"value": "sk-original", "env": "all", "provider": "OpenAI",
                            "rotated": "2026-01-01", "created": "2026-01-01", "projects": []},
     })
     return password, recovery
@@ -1321,11 +1342,18 @@ def test_missing_write_scope_denies_delete(token_unlocked, auth):
     assert r.status_code == 403
 
 
-def test_write_scope_allows_project_assign(token_unlocked, auth, tmp_path):
-    c = token_unlocked(["write"])
+def _register_as_owner(client, auth, path):
+    """Registering a project is a master-password action; a token session cannot do it."""
+    assert client.post("/api/unlock", headers=auth, json={"password": "master-pw"}).status_code == 200
+    created = client.post("/api/projects", headers=auth, json={"path": path})
+    assert created.status_code == 201, created.text
+
+
+def test_write_scope_allows_project_assign(client, token_unlocked, auth, tmp_path):
     p = str(tmp_path / "agent-project")
     (tmp_path / "agent-project").mkdir()
-    assert c.post("/api/projects", headers=auth, json={"path": p}).status_code == 201
+    _register_as_owner(client, auth, p)
+    c = token_unlocked(["write"])
     r = c.post("/api/projects/assign", headers=auth, params={"path": p},
               json={"keys": ["OPENAI_API_KEY"]})
     assert r.status_code == 200
@@ -1333,11 +1361,11 @@ def test_write_scope_allows_project_assign(token_unlocked, auth, tmp_path):
 
 # ── inject scope (separate from write) ─────────────────────────────────────
 
-def test_inject_scope_allows_inject(token_unlocked, auth, tmp_path):
+def test_inject_scope_allows_inject(client, token_unlocked, auth, tmp_path):
     proj = tmp_path / "inject-project"
     proj.mkdir()
+    _register_as_owner(client, auth, str(proj))
     c1 = token_unlocked(["write"])
-    assert c1.post("/api/projects", headers=auth, json={"path": str(proj)}).status_code == 201
     assert c1.post("/api/projects/assign", headers=auth, params={"path": str(proj)},
                    json={"keys": ["OPENAI_API_KEY"]}).status_code == 200
 
@@ -1347,13 +1375,12 @@ def test_inject_scope_allows_inject(token_unlocked, auth, tmp_path):
     assert "OPENAI_API_KEY" in r.json()["injected"]
 
 
-def test_write_scope_alone_cannot_inject(token_unlocked, auth, tmp_path):
+def test_write_scope_alone_cannot_inject(client, token_unlocked, auth, tmp_path):
     """write and inject are deliberately separate scopes: a token minted to
     rotate keys should not also be able to write .env files to projects."""
     proj = tmp_path / "no-inject"
     proj.mkdir()
-    c1 = token_unlocked(["write"])
-    assert c1.post("/api/projects", headers=auth, json={"path": str(proj)}).status_code == 201
+    _register_as_owner(client, auth, str(proj))
 
     c2 = token_unlocked(["write"])
     r = c2.post("/api/projects/inject", headers=auth, params={"path": str(proj)}, json={})

@@ -1,6 +1,14 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import { installRoutes } from "./support/mock-local-api";
+import {
+  KEY,
+  PROJECT_ADMIN,
+  PROJECT_OLD,
+  SUGGEST,
+  THREE_CONNECTIONS,
+  connection,
+  installRoutes,
+} from "./support/mock-local-api";
 
 /**
  * Automated WCAG 2.2 Level AA conformance scans for the critical journeys.
@@ -130,4 +138,76 @@ test("settings journey has no WCAG 2.2 AA violations", async ({ page }) => {
   await expect(page.getByRole("main")).toBeVisible();
 
   await expectNoViolations(page, "settings");
+});
+
+test("vault used-in row has no WCAG 2.2 AA violations", async ({ page }) => {
+  // The badges and the row buttons only render with data, so the empty vault
+  // journey never scans them.
+  await installRoutes(page, false, { keys: [KEY], connections: THREE_CONNECTIONS });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Vault" }).click();
+  await page.getByRole("button", { name: "Used in OPENAI_API_KEY" }).click();
+  await expect(page.getByText("Folder not on this computer")).toBeVisible();
+
+  await expectNoViolations(page, "vault / used in");
+});
+
+test("add-key form with the connect section has no WCAG 2.2 AA violations", async ({ page }) => {
+  await installRoutes(page, false, { projects: [PROJECT_ADMIN], suggest: SUGGEST });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Vault" }).click();
+  await page.getByRole("button", { name: "Add key" }).click();
+  await page.locator("#add-name").fill("OPENAI_API_KEY");
+  await page.locator("#add-value").fill("sk-test-value-123");
+  await expect(page.getByText("Save to admin-portal -> dev -> .env.local as NEXT_PUBLIC_OPENAI_API_KEY")).toBeVisible();
+
+  await expectNoViolations(page, "vault / add key / connect");
+});
+
+test("add-key confirm panel has no WCAG 2.2 AA violations", async ({ page }) => {
+  await installRoutes(page, false, {
+    projects: [PROJECT_ADMIN],
+    suggest: SUGGEST,
+    previewOverride: { needs_confirm: ["env_mismatch", "public_prefix"] },
+  });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Vault" }).click();
+  await page.getByRole("button", { name: "Add key" }).click();
+  await page.locator("#add-name").fill("OPENAI_API_KEY");
+  await page.locator("#add-value").fill("sk-test-value-123");
+  await expect(page.getByText("Save to admin-portal", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Save & connect" }).click();
+  await expect(page.getByRole("button", { name: "Confirm and save" })).toBeVisible();
+
+  await expectNoViolations(page, "vault / add key / confirm");
+});
+
+test("connect notice banner has no WCAG 2.2 AA violations", async ({ page }) => {
+  await installRoutes(page, false, {
+    projects: [PROJECT_OLD],
+    notice: {
+      every_key_projects: ["/work/old-site"],
+      env_skipped: [["old-site", "STRIPE_KEY"]],
+      unusable: [],
+      unregistered: [["OPENAI_API_KEY", "/work/elsewhere"]],
+    },
+  });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await expect(page.getByRole("button", { name: "Hide this notice" })).toBeVisible();
+
+  await expectNoViolations(page, "connect notice");
+});
+
+test("projects tab with connections has no WCAG 2.2 AA violations", async ({ page }) => {
+  await installRoutes(page, false, {
+    projects: [PROJECT_ADMIN],
+    keys: [KEY],
+    connections: [connection("out_of_date"), connection("not_written", "admin-portal", ".env.local", "NEXT_PUBLIC_OPENAI_API_KEY", "file_tracked_by_git")],
+  });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Projects" }).click();
+  await page.getByRole("button", { name: /admin-portal/ }).first().click();
+  await expect(page.getByText("Out of date")).toBeVisible();
+
+  await expectNoViolations(page, "projects / connections");
 });

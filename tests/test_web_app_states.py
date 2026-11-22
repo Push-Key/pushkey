@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -31,3 +32,51 @@ def test_local_web_core_flows_have_empty_error_and_conflict_states():
     assert "No rotations due in the next 30 days" in dashboard
     assert "conflict" in projects.lower()
     assert "ErrorBanner" in projects
+
+
+def test_add_key_form_states_connect_copy():
+    vault = _read("components/vault-tab.tsx")
+
+    assert "Saved in the vault only" in vault
+    assert "Save & connect" in vault
+    assert "Connect to a project" in vault
+
+
+def test_connect_error_texts_cover_every_code():
+    api = _read("lib/api.ts")
+
+    for code in (
+        "file_tracked_by_git",
+        "project_limit",
+        "project_exists",
+        "migration_pending",
+        "config_unreadable",
+        "config_busy",
+        "var_taken",
+    ):
+        assert code in api
+    assert "this file is committed to git; Pushkey will not write secrets into it" in api
+
+
+def test_written_false_is_not_a_quiet_noop():
+    vault = _read("components/vault-tab.tsx")
+    projects = _read("components/projects-tab.tsx")
+
+    for text in (vault, projects):
+        assert "Not written" in text
+        assert "results" in text
+
+
+def test_inject_result_never_shows_a_failed_write_as_success():
+    projects = _read("components/projects-tab.tsx")
+    start = projects.index("function InjectResult")
+    end = projects.index("// ── expanded project panel")
+    result_view = projects[start:end]
+
+    # The failed files sit in their own alert region, apart from the status region.
+    assert 'role="alert"' in result_view
+    assert result_view.index('role="status"') < result_view.index('role="alert"')
+
+    # The success toast fires only when nothing failed; a failure gets an error toast.
+    assert re.search(r"failures\.length\s*===\s*0[^;]*toast\.success\(\"\.env injected\"\)", projects, re.S)
+    assert "toast.error(" in projects

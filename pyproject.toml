@@ -49,7 +49,7 @@ pushkey = "pushkey_cli:main"
 pushkey-gui = "pushkey:main"
 
 [tool.setuptools]
-py-modules = ["pushkey", "pushkey_cli", "pushkey_local_api", "pushkey_mcp", "pushkey_agent_tokens", "pushkey_env", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers", "pushkey_icons", "pushkey_locking", "pushkey_health"]
+py-modules = ["pushkey", "pushkey_cli", "pushkey_local_api", "pushkey_mcp", "pushkey_agent_tokens", "pushkey_env", "pushkey_providers", "pushkey_shared", "pushkey_crypto", "pushkey_vault", "pushkey_tiers", "pushkey_icons", "pushkey_locking", "pushkey_health", "pushkey_projectfs", "pushkey_connect", "pushkey_connect_migrate"]
 include-package-data = true
 
 [tool.setuptools.packages.find]

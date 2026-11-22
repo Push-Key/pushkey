@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -21,9 +22,13 @@ from pathlib import Path
 
 import pushkey_shared as _s
 from pushkey_crypto import generate_recovery_code, log_event
-from pushkey_env import mutate_env_file
+import pushkey_connect as _pc
+import pushkey_connect_migrate as _pcm
+import pushkey_projectfs as _pfs
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
-from pushkey_vault import load_config, load_vault, load_vault_with_key, save_config, save_vault, save_vault_with_key
+from pushkey_vault import (
+    ConfigUnreadableError, load_config, load_vault, load_vault_with_key, save_vault, save_vault_with_key,
+)
 from pushkey_health import HealthSidecarError, publish_saved_vault
 
 
@@ -47,7 +52,8 @@ EXIT_NETWORK = 40
 EXIT_INTERRUPTED = 130
 CLI_COMMANDS = [
     "add", "get", "list", "rotate", "set-backup", "delete", "status",
-    "inject", "import", "init", "app", "completion",
+    "inject", "import", "connect", "where", "sync", "project",
+    "init", "app", "completion",
 ]
 
 CLI_ONBOARDING_MARKER = ".cli_onboarding_seen"
@@ -132,9 +138,13 @@ def _print_pre_unlock_help(has_vault: bool = True) -> None:
     advanced = [
         ("list", "show vault keys"),
         ("get NAME", "print a key value"),
-        ("add", "add a key interactively or via subcommand"),
-        ("rotate NAME", "rotate a key value"),
-        ("inject [PATH]", "write assigned keys to a project .env"),
+        ("add NAME [VALUE]", "add a key; --project PATH connects it to an env file"),
+        ("connect NAME", "connect a key to a project env file (--project PATH)"),
+        ("where NAME", "show where a key is connected"),
+        ("sync [NAME]", "rewrite connected env files with current values"),
+        ("rotate NAME", "rotate a key value and update its connected files"),
+        ("inject [PATH]", "write the keys connected to a project into its env files"),
+        ("project add PATH", "register a project folder (master password only)"),
         ("pushkey app", "launch the web app directly from a subcommand"),
     ]
     for cmd, desc in advanced:
@@ -165,13 +175,75 @@ def _launch_desktop_app() -> None:
     sys.exit(EXIT_USAGE)
 
 
-def _run_repl_session(vault, password, vault_key=None):
+#: The numbered shell shortcuts.
+_SHELL_ALIASES = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
+
+#: Shell commands whose value must be typed hidden: the line itself goes to the history file.
+_VALUE_COMMANDS = frozenset({"add", "rotate", "set-backup"})
+
+#: Options of those commands that take a value word (that word is not a secret value).
+_VALUE_OPTIONS = frozenset({"--project", "--file", "--as", "--notes", "--confirm"})
+
+
+def _words_carry_value(cmd, rest):
+    """True when ``cmd rest...`` has a positional word after the key name, i.e. a typed secret value."""
+    cmd = _SHELL_ALIASES.get(cmd, cmd)
+    if cmd not in _VALUE_COMMANDS:
+        return False
+    positionals = 0
+    skip_next = False
+    literal = False
+    for word in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if not literal:
+            if word == "--":
+                literal = True
+                continue
+            if word.startswith("-"):
+                skip_next = word in _VALUE_OPTIONS
+                continue
+        positionals += 1
+    return positionals > 1
+
+
+def _line_carries_value(line):
+    """True when a shell line (add, rotate or set-backup) has a secret value typed on it.
+
+    One helper serves the refusal and the history filter, so a line is kept out of the
+    history file exactly when the shell would refuse to run it.
+    """
+    try:
+        words = _split_shell_line(line.strip())
+    except ValueError:
+        words = line.split()  # an unparseable line never runs, but it would still reach the history
+    if not words:
+        return False
+    return _words_carry_value(words[0].lower(), words[1:])
+
+
+def _split_shell_line(line):
+    """Split a shell line into words, honouring quotes (a path with spaces: ``project add "My App"``).
+
+    On Windows the split is not POSIX so backslashes in paths survive; that mode keeps the
+    quote characters in the word, so one matching pair around a word is stripped here.
+    Raises ValueError for an unbalanced quote.
+    """
+    posix = os.name != "nt"
+    words = shlex.split(line, posix=posix)
+    if posix:
+        return words
+    return [w[1:-1] if len(w) >= 2 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
+
+
+def _run_repl_session(vault, password, vault_key=None, scopes=None):
     history_file = _s.VAULT_DIR / ".cli_history"
     rl = _setup_readline(vault, history_file)
 
     print()
     _render_dashboard(vault)
-    _render_stale_warnings(vault, password)
+    _render_stale_warnings(vault, password, vault_key, scopes)
     print()
 
     app_proc = None
@@ -191,11 +263,19 @@ def _run_repl_session(vault, password, vault_key=None):
             line = line.strip()
             if not line:
                 continue
+            if _line_carries_value(line):
+                _forget_line(rl, line)
 
-            parts = line.split()
+            try:
+                parts = _split_shell_line(line)
+            except ValueError as error:
+                print(f"{C_RED}Could not parse that line: {error}{C_RESET}")
+                continue
+            if not parts:
+                continue
             cmd = parts[0].lower()
             rest = parts[1:]
-            app_proc = _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc)
+            app_proc = _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes)
             if app_proc is False:
                 break
     finally:
@@ -208,9 +288,9 @@ def _run_repl_session(vault, password, vault_key=None):
 
 
 def _unlock_into_repl(args) -> None:
-    vault, password, vault_key, _scopes = _open_vault(args)
+    vault, password, vault_key, scopes = _open_vault(args)
     _mark_cli_onboarding_seen()
-    _run_repl_session(vault, password, vault_key)
+    _run_repl_session(vault, password, vault_key, scopes)
 
 
 def _dispatch_pre_unlock_command(command: str, args, has_vault: bool) -> bool:
@@ -308,6 +388,69 @@ def _open_vault_with_token(token_value):
     return vault, None, vk, scopes
 
 
+def _notice_names(config, paths):
+    """Registered project names for notice entries that are folder paths (names pass through)."""
+    return [_project_label(config, p) if isinstance(p, str) and os.path.isabs(p) else str(p) for p in paths]
+
+
+def _print_connect_notice():
+    """Print the one-time migration notice (names only) to stderr until it is dismissed.
+
+    stderr, not stdout: a command like ``list --json`` or ``get NAME`` must keep its stdout
+    clean for a script to read.
+    """
+    try:
+        config = load_config()
+    except Exception:
+        return
+    notice = config.get("connect_notice") if isinstance(config, dict) else None
+    if not isinstance(notice, dict):
+        return
+    lines = []
+    every = notice.get("every_key_projects") or []
+    if every:
+        lines.append(
+            "These projects had no list of keys in the old setup, so no key was connected to them: "
+            + ", ".join(_notice_names(config, every))
+            + ". Connect keys with: pushkey connect NAME --project PATH"
+        )
+    skipped = notice.get("env_skipped") or []
+    if skipped:
+        lines.append(
+            "Not connected because the key and project environments differ: "
+            + ", ".join(f"{pair[1]} ({pair[0]})" for pair in skipped if isinstance(pair, (list, tuple)) and len(pair) == 2)
+        )
+    unusable = notice.get("unusable") or []
+    if unusable:
+        lines.append("Projects without a usable folder, left unregistered: " + ", ".join(map(str, unusable)))
+    unregistered = notice.get("unregistered") or []
+    if unregistered:
+        lines.append(
+            "Keys that list a folder that is not a registered project: "
+            + ", ".join(f"{pair[0]} ({Path(str(pair[1])).name})" for pair in unregistered if isinstance(pair, (list, tuple)) and len(pair) == 2)
+        )
+    if not lines:
+        return
+    print("Pushkey moved your projects to the new project store.", file=sys.stderr)
+    for line in lines:
+        print(f"  {line}", file=sys.stderr)
+    print("Dismiss with: pushkey project dismiss-notice", file=sys.stderr)
+
+
+def _after_master_unlock(vault, password, vault_key):
+    """Migrate the project store once and show the notice; never blocks the unlock."""
+    try:
+        _pcm.ensure_migrated(vault_key=vault_key, password=password, target=vault)
+    except Exception as error:
+        code = (
+            error.code if isinstance(error, _pc.ConnectError)
+            else str(error) if isinstance(error, ConfigUnreadableError)
+            else type(error).__name__
+        )
+        print(f"Warning: project store not migrated ({code}); project features may refuse.", file=sys.stderr)
+    _print_connect_notice()
+
+
 def _open_vault(args):
     token = _get_agent_token(args)
     if token:
@@ -320,6 +463,7 @@ def _open_vault(args):
     if vault is None:
         print("Error: wrong master password", file=sys.stderr)
         sys.exit(EXIT_AUTH)
+    _after_master_unlock(vault, password, vault_key)
     return vault, password, vault_key, None
 
 
@@ -337,34 +481,72 @@ def _save_vault_for_session(vault, password, vault_key):
 
 
 _COMMAND_SCOPES = {
-    "add": "write",
-    "get": "read",
-    "list": "read",
-    "rotate": "write",
-    "set-backup": "write",
-    "delete": "write",
-    "status": "read",
-    "inject": "inject",
-    "import": "write",
+    "add": ("write",),
+    "get": ("read",),
+    "list": ("read",),
+    "rotate": ("write",),
+    "set-backup": ("write",),
+    "delete": ("write",),
+    "status": ("read",),
+    "inject": ("inject",),
+    "import": ("write",),
+    "connect": ("write", "inject"),
+    "where": ("read",),
+    "sync": ("inject",),
 }
 
+#: Commands only a master-password session may run. No token can hold this "scope",
+#: so a token is refused by the same check that refuses a missing one.
+_MASTER_ONLY = ("master-password",)
+_MASTER_ONLY_COMMANDS = frozenset({"project"})
 
-def _require_command_scope(command, scopes):
-    """Exit with EXIT_AUTH if an agent token lacks the scope a command needs.
+
+def _scopes_needed(command, args=None):
+    """The scopes ``command`` needs: a tuple, ``_MASTER_ONLY``, or None for an unmapped command.
+
+    ``add`` with ``--project`` also connects (writes the env file), so it needs inject
+    too; ``inject --all`` connects every key and is master-password only.
+    """
+    if command in _MASTER_ONLY_COMMANDS:
+        return _MASTER_ONLY
+    needed = _COMMAND_SCOPES.get(command)
+    if needed is None:
+        return None
+    if command == "add" and getattr(args, "project", None):
+        return ("write", "inject")
+    if command == "inject" and getattr(args, "all", False):
+        return _MASTER_ONLY
+    return needed
+
+
+def _scope_problem(command, needed, scopes):
+    """Why a token session may not run ``command``, or None when it may (or is a master session)."""
+    if scopes is None:
+        return None
+    if needed is None:
+        return f"Error: '{command}' is not available to agent tokens"
+    if needed == _MASTER_ONLY:
+        return f"Error: '{command}' requires master-password unlock (agent tokens cannot run it)"
+    missing = [scope for scope in needed if scope not in scopes]
+    if not missing:
+        return None
+    have = ", ".join(scopes) or "none"
+    noun = "scope" if len(missing) == 1 else "scopes"
+    listed = ", ".join(f"'{scope}'" for scope in missing)
+    return f"Error: agent token missing required {noun} {listed} for '{command}' (token has: {have})"
+
+
+def _require_command_scope(command, scopes, args=None):
+    """Exit with EXIT_AUTH if an agent token may not run a command.
 
     scopes is None for master-password sessions (full access, unchanged
     behavior); a list for agent-token sessions, checked against
     _COMMAND_SCOPES the same way pushkey_mcp.py's _require_scope gates tools.
+    The gate fails closed: a command that is not in the table is refused.
     """
-    if scopes is None:
-        return
-    required = _COMMAND_SCOPES.get(command)
-    if required and required not in scopes:
-        have = ", ".join(scopes) or "none"
-        print(
-            f"Error: agent token missing required scope '{required}' for '{command}' (token has: {have})",
-            file=sys.stderr,
-        )
+    problem = _scope_problem(command, _scopes_needed(command, args), scopes)
+    if problem:
+        print(problem, file=sys.stderr)
         sys.exit(EXIT_AUTH)
 
 
@@ -387,15 +569,281 @@ def _save_and_publish(vault, password, *, vault_key=None, recovery_code=None):
         return "health_publication_failed"
 
 
+# ── connect helpers ───────────────────────────────────────────────────────────
+
+_CORE_ERRORS = (_pc.ConnectError, ConfigUnreadableError, _pfs.ProjectPathError)
+
+_FILE_TRACKED_SENTENCE = "this file is committed to git; Pushkey will not write secrets into it"
+_REGISTER_HINT = "Register it first: pushkey project add PATH"
+
+#: Hints appended to the code in an error line.
+_ERROR_HINTS = {
+    "migration_pending": "Open Pushkey with your master password once to finish migrating projects.",
+    "project_not_registered": _REGISTER_HINT,
+    "file_tracked_by_git": _FILE_TRACKED_SENTENCE,
+}
+
+#: Exit code per ConnectError code (anything else is EXIT_ERROR).
+_ERROR_EXITS = {
+    "project_not_registered": EXIT_USAGE,
+    "key_not_found": EXIT_USAGE,
+    "connection_not_found": EXIT_USAGE,
+    "invalid_var": EXIT_USAGE,
+    "key_exists": EXIT_USAGE,
+    "var_taken": EXIT_USAGE,
+    "project_exists": EXIT_USAGE,
+    "project_limit": EXIT_USAGE,
+    "confirmation_required": EXIT_USAGE,
+    "file_tracked_by_git": EXIT_IO,
+    "invalid_env_file": EXIT_IO,
+    "read_failed": EXIT_IO,
+    "backup_failed": EXIT_IO,
+    "migration_pending": EXIT_ERROR,
+    "vault_changed": EXIT_ERROR,
+    "vault_unavailable": EXIT_ERROR,
+}
+
+#: Core errors that mean the whole store is unusable: a loop over keys stops on them.
+_STORE_LEVEL_CODES = frozenset({"migration_pending", "project_not_registered", "vault_changed", "vault_unavailable"})
+
+
+def _describe_core_error(error):
+    """``(one line, exit code)`` for an error the connect core raises. Never a value."""
+    if isinstance(error, _pfs.ProjectPathError):
+        return f"Error: {error.reason}", EXIT_USAGE
+    if isinstance(error, ConfigUnreadableError):
+        code = str(error) if str(error) in ("config_unreadable", "config_busy") else "config_unreadable"
+        return f"Error: {code}", EXIT_IO
+    code = error.code
+    line = f"Error: {code}"
+    needs = error.detail.get("needs")
+    if code == "confirmation_required" and needs:
+        line += ": needs " + ", ".join(needs)
+    elif code in ("key_not_found", "key_exists") and error.detail.get("key"):
+        line += f": {error.detail['key']}"
+    elif code == "var_taken" and error.detail.get("key"):
+        line += f": the variable is used by {error.detail['key']} in that file"
+    elif code in _ERROR_HINTS:
+        line += f": {_ERROR_HINTS[code]}"
+    return line, _ERROR_EXITS.get(code, EXIT_ERROR)
+
+
+def _connect_error_exit(error):
+    """Print one line for a core error to stderr and exit with its code."""
+    line, code = _describe_core_error(error)
+    print(line, file=sys.stderr)
+    sys.exit(code)
+
+
+def _core_credentials(vault, password, vault_key):
+    """What the connect core is given: the session's vault key and password (None for a token)."""
+    return {"vault_key": vault_key, "password": password, "target": vault}
+
+
+def _core_actor(password):
+    """The name the audit log carries for this session."""
+    return "cli" if password is not None else "cli agent-token"
+
+
+def _abs_project(path):
+    return str(Path(path).expanduser().resolve())
+
+
+def _same_path(a, b):
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def _connect_config():
+    """The project config for a connect command (strict), refusing a store not migrated yet."""
+    config = load_config(strict=True)
+    if not _pc.is_migrated(config):
+        raise _pc.ConnectError("migration_pending")
+    return config
+
+
+def _project_label(config, path):
+    """The registered name of a project folder (its folder name when it has none)."""
+    for key, record in _pc.registered_projects(config).items():
+        if _same_path(key, path):
+            name = record.get("name") if isinstance(record, dict) else None
+            if isinstance(name, str) and name:
+                return name
+    return Path(path).name or path
+
+
+def _project_is_registered(config, path):
+    return any(_same_path(key, path) for key in _pc.registered_projects(config))
+
+
+def _connections_of(entry):
+    rows = entry.get("connections") if isinstance(entry, dict) else None
+    return [
+        c for c in (rows if isinstance(rows, list) else [])
+        if isinstance(c, dict) and all(isinstance(c.get(k), str) for k in ("project", "file", "var"))
+    ]
+
+
+def _ask_yes(prompt):
+    try:
+        return input(prompt).strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+_EXTRA_CONFIRM_PROMPTS = {
+    "env_mismatch": "This key is for another environment. Continue? [y/N] ",
+    "public_prefix": "This name is bundled into browser code. Continue? [y/N] ",
+}
+
+
+def _confirm_connection(args, preview):
+    """Show what a connect will do and collect the confirmations it needs.
+
+    Returns the list of accepted extra confirmations to hand to the core, or None
+    when the person declined. ``--yes`` covers only the plain "Confirm?" question:
+    ``env_mismatch`` and ``public_prefix`` are asked for one by one, and a
+    non-interactive run needs ``--confirm env_mismatch`` / ``--confirm public_prefix``.
+    """
+    print(preview.line)
+    given = set(getattr(args, "confirm", None) or [])
+    missing = [code for code in preview.needs_confirm if code not in given]
+    yes = bool(getattr(args, "yes", False))
+    accepted = sorted(given.intersection(preview.needs_confirm))
+    if not _stdin_is_interactive():
+        if missing or not yes:
+            needed = [f"--confirm {code}" for code in missing] + ([] if yes else ["--yes"])
+            print(
+                "Error: this needs a confirmation and there is no terminal to ask on; pass "
+                + " ".join(needed),
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_USAGE)
+        return accepted
+    if not yes and not _ask_yes("Confirm? [y/N] "):
+        print("Cancelled.")
+        return None
+    for code in missing:
+        if not _ask_yes(_EXTRA_CONFIRM_PROMPTS.get(code, f"{code}. Continue? [y/N] ")):
+            print("Cancelled.")
+            return None
+        accepted.append(code)
+    return accepted
+
+
+def _print_connect_result(result):
+    """The outcome line of a connect (and any warning); a file that was not written is no error."""
+    if result.written:
+        print(f"Connected and written to {result.file}")
+    else:
+        print(f"Connected, not written: {result.reason}")
+        if result.reason == "file_tracked_by_git":
+            print(_FILE_TRACKED_SENTENCE)
+        elif result.reason == "project_not_registered":
+            print(_REGISTER_HINT)
+    for warning in (result.health_warning, result.warning):
+        if warning:
+            print(warning, file=sys.stderr)
+
+
+def _connect_flow(args, vault, password, vault_key, name, value=None, notes=""):
+    """Preview, confirm and connect ``name`` (``value`` adds a new key): the add/connect commands."""
+    project = _abs_project(args.project)
+    file = getattr(args, "file", None)
+    var = getattr(args, "as_var", None)
+    try:
+        config = _connect_config()
+        preview = _pc.preview(vault, config, key_name=name, project=project, file=file, var=var, value=value)
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
+    confirmed = _confirm_connection(args, preview)
+    if confirmed is None:
+        return
+    try:
+        result = _pc.connect(
+            key_name=name, project=project, file=file, var=var, value=value, notes=notes,
+            confirmed=confirmed, write=True, actor=_core_actor(password),
+            **_core_credentials(vault, password, vault_key),
+        )
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
+    _print_connect_result(result)
+
+
+def _after_value_change(name, vault, password, vault_key, scopes, indent=""):
+    """Bring a key's connected files up to date after its value changed.
+
+    A session that may inject syncs; a token without ``inject`` lists the connections it
+    could not write. The value is already saved when this runs, so a sync that cannot
+    start is one warning line, never an error (a retry would rotate twice).
+    """
+    if scopes is not None and "inject" not in scopes:
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+        for conn in _connections_of(vault.get(name)):
+            print(f"{indent}Not updated (token lacks inject): {_project_label(config, conn['project'])} {conn['file']}")
+        return
+    try:
+        config = _connect_config()
+        results = _pc.sync(key_name=name, actor=_core_actor(password), **_core_credentials(vault, password, vault_key))
+    except Exception as error:  # the value is saved: never turn this into a failure
+        code = (
+            error.code if isinstance(error, _pc.ConnectError)
+            else str(error) if isinstance(error, ConfigUnreadableError)
+            else type(error).__name__
+        )
+        print(
+            f"{indent}Warning: {name} was rotated but its connected files were not updated ({code}). "
+            f"Retry with: pushkey sync {name}",
+            file=sys.stderr,
+        )
+        return
+    for result in results:
+        label = _project_label(config, result.project)
+        if not result.written:
+            print(f"{indent}Not updated: {label} {result.file} ({result.reason})")
+        elif result.change != "none":
+            print(f"{indent}Updated {label} {result.file}")
+        for warning in (result.health_warning, result.warning):
+            if warning:
+                print(warning, file=sys.stderr)
+
+
+def _commit_rotation(vault, password, vault_key, name, new_value):
+    """Replace a key's value through the core (reload, history, save); returns its health warning."""
+    def apply(fresh):
+        entry = fresh.get(name)
+        if not isinstance(entry, dict):
+            raise _pc.ConnectError("key_not_found", {"key": name})
+        _pc.replace_value(entry, new_value)
+
+    saved = _pc.commit(apply, **_core_credentials(vault, password, vault_key))
+    return saved.health_warning
+
+
 def cmd_add(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name in vault:
         print(f"Error: '{name}' already exists. Use 'rotate' to update.", file=sys.stderr)
         sys.exit(EXIT_USAGE)
-    provider = detect_provider(name, args.value)
+    value = args.value
+    if value is None:
+        try:
+            value = getpass.getpass(f"Value for {name} (hidden): ")
+        except (EOFError, KeyboardInterrupt):
+            print("Aborted.", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+        if not value:
+            print("Error: the value cannot be empty", file=sys.stderr)
+            sys.exit(EXIT_USAGE)
+    if getattr(args, "project", None):
+        return _connect_flow(args, vault, password, vault_key, name, value=value, notes=args.notes or "")
+    provider = detect_provider(name, value)
     now = datetime.now().isoformat()
     vault[name] = {
-        "value": args.value,
+        "value": value,
         "created": now,
         "rotated": None,
         "provider": provider,
@@ -408,6 +856,7 @@ def cmd_add(args, vault, password, vault_key=None):
     log_event(f"cli: added {name}")
     suffix = f" [{provider}]" if provider else ""
     print(f"Added {name}{suffix}")
+    print("Saved in the vault")
     if warning:
         print(warning, file=sys.stderr)
 
@@ -464,7 +913,7 @@ def cmd_list(args, vault, password, vault_key=None):
         print(f"{r['name']:<{w_name}}  {r['provider']:<{w_prov}}  {r['age']:>6}  {icon.get(r['status'], '?')} {r['status']}")
 
 
-def cmd_rotate(args, vault, password, vault_key=None):
+def cmd_rotate(args, vault, password, vault_key=None, scopes=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
@@ -476,18 +925,15 @@ def cmd_rotate(args, vault, password, vault_key=None):
         except (EOFError, KeyboardInterrupt):
             print("Aborted.", file=sys.stderr)
             sys.exit(1)
-    now = datetime.now().isoformat()
-    info = vault[name]
-    info.setdefault("history", []).insert(0, {"value": info["value"], "retired": now})
-    info["history"] = info["history"][:10]
-    info["value"] = new_val
-    info["rotated"] = now
-    info["rotation_count"] = info.get("rotation_count", 0) + 1
-    warning = _save_and_publish(vault, password, vault_key=vault_key)
+    try:
+        warning = _commit_rotation(vault, password, vault_key, name, new_val)
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
     log_event(f"cli: rotated {name}")
     print(f"Rotated {name}")
     if warning:
         print(warning, file=sys.stderr)
+    _after_value_change(name, vault, password, vault_key, scopes)
 
 
 def cmd_set_backup(args, vault, password, vault_key=None):
@@ -546,33 +992,144 @@ def cmd_status(args, vault, password, vault_key=None):
     print(f"  ✗ critical:  {counts['critical']}")
 
 
+def _connect_every_key(vault, project, password, vault_key):
+    """Connect each key that has no connection to ``project`` yet, with defaults (nothing written).
+
+    Skips internal ``_`` entries. A key whose connect needs a confirmation or fails on its
+    own is skipped and returned as ``[(name, why)]``; a store-level failure propagates.
+    """
+    skipped = []
+    for name in sorted(vault):
+        entry = vault[name]
+        if name.startswith("_") or not isinstance(entry, dict):
+            continue
+        if any(_same_path(conn["project"], project) for conn in _connections_of(entry)):
+            continue
+        try:
+            _pc.connect(
+                key_name=name, project=project, write=False, confirmed=(),
+                actor=_core_actor(password), **_core_credentials(vault, password, vault_key),
+            )
+        except _pc.ConnectError as error:
+            if error.code in _STORE_LEVEL_CODES:
+                raise
+            why = error.code
+            if error.code == "confirmation_required":
+                why = "needs " + ", ".join(error.detail.get("needs", []))
+            skipped.append((name, why))
+    return skipped
+
+
+def _print_sync_results(results, config, project=None):
+    """One ``Wrote N key(s) to FILE`` line per env file, then a line per connection not written."""
+    by_file = {}
+    for result in results:
+        by_file.setdefault((result.project, result.file), []).append(result)
+    for (folder, file), group in by_file.items():
+        changed = sum(1 for r in group if r.written and r.change != "none")
+        print(f"Wrote {changed} key(s) to {Path(folder) / file}")
+    for result in results:
+        if not result.written:
+            print(f"Not written: {result.key} -> {_project_label(config, result.project)} {result.file} ({result.reason})")
+        for warning in (result.health_warning, result.warning):
+            if warning:
+                print(warning, file=sys.stderr)
+    return sum(1 for r in results if r.written and r.change != "none")
+
+
 def cmd_inject(args, vault, password, vault_key=None):
-    project = Path(getattr(args, "project", None) or Path.cwd()).resolve()
-    if not project.is_dir():
-        print(f"Error: '{project}' is not a directory", file=sys.stderr)
-        sys.exit(1)
+    project = _abs_project(getattr(args, "project", None) or Path.cwd())
+    skipped = []
+    try:
+        config = _connect_config()
+        if not _project_is_registered(config, project):
+            raise _pc.ConnectError("project_not_registered", {"project": project})
+        if getattr(args, "all", False):
+            skipped = _connect_every_key(vault, project, password, vault_key)
+        results = _pc.sync(
+            project=project, actor=_core_actor(password), **_core_credentials(vault, password, vault_key),
+        )
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
+    for name, why in skipped:
+        print(f"Skipped {name} ({why}); connect it with: pushkey connect {name} --project PATH")
+    if not results:
+        print(f"No keys are connected to {project}. Use `pushkey connect NAME --project PATH`, or `inject --all`.")
+        return
+    changed = _print_sync_results(results, config)
+    log_event(f"cli: injected {changed} key(s) into {_project_label(config, project)}")
+    if any(not r.written for r in results):
+        sys.exit(EXIT_IO)
 
-    inject_all = getattr(args, "all", False)
-    keys_to_write = {
-        n: v for n, v in vault.items()
-        if str(project) in (v.get("projects") or [])
-    }
-    if not keys_to_write:
-        if inject_all:
-            keys_to_write = dict(vault)
+
+def cmd_connect(args, vault, password, vault_key=None):
+    _connect_flow(args, vault, password, vault_key, args.name.upper())
+
+
+def cmd_where(args, vault, password, vault_key=None):
+    name = args.name.upper()
+    try:
+        config = load_config(strict=True)
+    except ConfigUnreadableError as error:
+        _connect_error_exit(error)
+    if not isinstance(vault.get(name), dict):
+        _connect_error_exit(_pc.ConnectError("key_not_found", {"key": name}))
+    rows = _pc.status(vault, config, key_name=name)
+    if not rows:
+        print(f"{name} is not connected to any project.")
+        return
+    for row in rows:
+        line = f"{row.project_name}  {row.file}  {row.var}  {row.state}"
+        if row.state == "not_written" and row.reason:
+            line += f"  ({row.reason})"
+        print(line)
+
+
+def cmd_sync(args, vault, password, vault_key=None):
+    name = args.name.upper() if getattr(args, "name", None) else None
+    project = _abs_project(args.project) if getattr(args, "project", None) else None
+    try:
+        config = _connect_config()
+        results = _pc.sync(
+            key_name=name, project=project, actor=_core_actor(password),
+            **_core_credentials(vault, password, vault_key),
+        )
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
+    if not results:
+        print("Nothing to sync: no connections matched.")
+        return
+    for result in results:
+        if not result.written:
+            outcome = f"not written ({result.reason})"
         else:
-            print(f"No keys assigned to {project}.")
-            print("Assign keys via the GUI, or use --all to inject all keys.")
-            sys.exit(0)
+            outcome = "updated" if result.change != "none" else "up to date"
+        print(f"{result.key} -> {_project_label(config, result.project)} {result.file} as {result.var}: {outcome}")
+        for warning in (result.health_warning, result.warning):
+            if warning:
+                print(warning, file=sys.stderr)
+    if any(not r.written for r in results):
+        sys.exit(EXIT_IO)
 
-    result = mutate_env_file(
-        project,
-        keys_to_write,
-        update_existing=True,
-        backup_existing=True,
-    )
-    log_event(f"cli: injected {len(keys_to_write)} keys into {project}")
-    print(f"Wrote {result.changed_count} key(s) to {result.env_file}")
+
+def cmd_project(args, vault, password, vault_key=None):
+    action = args.project_command
+    try:
+        if action == "add":
+            canonical, record = _pc.register_project(_abs_project(args.path), name=getattr(args, "name", None))
+            log_event(f"cli: registered project {record.get('name')}")
+            print(f"Registered project {record.get('name')} ({canonical})")
+        elif action == "remove":
+            saved = _pc.unregister_project(_abs_project(args.path), **_core_credentials(vault, password, vault_key))
+            log_event(f"cli: removed project {Path(_abs_project(args.path)).name}")
+            print(f"Removed project {_abs_project(args.path)}; {len(saved.value)} key(s) disconnected")
+        elif action == "list":
+            _repl_projects(vault)
+        elif action == "dismiss-notice":
+            _pcm.dismiss_notice()
+            print("Notice dismissed.")
+    except _CORE_ERRORS as error:
+        _connect_error_exit(error)
 
 
 def cmd_import(args, vault, password, vault_key=None):
@@ -643,11 +1200,32 @@ def cmd_completion(args):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-def main():
-    if len(sys.argv) == 2 and sys.argv[1] == "--local-api-server":
-        from pushkey_local_api import run_server
-        return run_server()
-    parser = argparse.ArgumentParser(
+def _add_connect_options(parser):
+    """The options ``add --project`` and ``connect`` share."""
+    parser.add_argument("--project", help="Project folder to connect the key to (register it first with: project add)")
+    parser.add_argument("--file", help="Env file in the project (default: the project's default file)")
+    parser.add_argument("--as", dest="as_var", metavar="VAR", help="Variable name in the file (default: the key name)")
+    parser.add_argument("--yes", "-y", action="store_true", help="Answer the plain Confirm? question")
+    parser.add_argument(
+        "--confirm", action="append", choices=["env_mismatch", "public_prefix"],
+        help="Accept an extra warning without a terminal (repeatable); --yes never covers these",
+    )
+
+
+class _StrictParser(argparse.ArgumentParser):
+    """An ArgumentParser that does not accept abbreviated options (``--al`` for ``--all``).
+
+    The scope gates and the shell read the words as typed, so a prefix spelling must not parse.
+    Sub-parsers are built from the parent's class and inherit this.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
+def _build_parser():
+    parser = _StrictParser(
         prog="pushkey",
         description="Pushkey - encrypted API key manager",
     )
@@ -659,10 +1237,35 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=False)
 
-    p_add = sub.add_parser("add", help="Add a new key")
+    p_add = sub.add_parser(
+        "add", help="Add a new key (optionally connect it to a project)",
+        epilog="Omit VALUE to be prompted (hidden).",
+    )
     p_add.add_argument("name", help="Key name, e.g. OPENAI_API_KEY")
-    p_add.add_argument("value", help="Key value")
+    p_add.add_argument("value", nargs="?", default=None, help="Key value (omit to be prompted, hidden)")
     p_add.add_argument("--notes", help="Optional notes")
+    _add_connect_options(p_add)
+
+    p_connect = sub.add_parser("connect", help="Connect an existing key to a variable in a project's env file")
+    p_connect.add_argument("name", help="Key name")
+    _add_connect_options(p_connect)
+
+    p_where = sub.add_parser("where", help="Show where a key is connected and whether each file is up to date")
+    p_where.add_argument("name")
+
+    p_sync = sub.add_parser("sync", help="Rewrite connected env files with current key values")
+    p_sync.add_argument("name", nargs="?", default=None, help="Only this key")
+    p_sync.add_argument("--project", help="Only this project folder")
+
+    p_project = sub.add_parser("project", help="Register or remove project folders (master password only)")
+    project_sub = p_project.add_subparsers(dest="project_command", required=True)
+    p_project_add = project_sub.add_parser("add", help="Register a project folder")
+    p_project_add.add_argument("path")
+    p_project_add.add_argument("--name", help="Display name (default: the folder name)")
+    p_project_remove = project_sub.add_parser("remove", help="Unregister a project and disconnect its keys")
+    p_project_remove.add_argument("path")
+    project_sub.add_parser("list", help="List registered projects")
+    project_sub.add_parser("dismiss-notice", help="Dismiss the one-time migration notice")
 
     p_get = sub.add_parser("get", help="Print a key value")
     p_get.add_argument("name")
@@ -685,9 +1288,12 @@ def main():
 
     sub.add_parser("status", help="Health summary")
 
-    p_inject = sub.add_parser("inject", help="Write keys to project .env")
+    p_inject = sub.add_parser("inject", help="Write the keys connected to a project into its env files")
     p_inject.add_argument("--project", help="Project path (default: current directory)")
-    p_inject.add_argument("--all", action="store_true", dest="all", help="Inject all keys regardless of project assignment")
+    p_inject.add_argument(
+        "--all", action="store_true", dest="all",
+        help="Connect every key to the project with defaults first (master password only)",
+    )
 
     p_import = sub.add_parser("import", help="Bulk import keys from a .env file")
     p_import.add_argument("file", help="Path to .env file")
@@ -700,7 +1306,38 @@ def main():
     sub.add_parser("app", help="Launch web UI in browser")
     p_completion = sub.add_parser("completion", help="Print shell completion script")
     p_completion.add_argument("shell", choices=["bash", "powershell"])
+    return parser
 
+
+def _run_command(args, vault, password, vault_key, scopes):
+    """Run one parsed vault command (the scope gate has already passed)."""
+    handlers = {
+        "add": cmd_add,
+        "get": cmd_get,
+        "list": cmd_list,
+        "rotate": cmd_rotate,
+        "set-backup": cmd_set_backup,
+        "delete": cmd_delete,
+        "status": cmd_status,
+        "inject": cmd_inject,
+        "import": cmd_import,
+        "connect": cmd_connect,
+        "where": cmd_where,
+        "sync": cmd_sync,
+        "project": cmd_project,
+    }
+    handler = handlers[args.command]
+    if args.command == "rotate":
+        handler(args, vault, password, vault_key, scopes=scopes)
+    else:
+        handler(args, vault, password, vault_key)
+
+
+def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--local-api-server":
+        from pushkey_local_api import run_server
+        return run_server()
+    parser = _build_parser()
     args = parser.parse_args()
 
     if args.command is None:
@@ -717,19 +1354,8 @@ def main():
         return cmd_completion(args)
 
     vault, password, vault_key, scopes = _open_vault(args)
-    _require_command_scope(args.command, scopes)
-
-    {
-        "add":    cmd_add,
-        "get":    cmd_get,
-        "list":   cmd_list,
-        "rotate": cmd_rotate,
-        "set-backup": cmd_set_backup,
-        "delete": cmd_delete,
-        "status": cmd_status,
-        "inject": cmd_inject,
-        "import": cmd_import,
-    }[args.command](args, vault, password, vault_key)
+    _require_command_scope(args.command, scopes, args)
+    _run_command(args, vault, password, vault_key, scopes)
 
 
 # ── init ──────────────────────────────────────────────────────────────────────
@@ -914,7 +1540,7 @@ def _cmd_app(blocking=False):
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
 _REPL_COMMANDS = ["list", "get", "copy", "add", "rotate", "delete",
-                  "inject", "project", "projects", "security", "app", "desktop",
+                  "connect", "where", "sync", "inject", "project", "projects", "security", "app", "desktop",
                   "status", "help", "about", "agents", "exit", "quit"]
 
 
@@ -961,13 +1587,39 @@ def _setup_readline(vault, history_file):
     return _rl
 
 
+def _forget_line(rl, line):
+    """Drop the line just read from readline's in-memory history (best effort; the file is filtered on save too)."""
+    if rl is None:
+        return
+    try:
+        length = rl.get_current_history_length()
+        if length and rl.get_history_item(length).strip() == line.strip():
+            rl.remove_history_item(length - 1)
+    except Exception:
+        pass
+
+
+def _scrub_history_file(history_file):
+    """Remove every line that carries a typed secret value from the history file."""
+    try:
+        with open(history_file, "r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+            lines = handle.read().splitlines(keepends=True)
+        kept = [line for line in lines if not _line_carries_value(line)]
+        if len(kept) != len(lines):
+            with open(history_file, "w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+                handle.write("".join(kept))
+    except Exception:
+        pass
+
+
 def _save_history(rl, history_file):
     if rl is None:
         return
     try:
         rl.write_history_file(str(history_file))
     except Exception:
-        pass
+        return
+    _scrub_history_file(history_file)
 
 
 def _project_summary(vault):
@@ -1070,7 +1722,7 @@ def _render_dashboard(vault):
     print(f"  {token_count} token(s). Use {C_CYAN}agents list{C_RESET}, {C_CYAN}agents create <name> read,write,inject{C_RESET}, {C_CYAN}agents revoke <token_id>{C_RESET}")
 
 
-def _render_stale_warnings(vault, password):
+def _render_stale_warnings(vault, password, vault_key=None, scopes=None):
     stale = []
     for name, info in vault.items():
         age = days_since(info.get("rotated") or info.get("created"))
@@ -1084,6 +1736,8 @@ def _render_stale_warnings(vault, password):
     w = max(len(n) for n, _ in stale)
     for name, age in stale:
         print(f"   {C_CYAN}{name.ljust(w)}{C_RESET}  {C_RED}{age}d{C_RESET}")
+    if scopes is not None and "write" not in scopes:
+        return  # this session may not rotate: list only
     try:
         choice = input("   Press Enter to skip, or type a name to rotate: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -1093,7 +1747,7 @@ def _render_stale_warnings(vault, password):
         return
     target = choice.upper()
     if target in vault:
-        _repl_rotate(vault, password, target)
+        _repl_rotate(vault, password, target, vault_key, scopes)
     else:
         print(f"   {C_DIM}Unknown key. Continuing.{C_RESET}")
 
@@ -1202,7 +1856,7 @@ def _repl_add(vault, password, vault_key=None):
     print(f"  {C_GREEN}✓ Added {name}{C_RESET}")
 
 
-def _repl_rotate(vault, password, name, vault_key=None):
+def _repl_rotate(vault, password, name, vault_key=None, scopes=None):
     if name not in vault:
         print(f"{C_RED}Unknown key. Try: list{C_RESET}")
         return
@@ -1216,16 +1870,17 @@ def _repl_rotate(vault, password, name, vault_key=None):
         return
     info = vault[name]
     old_age = days_since(info.get("rotated") or info.get("created"))
-    now = datetime.now().isoformat()
-    info.setdefault("history", []).insert(0, {"value": info["value"], "retired": now})
-    info["history"] = info["history"][:10]
-    info["value"] = new_val.strip()
-    info["rotated"] = now
-    info["rotation_count"] = info.get("rotation_count", 0) + 1
-    _save_and_publish(vault, password, vault_key=vault_key)
+    try:
+        warning = _commit_rotation(vault, password, vault_key, name, new_val.strip())
+    except _CORE_ERRORS as error:
+        print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+        return
     log_event(f"cli: rotated {name}")
     age_str = f"{int(old_age)}d" if old_age != float("inf") else "?"
     print(f"  {C_GREEN}✓ Rotated. Was {age_str} old.{C_RESET}")
+    if warning:
+        print(warning, file=sys.stderr)
+    _after_value_change(name, vault, password, vault_key, scopes, indent="  ")
 
 
 def _repl_delete(vault, password, name, vault_key=None):
@@ -1253,17 +1908,18 @@ def _repl_get(vault, name):
     print(vault[name]["value"])
 
 
-def _repl_inject(vault, password, project_arg=None):
-    project = Path(project_arg or Path.cwd()).resolve()
-    keys_to_write = {n: v for n, v in vault.items()
-                     if str(project) in (v.get("projects") or [])}
-    if not keys_to_write:
-        print(f"  {C_DIM}No keys assigned to {project}.{C_RESET}")
+def _repl_inject(vault, password, project_arg=None, vault_key=None):
+    project = _abs_project(project_arg or Path.cwd())
+    connected = sorted(
+        name for name, entry in vault.items()
+        if not name.startswith("_") and any(_same_path(c["project"], project) for c in _connections_of(entry))
+    )
+    if not connected:
+        print(f"  {C_DIM}No keys are connected to {project}. Use: connect NAME --project PATH{C_RESET}")
         return
-    print(f"  {C_DIM}Inject writes the keys assigned to this project into its local .env file.{C_RESET}")
-    print(f"  {C_DIM}Only keys linked to this project path are written here.{C_RESET}")
+    print(f"  {C_DIM}Inject writes the keys connected to this project into its env files.{C_RESET}")
     print(f"  Project: {C_CYAN}{project}{C_RESET}")
-    print(f"  Will write: {', '.join(sorted(keys_to_write))}")
+    print(f"  Will write: {', '.join(connected)}")
     try:
         confirm = input("  Confirm? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1272,42 +1928,68 @@ def _repl_inject(vault, password, project_arg=None):
     if confirm != "y":
         print("  Cancelled.")
         return
-
-    class _A: pass
-    a = _A()
-    a.project = str(project)
-    a.all = False
-    cmd_inject(a, vault, password)
+    cmd_inject(argparse.Namespace(project=project, all=False), vault, password, vault_key)
 
 
-def _repl_project_add(project_arg: str) -> str:
-    project = Path(project_arg).resolve()
-    config = load_config()
-    config.setdefault("projects", {})
-    project_key = str(project)
-    if project_key not in config["projects"]:
-        config["projects"][project_key] = {
-            "name": project.name,
-            "created": datetime.now().isoformat(),
-        }
-        save_config(config)
-    print(f"  {C_GREEN}✓ Linked project{C_RESET} {C_CYAN}{project_key}{C_RESET}")
-    return project_key
+def _repl_project_add(project_arg: str, name=None):
+    """Register a project folder; returns its registered path, or None when it could not be."""
+    try:
+        canonical, record = _pc.register_project(_abs_project(project_arg), name=name)
+    except _pc.ConnectError as error:
+        if error.code == "project_exists":
+            print(f"  {C_DIM}Already linked:{C_RESET} {C_CYAN}{error.detail.get('project', project_arg)}{C_RESET}")
+            return error.detail.get("project")
+        print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+        return None
+    except _CORE_ERRORS as error:
+        print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+        return None
+    log_event(f"cli: registered project {record.get('name')}")
+    print(f"  {C_GREEN}✓ Linked project{C_RESET} {C_CYAN}{canonical}{C_RESET}")
+    return canonical
+
+
+def _repl_project_remove(vault, password, project_arg: str, vault_key=None) -> None:
+    try:
+        path = _abs_project(project_arg)
+        saved = _pc.unregister_project(path, **_core_credentials(vault, password, vault_key))
+    except _CORE_ERRORS as error:
+        print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+        return
+    log_event(f"cli: removed project {Path(path).name}")
+    print(f"  {C_GREEN}✓ Removed project{C_RESET} {C_CYAN}{path}{C_RESET} ({len(saved.value)} key(s) disconnected)")
 
 
 def _repl_project_assign(vault, password, project_arg: str, key_names: list[str], vault_key=None) -> None:
-    project_key = _repl_project_add(project_arg)
+    """Connect keys to a registered project without writing a file (write it later with inject)."""
     missing = [name.upper() for name in key_names if name.upper() not in vault]
     if missing:
         print(f"{C_RED}Unknown keys: {', '.join(missing)}{C_RESET}")
         return
+    project = _abs_project(project_arg)
+    assigned = []
     for raw_name in key_names:
         name = raw_name.upper()
-        projects = vault[name].setdefault("projects", [])
-        if project_key not in projects:
-            projects.append(project_key)
-    _save_vault_for_session(vault, password, vault_key)
-    print(f"  {C_GREEN}✓ Assigned{C_RESET} {', '.join(name.upper() for name in key_names)} to {C_CYAN}{project_key}{C_RESET}")
+        try:
+            _pc.connect(
+                key_name=name, project=project, write=False, confirmed=(),
+                actor=_core_actor(password), **_core_credentials(vault, password, vault_key),
+            )
+        except _pc.ConnectError as error:
+            if error.code == "confirmation_required":
+                needs = ", ".join(error.detail.get("needs", []))
+                print(f"{C_ORANGE}Skipped {name}: needs confirmation ({needs}). Use: connect {name} --project PATH{C_RESET}")
+                continue
+            print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+            if error.code in _STORE_LEVEL_CODES:
+                return
+            continue
+        except _CORE_ERRORS as error:
+            print(f"{C_RED}{_describe_core_error(error)[0]}{C_RESET}")
+            return
+        assigned.append(name)
+    if assigned:
+        print(f"  {C_GREEN}✓ Assigned{C_RESET} {', '.join(assigned)} to {C_CYAN}{project}{C_RESET}")
 
 
 def _repl_projects(vault) -> None:
@@ -1396,9 +2078,88 @@ def _repl_agents(vault, password, vault_key, rest=None) -> None:
     print(f"{C_RED}Usage: agents [list|create|revoke]{C_RESET}")
 
 
-def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
-    aliases = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
-    cmd = aliases.get(cmd, cmd)
+#: Shell commands any session may run, whatever its token scopes.
+_SHELL_ALWAYS = frozenset({"help", "about", "exit", "quit", "app", "desktop"})
+
+#: Scopes each shell command needs (the same meaning as _COMMAND_SCOPES). A command that
+#: is in neither table is refused to a token: the gate fails closed.
+_SHELL_SCOPES = {
+    "get": ("read",), "list": ("read",), "status": ("read",), "copy": ("read",),
+    "projects": ("read",), "security": ("read",), "where": ("read",), "dashboard": ("read",),
+    "add": ("write",), "rotate": ("write",), "delete": ("write",),
+    "set-backup": ("write",), "import": ("write",),
+    "inject": ("inject",), "sync": ("inject",),
+    "connect": ("write", "inject"),
+}
+_SHELL_MASTER_ONLY = frozenset({"agents"})
+
+
+def _shell_required_scopes(cmd, rest):
+    """The scopes a shell command needs: a tuple, ``_MASTER_ONLY`` or None (unmapped)."""
+    if cmd in _SHELL_ALWAYS:
+        return ()
+    if cmd in _SHELL_MASTER_ONLY:
+        return _MASTER_ONLY
+    if cmd == "project":
+        action = rest[0].lower() if rest else ""
+        if action in ("add", "remove", "dismiss-notice"):
+            return _MASTER_ONLY
+        if action == "assign":
+            return ("write",)  # the same scope as the local API's assign route
+        if action == "inject":
+            return ("inject",)
+        return ("read",)  # list, or the usage line
+    if cmd == "inject" and "--all" in rest:
+        return _MASTER_ONLY
+    if cmd == "add" and "--project" in rest:
+        return ("write", "inject")
+    return _SHELL_SCOPES.get(cmd)
+
+
+#: Shell commands that run the CLI command of the same name, so the two never drift apart.
+_SHELL_DELEGATED = frozenset({"connect", "where", "sync", "set-backup", "import"})
+
+
+def _shell_delegate(cmd, rest, vault, password, vault_key, scopes):
+    """Run a CLI command from the shell; its argument errors and exits end only that command."""
+    try:
+        args = _build_parser().parse_args([cmd, *rest])
+        # The raw words were gated cheaply already; the parsed args decide what really runs
+        # (``--opt=value`` and the like), exactly as the one-shot CLI gates them.
+        problem = _scope_problem(args.command, _scopes_needed(args.command, args), scopes)
+        if problem:
+            print(f"{C_RED}{problem}{C_RESET}", file=sys.stderr)
+            return
+        _run_command(args, vault, password, vault_key, scopes)
+    except SystemExit:
+        pass
+
+
+def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes=None):
+    """Gate one shell command by the session's token scopes, then run it.
+
+    ``scopes`` is None for a master-password session (never gated). A refusal prints the
+    same message the CLI gives and leaves the shell running.
+    """
+    cmd = _SHELL_ALIASES.get(cmd, cmd)
+    if _words_carry_value(cmd, rest):
+        print(
+            f"{C_RED}Values typed here are saved to history. "
+            f"Use `{cmd} NAME` and enter the value hidden.{C_RESET}",
+            file=sys.stderr,
+        )
+        return app_proc
+    problem = _scope_problem(cmd, _shell_required_scopes(cmd, rest), scopes)
+    if problem:
+        print(f"{C_RED}{problem}{C_RESET}", file=sys.stderr)
+        return app_proc
+    try:
+        return _dispatch_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes)
+    except SystemExit:
+        return app_proc  # a command's own exit must not end the shell
+
+
+def _dispatch_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes=None):
     if cmd in ("exit", "quit"):
         return False
     if cmd in ("help", "about"):
@@ -1411,16 +2172,27 @@ def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
         _repl_projects(vault)
         return app_proc
     if cmd == "project":
-        if not rest:
-            print(f"{C_RED}Usage: project [add|assign|inject] ...{C_RESET}")
-        elif rest[0] == "add" and len(rest) >= 2:
+        usage = f"{C_RED}Usage: project [add PATH [--name N]|remove PATH|assign PATH KEYS...|inject PATH|list|dismiss-notice]{C_RESET}"
+        action = rest[0].lower() if rest else ""
+        if action == "add" and len(rest) == 2:
             _repl_project_add(rest[1])
-        elif rest[0] == "assign" and len(rest) >= 3:
+        elif action == "add" and len(rest) == 4 and rest[2] == "--name":
+            _repl_project_add(rest[1], name=rest[3])
+        elif action == "remove" and len(rest) == 2:
+            _repl_project_remove(vault, password, rest[1], vault_key)
+        elif action == "assign" and len(rest) >= 3:
             _repl_project_assign(vault, password, rest[1], rest[2:], vault_key)
-        elif rest[0] == "inject" and len(rest) >= 2:
-            _repl_inject(vault, password, rest[1])
+        elif action == "inject" and len(rest) >= 2:
+            _repl_inject(vault, password, rest[1], vault_key)
+        elif action == "list" and len(rest) == 1:
+            _repl_projects(vault)
+        elif action == "dismiss-notice" and len(rest) == 1:
+            _shell_delegate("project", rest, vault, password, vault_key, scopes)
         else:
-            print(f"{C_RED}Usage: project [add|assign|inject] ...{C_RESET}")
+            print(usage)
+        return app_proc
+    if cmd in _SHELL_DELEGATED:
+        _shell_delegate(cmd, rest, vault, password, vault_key, scopes)
         return app_proc
     if cmd == "security":
         _render_security_panel(vault)
@@ -1452,13 +2224,16 @@ def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
             _repl_copy(vault, rest[0].upper())
         return app_proc
     if cmd == "add":
-        _repl_add(vault, password, vault_key)
+        if rest:
+            _shell_delegate("add", rest, vault, password, vault_key, scopes)
+        else:
+            _repl_add(vault, password, vault_key)
         return app_proc
     if cmd == "rotate":
         if not rest:
             print(f"{C_RED}Usage: rotate NAME{C_RESET}")
         else:
-            _repl_rotate(vault, password, rest[0].upper(), vault_key)
+            _repl_rotate(vault, password, rest[0].upper(), vault_key, scopes)
         return app_proc
     if cmd == "delete":
         if not rest:
@@ -1467,7 +2242,10 @@ def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
             _repl_delete(vault, password, rest[0].upper(), vault_key)
         return app_proc
     if cmd == "inject":
-        _repl_inject(vault, password, rest[0] if rest else None)
+        if any(word.startswith("--") for word in rest):
+            _shell_delegate("inject", rest, vault, password, vault_key, scopes)
+        else:
+            _repl_inject(vault, password, rest[0] if rest else None, vault_key)
         return app_proc
     if cmd == "app":
         if app_proc and app_proc.poll() is None:
@@ -1516,13 +2294,17 @@ def _print_help():
         ("list [filter]",     "show all keys (filter: healthy|warning|critical)"),
         ("get NAME",          "print key value"),
         ("copy NAME",         "copy to clipboard (clears in 30s)"),
-        ("add",               "add a new key (prompts for value)"),
-        ("rotate NAME",       "rotate key value"),
+        ("add NAME [--project PATH ...]", "add a new key (the value is prompted, hidden); --project also connects it"),
+        ("connect NAME --project PATH", "connect a key to a variable in a project env file"),
+        ("where NAME",        "show where a key is connected and whether each file is up to date"),
+        ("sync [NAME]",       "rewrite connected env files with current key values"),
+        ("rotate NAME",       "rotate key value and update its connected files"),
         ("delete NAME",       "delete a key"),
-        ("inject [PATH]",     "write assigned keys to project .env"),
-        ("projects",          "list linked projects and assigned keys"),
-        ("project add PATH",  "link a project folder"),
-        ("project assign PATH KEYS...", "assign one or more keys to a project"),
+        ("inject [PATH]",     "write the keys connected to a project into its env files"),
+        ("projects",          "list linked projects and connected keys"),
+        ("project add PATH",  "register a project folder (master password only)"),
+        ("project remove PATH", "unregister a project and disconnect its keys (master password only)"),
+        ("project assign PATH KEYS...", "connect one or more keys to a registered project without writing"),
         ("agents",            "list/create/revoke agent tokens"),
         ("security",          "show stale keys and missing backup coverage"),
         ("app / desktop",     "launch the web app or desktop app"),
@@ -1539,7 +2321,8 @@ def _print_help():
     workflows = [
         "Add a secret: add  → save OPENAI_API_KEY once, encrypted locally",
         "Use a secret: get OPENAI_API_KEY  or  copy OPENAI_API_KEY",
-        "Inject project env: inject .  → write assigned keys into the current repo .env",
+        "Connect a key: connect OPENAI_API_KEY --project .  → choose the env file and variable, then confirm",
+        "Inject project env: inject .  → write the keys connected to the current repo into its env files",
         "Rotate a key: rotate OPENAI_API_KEY  → replace the live value and keep metadata updated",
     ]
     for line in workflows:

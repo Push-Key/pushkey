@@ -1,3 +1,5 @@
+import os
+import time
 from datetime import datetime, timedelta, timezone
 import pytest
 import pushkey_providers
@@ -77,8 +79,75 @@ def test_health_status_aware_timestamp_uses_legacy_invalid_date_behavior():
     ("2026-01-08T07:00:00-05:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc), 2),
     ("2026-01-08T09:00:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone(timedelta(hours=3))), 2),
 ])
-def test_days_since_at_normalizes_naive_and_aware_values_to_utc(date_str, now, expected):
+def test_days_since_at_reads_naive_values_as_local_time_and_normalizes_to_utc(monkeypatch, date_str, now, expected):
+    # Pin the local zone to UTC so these rows stay machine-independent.
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", timezone.utc)
     assert days_since_at(date_str, now) == expected
+
+
+@pytest.mark.parametrize(("offset_hours", "date_str", "now", "expected"), [
+    # East of UTC: 22:00 local is 12:00Z, so this is "now", not 10 hours in the future.
+    (10, "2026-01-10T22:00:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc), 0),
+    # West of UTC: 08:00 local is 16:00Z, 60 days 20 hours before now (read as UTC it is 61 days).
+    (-8, "2025-11-10T08:00:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc), 60),
+    # Date-only stamps are local midnight, not UTC midnight.
+    (10, "2026-01-10", datetime(2026, 1, 9, 22, 0, tzinfo=timezone.utc), 0),
+    # A naive now is local too: 04:00 at UTC-8 is 12:00Z, so two days after the aware stamp.
+    (-8, "2026-01-08T12:00:00+00:00", datetime(2026, 1, 10, 4, 0), 2),
+    # East: 22:00 at UTC+10 is 12:00Z, which is before the aware stamp at 20:00Z, so it is in the future.
+    (10, "2026-01-10T20:00:00+00:00", datetime(2026, 1, 10, 22, 0), float("inf")),
+])
+def test_days_since_at_reads_naive_values_as_local_time(monkeypatch, offset_hours, date_str, now, expected):
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", timezone(timedelta(hours=offset_hours)))
+    assert days_since_at(date_str, now) == expected
+
+
+@pytest.mark.parametrize("date_str", ["1969-12-31", "0001-01-02T00:00:00"])
+def test_days_since_at_reads_dates_the_platform_cannot_localize(date_str):
+    # Windows cannot convert pre-1970 naive datetimes to UTC; they must still age, not fail.
+    now = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+    assert 20000 < days_since_at(date_str, now) < float("inf")
+
+
+@pytest.mark.parametrize(("offset_hours", "value", "expected"), [
+    (10, datetime(2026, 1, 10, 22, 0), datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)),
+    (-8, datetime(2026, 1, 10, 4, 0), datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)),
+    (10, datetime(2026, 1, 10, 22, 0, tzinfo=timezone(timedelta(hours=3))),
+     datetime(2026, 1, 10, 19, 0, tzinfo=timezone.utc)),
+])
+def test_as_utc_reads_naive_values_in_the_pinned_zone_and_keeps_aware_offsets(monkeypatch, offset_hours, value, expected):
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", timezone(timedelta(hours=offset_hours)))
+    result = pushkey_providers.as_utc(value)
+    assert result == expected
+    assert result.utcoffset() == timedelta(0)
+
+
+@pytest.fixture
+def system_timezone():
+    previous = os.environ.get("TZ")
+
+    def set_zone(name):
+        os.environ["TZ"] = name
+        time.tzset()
+
+    try:
+        yield set_zone
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is POSIX only")
+def test_as_utc_uses_system_local_time_when_no_zone_is_pinned(system_timezone):
+    assert pushkey_providers.LOCAL_TZ is None
+    system_timezone("Australia/Brisbane")  # UTC+10, no daylight saving
+    assert pushkey_providers.as_utc(datetime(2026, 1, 10, 22, 0, 0)) == datetime(
+        2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    assert pushkey_providers.as_utc(datetime(2026, 1, 10, 22, 0, tzinfo=timezone(timedelta(hours=3)))) == datetime(
+        2026, 1, 10, 19, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("date_str", ["not-a-date", float("nan"), "2026-01-11T12:00:00+00:00"])

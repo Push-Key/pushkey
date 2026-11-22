@@ -106,7 +106,7 @@ jobs:
       # accessible-name assertions only ever run on a developer machine, so an
       # accessibility regression could reach the protected branch.
       - name: Accessibility and WCAG 2.2 AA scans
-        run: npm run test:e2e -- accessibility.spec.ts wcag.spec.ts --project=chromium
+        run: npm run test:e2e -- accessibility.spec.ts wcag.spec.ts connect.spec.ts --project=chromium
 
       - name: Upload accessibility failure traces
         if: failure()

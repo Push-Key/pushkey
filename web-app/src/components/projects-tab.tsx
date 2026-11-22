@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   FolderOpen, Plus, Trash2, ChevronDown, ChevronRight,
   Zap, Check, X, Loader2,
@@ -9,8 +9,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
-import { api, type Project, type KeySummary } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  describeApiError,
+  reasonText,
+  type ConnectionStatus,
+  type ConnectResult,
+  type InjectResp,
+  type Project,
+  type KeySummary,
+} from "@/lib/api";
 import { toast } from "@/lib/toast";
+import { ConfirmPanel, ResultLines, StateBadge, samePath } from "@/components/connect-ui";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -26,28 +37,56 @@ function ErrorBanner({ msg }: { msg: string }) {
   );
 }
 
-function InjectResult({
-  result,
-}: {
-  result: { injected: string[]; skipped_existing: string[]; env_file: string; wrote: boolean };
-}) {
+/** Files the write did not reach. A folder that is not on this computer is skipped, not a failure. */
+function injectFailures(r: InjectResp): ConnectResult[] {
+  return (r.results ?? []).filter((x) => !x.written && x.reason !== "folder_missing");
+}
+
+function InjectResult({ result }: { result: InjectResp }) {
+  // Files the write did not reach are named in their own red alert block, never inside the
+  // success block and never behind a green heading.
+  const failures = injectFailures(result);
+  const skipped = (result.results ?? []).filter((x) => !x.written && x.reason === "folder_missing");
+  const failed = failures.length > 0;
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className="rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1"
-    >
-      <p className="font-semibold text-emerald-400">
-        {result.wrote ? "Wrote" : "Preview"}: {result.env_file}
-      </p>
-      <p className="text-[var(--color-muted-foreground)]">
-        Injected: {result.injected.length === 0 ? "none" : result.injected.join(", ")}
-      </p>
-      {result.skipped_existing.length > 0 && (
-        <p className="text-orange-400">
-          Conflict: existing values kept for {result.skipped_existing.join(", ")}
+    <div className="space-y-1">
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className={
+          failed
+            ? "rounded-md border border-[var(--color-border)] p-3 text-xs space-y-1"
+            : "rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1"
+        }
+      >
+        {failed ? (
+          <p className="font-semibold text-[var(--color-foreground)]">Not every file was written.</p>
+        ) : (
+          <p className="font-semibold text-emerald-400">
+            {result.wrote ? "Wrote" : "Preview"}: {result.env_file}
+          </p>
+        )}
+        <p className="text-[var(--color-muted-foreground)]">
+          Injected: {result.injected.length === 0 ? "none" : result.injected.join(", ")}
         </p>
+        {skipped.map((r) => (
+          <p key={`${r.file}-${r.var}`} className="text-[var(--color-muted-foreground)]">
+            Skipped: folder not on this computer
+          </p>
+        ))}
+      </div>
+      {failed && (
+        <div
+          role="alert"
+          className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-xs space-y-1 text-red-400"
+        >
+          {failures.map((r) => (
+            <p key={`${r.file}-${r.var}`}>
+              Not written: {r.file} ({reasonText(r.reason)})
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -65,12 +104,37 @@ function ProjectPanel({
   onUpdate: (p: Project) => void;
 }) {
   const [injectLoading, setInjectLoading] = useState(false);
-  const [injectResult, setInjectResult] = useState<{
-    injected: string[]; skipped_existing: string[]; env_file: string; wrote: boolean;
-  } | null>(null);
+  const [injectResult, setInjectResult] = useState<InjectResp | null>(null);
   const [injectErr, setInjectErr] = useState<string | null>(null);
   const [assignErr, setAssignErr] = useState<string | null>(null);
+  const [assignNote, setAssignNote] = useState<string | null>(null);
   const [assignLoading, setAssignLoading] = useState(false);
+  const [confirm, setConfirm] = useState<{ key: string; needs: string[] } | null>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const confirmTitleId = useId();
+  const [conns, setConns] = useState<ConnectionStatus[]>([]);
+  const [connsErr, setConnsErr] = useState<string | null>(null);
+  const [syncResults, setSyncResults] = useState<ConnectResult[] | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncErr, setSyncErr] = useState<string | null>(null);
+
+  const loadConns = async () => {
+    try {
+      const r = await api.listConnections({ project: project.path });
+      setConns(r.connections);
+      setConnsErr(null);
+    } catch (e) {
+      setConnsErr(describeApiError(e, "Could not load the connected files"));
+    }
+  };
+
+  // Reload when the project or its assigned keys change; loadConns itself is recreated each render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadConns(); }, [project.path, project.keys.length]);
+
+  useEffect(() => {
+    if (confirm) confirmRef.current?.focus();
+  }, [confirm]);
 
   const assigned = new Set(project.keys);
   const unassigned = allKeys.filter((k) => !assigned.has(k.name));
@@ -83,22 +147,47 @@ function ProjectPanel({
     try {
       const r = await api.injectProject(project.path, false);
       setInjectResult(r);
-      toast.success(".env injected");
+      const failures = injectFailures(r);
+      if (failures.length === 0) toast.success(".env injected");
+      else toast.error("Some files were not written");
+      loadConns();
     } catch (e) {
-      setInjectErr(e instanceof Error ? e.message : "inject failed");
+      setInjectErr(describeApiError(e, "inject failed"));
     } finally {
       setInjectLoading(false);
     }
   };
 
-  const assign = async (keyName: string) => {
+  const updateAll = async () => {
+    setSyncLoading(true);
+    setSyncErr(null);
+    setSyncResults(null);
+    try {
+      const r = await api.syncConnections({ project: project.path });
+      setSyncResults(r.synced);
+      await loadConns();
+    } catch (e) {
+      setSyncErr(describeApiError(e, "update failed"));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const assign = async (keyName: string, confirmed?: string[]) => {
     setAssignLoading(true);
     setAssignErr(null);
+    setAssignNote(null);
     try {
-      await api.assignKeys(project.path, [keyName]);
+      await api.assignKeys(project.path, [keyName], confirmed);
+      setConfirm(null);
       onUpdate({ ...project, keys: [...project.keys, keyName] });
+      setAssignNote("Connected. Nothing is written yet: use Update all.");
     } catch (e) {
-      setAssignErr(e instanceof Error ? e.message : "assign failed");
+      if (e instanceof ApiError && e.status === 409 && e.detail === "confirmation_required" && e.needs.length > 0) {
+        setConfirm({ key: keyName, needs: e.needs });
+      } else {
+        setAssignErr(describeApiError(e, "assign failed"));
+      }
     } finally {
       setAssignLoading(false);
     }
@@ -111,7 +200,7 @@ function ProjectPanel({
       await api.unassignKeys(project.path, [keyName]);
       onUpdate({ ...project, keys: project.keys.filter((k) => k !== keyName) });
     } catch (e) {
-      setAssignErr(e instanceof Error ? e.message : "unassign failed");
+      setAssignErr(describeApiError(e, "unassign failed"));
     } finally {
       setAssignLoading(false);
     }
@@ -138,9 +227,51 @@ function ProjectPanel({
             )}
             Inject .env
           </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={updateAll}
+            disabled={syncLoading}
+            aria-label={`Update all connected files for ${project.name || project.path}`}
+          >
+            {syncLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+            Update all
+          </Button>
         </div>
         {injectErr && <ErrorBanner msg={injectErr} />}
         {injectResult && <InjectResult result={injectResult} />}
+        {syncErr && <ErrorBanner msg={syncErr} />}
+        {syncResults && (
+          syncResults.length === 0
+            ? <p className="text-xs text-[var(--color-muted-foreground)]" aria-live="polite">Nothing to update.</p>
+            : <ResultLines results={syncResults} projects={[project]} />
+        )}
+      </div>
+
+      {/* Connected files */}
+      <div className="space-y-1">
+        <p className="text-xs font-semibold text-[var(--color-muted-foreground)] uppercase tracking-wider">
+          Connected files ({conns.length})
+        </p>
+        {connsErr && <ErrorBanner msg={connsErr} />}
+        {conns.length === 0 && !connsErr ? (
+          <p className="text-xs text-[var(--color-muted-foreground)]">No connected files yet.</p>
+        ) : (
+          <ul className="divide-y divide-[var(--color-border)]">
+            {conns.map((c) => (
+              <li key={`${c.key}|${c.file}|${c.var}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
+                <span className="font-mono text-xs text-cyan-400">{c.key}</span>
+                <span className="font-mono text-xs">{c.file}</span>
+                <span className="font-mono text-xs text-[var(--color-muted-foreground)]">{c.var}</span>
+                <StateBadge state={c.state} />
+                {c.reason && (
+                  <span className="text-xs text-[var(--color-muted-foreground)]">{reasonText(c.reason)}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Assigned keys */}
@@ -149,6 +280,9 @@ function ProjectPanel({
           Assigned keys ({project.keys.length})
         </p>
         {assignErr && <ErrorBanner msg={assignErr} />}
+        {assignNote && (
+          <p className="text-xs text-emerald-400" aria-live="polite">{assignNote}</p>
+        )}
         {assignedKeys.length === 0 ? (
           <p className="text-xs text-[var(--color-muted-foreground)]">No keys assigned.</p>
         ) : (
@@ -173,6 +307,21 @@ function ProjectPanel({
           </div>
         )}
       </div>
+
+      <p className="text-xs text-[var(--color-muted-foreground)]">
+        Unassigning stops Pushkey updating a key here. Lines already written stay in the file. If another key already writes to the same variable, Pushkey reports a conflict and changes nothing.
+      </p>
+
+      {confirm && (
+        <ConfirmPanel
+          ref={confirmRef}
+          titleId={confirmTitleId}
+          needs={confirm.needs}
+          busy={assignLoading}
+          onConfirm={() => assign(confirm.key, confirm.needs)}
+          onBack={() => setConfirm(null)}
+        />
+      )}
 
       {/* Unassigned keys */}
       {unassigned.length > 0 && (
@@ -208,13 +357,25 @@ function ProjectCard({
   allKeys,
   onDelete,
   onUpdate,
+  startOpen,
+  expandId,
 }: {
   project: Project;
   allKeys: KeySummary[];
   onDelete: (path: string) => void;
   onUpdate: (p: Project) => void;
+  startOpen: boolean;
+  expandId?: number;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(startOpen);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  // "Pick keys" in the notice asks for this card to open, also when the Projects tab is already showing.
+  useEffect(() => {
+    if (!startOpen) return;
+    setExpanded(true);
+    cardRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [startOpen, expandId]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteErr, setDeleteErr] = useState<string | null>(null);
@@ -228,14 +389,14 @@ function ProjectCard({
       await api.deleteProject(project.path);
       onDelete(project.path);
     } catch (e) {
-      setDeleteErr(e instanceof Error ? e.message : "delete failed");
+      setDeleteErr(describeApiError(e, "delete failed"));
       setDeleting(false);
       setConfirmDelete(false);
     }
   };
 
   return (
-    <div className="rounded-lg border border-[var(--color-card)] bg-[var(--color-card)] overflow-hidden">
+    <div ref={cardRef} className="rounded-lg border border-[var(--color-card)] bg-[var(--color-card)] overflow-hidden">
       {/* Header row */}
       <div className="flex items-center gap-3 p-4">
         <button
@@ -341,14 +502,14 @@ function AddProjectForm({ onAdded }: { onAdded: (p: Project) => void }) {
     setSuccess(false);
     try {
       const r = await api.createProject(path.trim(), name.trim() || undefined);
-      onAdded({ path: r.path, name: r.name, keys: [], created: null });
+      onAdded({ path: r.path, name: r.name, keys: [], created: null, connections: 0 });
       setPath("");
       setName("");
       setSuccess(true);
       toast.success("Project created");
       setTimeout(() => setSuccess(false), 2000);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "create failed");
+      setErr(describeApiError(e, "create failed"));
     } finally {
       setLoading(false);
     }
@@ -408,7 +569,7 @@ function AddProjectForm({ onAdded }: { onAdded: (p: Project) => void }) {
 
 // ── main export ───────────────────────────────────────────────────────────────
 
-export function ProjectsTab() {
+export function ProjectsTab({ expandPath, expandId }: { expandPath?: string; expandId?: number }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [allKeys, setAllKeys] = useState<KeySummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -472,6 +633,8 @@ export function ProjectsTab() {
               allKeys={allKeys}
               onDelete={handleDelete}
               onUpdate={handleUpdate}
+              startOpen={expandPath ? samePath(p.path, expandPath) : false}
+              expandId={expandId}
             />
           ))}
         </div>

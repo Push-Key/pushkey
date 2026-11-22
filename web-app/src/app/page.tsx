@@ -12,6 +12,7 @@ import { LifecycleTab } from "@/components/lifecycle-tab";
 import { AuditTab } from "@/components/audit-tab";
 import { AgentsTab } from "@/components/agents-tab";
 import { SettingsTab } from "@/components/settings-tab";
+import { ConnectNotice } from "@/components/connect-notice";
 import { api, type StatusResp } from "@/lib/api";
 import { bootstrapSession } from "@/lib/auth";
 
@@ -41,6 +42,7 @@ export default function Page() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [tokenReady, setTokenReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expand, setExpand] = useState<{ path: string; id: number } | undefined>(undefined);
 
   useEffect(() => {
     bootstrapSession()
@@ -136,9 +138,13 @@ export default function Page() {
     <div className="flex h-screen flex-col md:flex-row">
       <Sidebar active={tab} onSelect={setTab} onLock={lock} keyCount={status.key_count} />
       <main id="main-content" className="flex-1 overflow-auto p-4 md:p-6">
+        <ConnectNotice
+          canWrite={status.can_write}
+          onPickKeys={(path) => { setExpand((e) => ({ path, id: (e?.id ?? 0) + 1 })); setTab("projects"); }}
+        />
         {tab === "dashboard" && <DashboardTab onNavigate={(t) => setTab(t as Tab)} />}
         {tab === "vault" && <VaultTab />}
-        {tab === "projects" && <ProjectsTab />}
+        {tab === "projects" && <ProjectsTab expandPath={expand?.path} expandId={expand?.id} />}
         {tab === "health" && <HealthTab />}
         {tab === "forecast" && <ForecastTab />}
         {tab === "lifecycle" && <LifecycleTab />}

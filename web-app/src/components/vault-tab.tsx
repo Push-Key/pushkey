@@ -1,17 +1,36 @@
 "use client";
 
-import { useEffect, useState, useMemo, Fragment, useId } from "react";
+import { useEffect, useRef, useState, useMemo, Fragment, useId } from "react";
 import {
   Eye, EyeOff, Search, Copy, Check, Plus, Trash2, RefreshCw, X,
-  Layers, ArrowUpCircle, Pencil, FolderTree,
+  Layers, ArrowUpCircle, Pencil, FolderTree, Link2,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api, type KeySummary } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  describeApiError,
+  reasonText,
+  type ConnectionStatus,
+  type ConnectResult,
+  type KeySummary,
+  type Preview,
+  type Project,
+  type RotateResp,
+  type Suggestion,
+} from "@/lib/api";
 import { toast } from "@/lib/toast";
+import {
+  ConfirmPanel,
+  ResultLines,
+  StateBadge,
+  canUpdate,
+  projectLabel,
+} from "@/components/connect-ui";
 
 const envVariant = (env: string) => {
   if (env === "prod")    return "destructive" as const;
@@ -36,6 +55,31 @@ interface AddForm {
   provider: string;
   env: string;
 }
+
+/** What the "Used in" row of one key shows. Present in the map only while the row is open. */
+interface UsedIn {
+  loading: boolean;
+  rows: ConnectionStatus[];
+  err: string | null;
+  results: ConnectResult[] | null;
+  busy: string | null;
+}
+
+/** The result panel shown after an add that was connected to a project. */
+interface AddResult {
+  name: string;
+  connection: ConnectResult;
+}
+
+const PREVIEW_DEBOUNCE_MS = 400;
+
+const changeSentence = (p: Preview) => {
+  if (p.change === "replace") {
+    return `Replaces the current value of ${p.var} in ${p.file}. The other lines stay as they are.`;
+  }
+  if (p.change === "none") return `${p.file} already has this value.`;
+  return `Adds 1 line to ${p.file}. The other lines stay as they are.`;
+};
 
 interface EditForm {
   provider: string;
@@ -74,8 +118,32 @@ export function VaultTab() {
   const [editLoading, setEditLoading] = useState<string | null>(null);
 
   const [promoteLoading, setPromoteLoading] = useState<string | null>(null);
+
+  // Connect section of the add-key form
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [connectOn, setConnectOn] = useState(false);
+  const [connectTouched, setConnectTouched] = useState(false);
+  const [project, setProject] = useState("");
+  const [file, setFile] = useState("");
+  const [varName, setVarName] = useState("");
+  const [otherVar, setOtherVar] = useState("");
+  const [suggest, setSuggest] = useState<Suggestion | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [confirmNeeds, setConfirmNeeds] = useState<string[] | null>(null);
+  const [addResult, setAddResult] = useState<AddResult | null>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
+
+  // "Used in" rows and the outcome of the last rotate or promote, per key
+  const [usedInState, setUsedInState] = useState<Record<string, UsedIn>>({});
+  const [rotateResults, setRotateResults] = useState<Record<string, RotateResp>>({});
   const searchId = useId();
   const addFormId = useId();
+  const confirmTitleId = useId();
+  const addResultTitleId = useId();
+  const effectiveVar = otherVar.trim() || varName;
 
   const refresh = async () => {
     setLoading(true);
@@ -90,7 +158,90 @@ export function VaultTab() {
     }
   };
 
-  useEffect(() => { refresh(); }, []);
+  const loadProjects = async () => {
+    try {
+      const r = await api.listProjects();
+      setProjects(r.projects);
+    } catch {
+      /* names fall back to the folder name; the add form says when there are none */
+    }
+  };
+
+  useEffect(() => { refresh(); loadProjects(); }, []);
+
+  // ── connect section: suggestions, then a preview of exactly what would be written ──
+  const resetConnect = () => {
+    setConnectOn(false);
+    setConnectTouched(false);
+    setProject("");
+    setFile("");
+    setVarName("");
+    setOtherVar("");
+    setSuggest(null);
+    setPreview(null);
+    setPreviewErr(null);
+    setPreviewBusy(false);
+    setConfirmNeeds(null);
+  };
+
+  useEffect(() => {
+    if (!showAdd || !addForm.name) { setSuggest(null); return; }
+    let live = true;
+    const timer = setTimeout(async () => {
+      try {
+        const s = await api.suggestConnection(addForm.name, project || undefined);
+        if (!live) return;
+        setSuggest(s);
+        if (!connectTouched && s.projects.length > 0) setConnectOn(true);
+        if (!project && s.projects.length > 0) setProject(s.projects[0][0]);
+        if (s.files.length > 0 && !s.files.some(([f]) => f === file)) setFile(s.files[0][0]);
+        if (s.vars.length > 0 && !s.vars.some(([v]) => v === varName)) setVarName(s.vars[0][0]);
+      } catch {
+        if (live) setSuggest(null);
+      }
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => { live = false; clearTimeout(timer); };
+    // file and varName are read to keep a choice that is still offered; they must not retrigger the lookup
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAdd, addForm.name, project, connectTouched]);
+
+  useEffect(() => {
+    setConfirmNeeds(null);
+    if (!connectOn || !addForm.name || !addForm.value || !project) {
+      setPreview(null);
+      setPreviewErr(null);
+      setPreviewBusy(false);
+      return;
+    }
+    let live = true;
+    setPreviewBusy(true);
+    const timer = setTimeout(async () => {
+      try {
+        const p = await api.previewConnection({
+          key: addForm.name,
+          project,
+          file: file || undefined,
+          var: effectiveVar || undefined,
+          value: addForm.value,
+          env: addForm.env || undefined,
+        });
+        if (!live) return;
+        setPreview(p);
+        setPreviewErr(null);
+      } catch (e) {
+        if (!live) return;
+        setPreview(null);
+        setPreviewErr(describeApiError(e, "Could not check that file"));
+      } finally {
+        if (live) setPreviewBusy(false);
+      }
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => { live = false; clearTimeout(timer); };
+  }, [connectOn, addForm.name, addForm.value, addForm.env, project, file, effectiveVar]);
+
+  useEffect(() => {
+    if (confirmNeeds) confirmRef.current?.focus();
+  }, [confirmNeeds]);
 
   const filtered = useMemo(() => {
     const f = filter.toLowerCase();
@@ -149,27 +300,56 @@ export function VaultTab() {
     }, CLIPBOARD_CLEAR_TIMEOUT_MS);
   };
 
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!addForm.name || !addForm.value) return;
+  const submitAdd = async (confirmed?: string[]) => {
     setAddLoading(true);
     setErr(null);
     try {
-      await api.addKey({
+      const connect = connectOn && project
+        ? {
+            project,
+            file: file || undefined,
+            var: effectiveVar || undefined,
+            ...(confirmed && confirmed.length > 0 ? { confirmed } : {}),
+          }
+        : undefined;
+      const added = await api.addKey({
         name: addForm.name,
         value: addForm.value,
         provider: addForm.provider || undefined,
         env: addForm.env || undefined,
+        connect,
       });
       setShowAdd(false);
       setAddForm(EMPTY_ADD);
+      resetConnect();
       await refresh();
-      toast.success("Key added");
+      if (added.connection) {
+        setAddResult({ name: added.name, connection: added.connection });
+      } else {
+        toast.success("Key added");
+      }
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "add failed");
+      if (e instanceof ApiError && e.status === 409 && e.detail === "confirmation_required" && e.needs.length > 0) {
+        setConfirmNeeds(e.needs);
+      } else {
+        setErr(describeApiError(e, "add failed"));
+      }
     } finally {
       setAddLoading(false);
     }
+  };
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addForm.name || !addForm.value || confirmNeeds) return;
+    if (connectOn) {
+      if (!project || !preview || previewErr || previewBusy) return;
+      if (preview.needs_confirm.length > 0) {
+        setConfirmNeeds(preview.needs_confirm);
+        return;
+      }
+    }
+    await submitAdd();
   };
 
   const handleDelete = async (name: string) => {
@@ -220,8 +400,9 @@ export function VaultTab() {
     setRotateLoading(name);
     setErr(null);
     try {
-      await api.rotateKey(name, newVal);
+      const r = await api.rotateKey(name, newVal);
       closeAllFor(name);
+      setRotateResults((p) => ({ ...p, [name]: r }));
       await refresh();
       toast.success("Key rotated");
     } catch (e) {
@@ -252,13 +433,63 @@ export function VaultTab() {
     setPromoteLoading(name);
     setErr(null);
     try {
-      await api.promote(name);
+      const r = await api.promote(name);
+      setRotateResults((p) => ({ ...p, [name]: r }));
       await refresh();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "promote failed");
     } finally {
       setPromoteLoading(null);
     }
+  };
+
+  // ── "Used in" row ───────────────────────────────────────────────────────────
+  const patchUsedIn = (name: string, patch: Partial<UsedIn>) =>
+    setUsedInState((p) => (p[name] ? { ...p, [name]: { ...p[name], ...patch } } : p));
+
+  const loadUsedIn = async (name: string) => {
+    try {
+      const r = await api.listConnections({ key: name });
+      patchUsedIn(name, { loading: false, rows: r.connections, err: null });
+    } catch (e) {
+      patchUsedIn(name, { loading: false, err: describeApiError(e, "Could not load where this key is used") });
+    }
+  };
+
+  const toggleUsedIn = (name: string) => {
+    if (usedInState[name] !== undefined) {
+      setUsedInState((p) => { const n = { ...p }; delete n[name]; return n; });
+      return;
+    }
+    setUsedInState((p) => ({ ...p, [name]: { loading: true, rows: [], err: null, results: null, busy: null } }));
+    loadUsedIn(name);
+  };
+
+  const handleUpdateNow = async (name: string, c: ConnectionStatus) => {
+    patchUsedIn(name, { busy: `${c.project}|${c.file}|${c.var}`, err: null });
+    try {
+      const r = await api.syncConnections({ key: name, project: c.project });
+      patchUsedIn(name, { results: r.synced, busy: null });
+    } catch (e) {
+      patchUsedIn(name, { busy: null, err: describeApiError(e, "update failed") });
+    }
+    await loadUsedIn(name);
+  };
+
+  const handleDisconnect = async (name: string, usedInId: string, c: ConnectionStatus) => {
+    if (!window.confirm(
+      `Disconnect "${name}" from ${c.project_name} (${c.file})? The line stays in ${c.file}; Pushkey will stop updating it.`,
+    )) return;
+    patchUsedIn(name, { busy: `${c.project}|${c.file}|${c.var}`, err: null });
+    try {
+      await api.disconnect({ key: name, project: c.project, file: c.file, var: c.var });
+      patchUsedIn(name, { busy: null, results: null });
+      await Promise.all([loadUsedIn(name), refresh()]);
+      toast.success("Disconnected");
+    } catch (e) {
+      patchUsedIn(name, { busy: null, err: describeApiError(e, "disconnect failed") });
+    }
+    focusToggleFor(usedInId);
   };
 
   const handleEditSave = async (name: string) => {
@@ -281,12 +512,24 @@ export function VaultTab() {
     }
   };
 
+  const hasOutcome = (r: RotateResp) =>
+    (r.synced?.length ?? 0) > 0 || (r.not_synced?.length ?? 0) > 0 || !!r.sync_error;
+
+  const openUsedIn = (name: string) => {
+    setAddResult(null);
+    if (usedInState[name] === undefined) toggleUsedIn(name);
+    setTimeout(() => focusToggleFor(`used-in-row-${encodeURIComponent(name)}`), 0);
+  };
+
   // ── row renderer ────────────────────────────────────────────────────────────
   const renderRow = (k: KeySummary) => {
     const rowId = encodeURIComponent(k.name);
     const rotateRowId = `rotate-row-${rowId}`;
     const backupRowId = `backup-row-${rowId}`;
     const editRowId = `edit-row-${rowId}`;
+    const usedInId = `used-in-row-${rowId}`;
+    const usedIn = usedInState[k.name];
+    const rotated = rotateResults[k.name];
     return (
     <Fragment key={k.name}>
       <TableRow>
@@ -301,7 +544,7 @@ export function VaultTab() {
           {revealed[k.name] ?? k.masked}
         </TableCell>
         <TableCell className="text-xs text-[var(--color-muted-foreground)]">
-          {k.rotated ?? "—"}
+          {k.rotated ? k.rotated.slice(0, 10) : "—"}
         </TableCell>
         <TableCell>
           {k.has_backup
@@ -317,6 +560,19 @@ export function VaultTab() {
             </Button>
             <Button variant="ghost" size="icon" onClick={() => copy(k.name)} title="Copy" aria-label={`Copy ${k.name}`}>
               {copied === k.name ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Where it is used"
+              aria-label={`Used in ${k.name}`}
+              aria-expanded={usedInState[k.name] !== undefined}
+              aria-controls={usedInId}
+              className="h-9 gap-1 px-2 text-cyan-400 hover:text-cyan-300"
+              onClick={() => toggleUsedIn(k.name)}
+            >
+              <Link2 className="h-4 w-4" />
+              <span aria-hidden="true" className="text-xs">{k.connections ?? 0}</span>
             </Button>
             <Button
               variant="ghost"
@@ -408,6 +664,11 @@ export function VaultTab() {
                 Cancel
               </Button>
             </div>
+            {(k.connections ?? 0) > 0 && (
+              <p className="mt-1 text-xs text-[var(--color-muted-foreground)]">
+                Pushkey will update every connected file ({k.connections}). The old value stays in the key&apos;s history.
+              </p>
+            )}
           </TableCell>
         </TableRow>
       )}
@@ -488,6 +749,121 @@ export function VaultTab() {
           </TableCell>
         </TableRow>
       )}
+
+      {/* What the last rotate or promote did to the connected files */}
+      {rotated && hasOutcome(rotated) && (
+        <TableRow className="bg-[var(--color-muted-foreground)]/5">
+          <TableCell colSpan={7} className="py-2 px-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1">
+                <p className="text-xs font-medium">Project files for {k.name}</p>
+                {rotated.synced && rotated.synced.length > 0 && (
+                  <ResultLines results={rotated.synced} projects={projects} />
+                )}
+                {rotated.not_synced && rotated.not_synced.length > 0 && (
+                  <p role="status" className="text-xs text-amber-400">
+                    Not updated (this session cannot write project files):{" "}
+                    {rotated.not_synced.map((n) => `${projectLabel(n.project, projects)} ${n.file}`).join(", ")}
+                  </p>
+                )}
+                {rotated.sync_error && (
+                  <p role="alert" className="text-xs text-red-400">
+                    The key was replaced, but the files could not be updated: {reasonText(rotated.sync_error)}. Use Update now.
+                  </p>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-[var(--color-muted-foreground)]"
+                aria-label={`Dismiss update results for ${k.name}`}
+                onClick={() => setRotateResults((p) => { const n = { ...p }; delete n[k.name]; return n; })}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+
+      {/* Inline "Used in" row */}
+      {usedIn !== undefined && (
+        <TableRow id={usedInId} className="bg-cyan-500/5">
+          <TableCell colSpan={7} className="py-3 px-4">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-[var(--color-muted-foreground)]">
+                {usedIn.loading
+                  ? "Used in"
+                  : `Used in ${usedIn.rows.length} ${usedIn.rows.length === 1 ? "place" : "places"}`}
+              </p>
+              {usedIn.err && (
+                <p role="alert" className="text-xs text-red-400">{usedIn.err}</p>
+              )}
+              {usedIn.loading && (
+                <p className="text-xs text-[var(--color-muted-foreground)]">Loading…</p>
+              )}
+              {!usedIn.loading && !usedIn.err && usedIn.rows.length === 0 && (
+                <p className="text-sm text-[var(--color-muted-foreground)]">
+                  Not used in any project yet. Connect it from Add key or the project&apos;s page.
+                </p>
+              )}
+              {usedIn.rows.length > 0 && (
+                <ul className="divide-y divide-[var(--color-border)]">
+                  {usedIn.rows.map((c) => {
+                    const rid = `${c.project}|${c.file}|${c.var}`;
+                    return (
+                      <li key={rid} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+                        <span className="min-w-[8rem] text-sm font-medium">{c.project_name}</span>
+                        <span className="font-mono text-xs">{c.file}</span>
+                        <span className="font-mono text-xs text-[var(--color-muted-foreground)]">{c.var}</span>
+                        <StateBadge state={c.state} />
+                        {c.reason && (
+                          <span className="text-xs text-[var(--color-muted-foreground)]">{reasonText(c.reason)}</span>
+                        )}
+                        <span className="ml-auto flex gap-1">
+                          {canUpdate(c.state, c.reason) && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8"
+                              aria-label={`Update ${k.name} in ${c.project_name}`}
+                              disabled={usedIn.busy !== null}
+                              onClick={() => handleUpdateNow(k.name, c)}
+                            >
+                              Update now
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-8"
+                            aria-label={`Disconnect ${k.name} from ${c.project_name} ${c.file}`}
+                            disabled={usedIn.busy !== null}
+                            onClick={() => handleDisconnect(k.name, usedInId, c)}
+                          >
+                            Disconnect
+                          </Button>
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {usedIn.results && usedIn.results.length > 0 && (
+                <ResultLines
+                  results={usedIn.results}
+                  projects={[
+                    ...usedIn.rows.map((c) => ({
+                      path: c.project, name: c.project_name, keys: [], created: null, connections: 0,
+                    })),
+                    ...projects,
+                  ]}
+                />
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
     </Fragment>
     );
   };
@@ -517,7 +893,13 @@ export function VaultTab() {
             className="gap-1 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20"
             aria-expanded={showAdd}
             aria-controls={addFormId}
-            onClick={() => { setShowAdd((v) => !v); setAddForm(EMPTY_ADD); }}
+            onClick={() => {
+              setShowAdd((v) => !v);
+              setAddForm(EMPTY_ADD);
+              resetConnect();
+              setAddResult(null);
+              if (!showAdd) loadProjects();
+            }}
           >
             {showAdd ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showAdd ? "Cancel" : "Add key"}
@@ -616,13 +998,212 @@ export function VaultTab() {
               </select>
             </div>
           </div>
+
+          {/* Connect to a project */}
+          <div className="space-y-3 border-t border-[var(--color-border)] pt-3">
+            <div className="flex items-center gap-2">
+              <input
+                id="add-connect"
+                type="checkbox"
+                className="h-4 w-4 accent-cyan-400"
+                checked={connectOn}
+                onChange={(e) => {
+                  setConnectTouched(true);
+                  setConnectOn(e.target.checked);
+                  if (e.target.checked && !project) {
+                    setProject(suggest?.projects[0]?.[0] ?? projects[0]?.path ?? "");
+                  }
+                }}
+              />
+              <Label htmlFor="add-connect" className="text-sm font-semibold">Connect to a project</Label>
+            </div>
+
+            {!connectOn && (
+              <p className="rounded-md border bg-[var(--color-muted)] p-3 text-sm">
+                Saved in the vault only. Nothing is written to a project.
+              </p>
+            )}
+
+            {connectOn && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="add-project" className="text-xs">Project</Label>
+                    <select
+                      id="add-project"
+                      value={project}
+                      onChange={(e) => { setProject(e.target.value); setFile(""); setVarName(""); }}
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      {projects.length === 0 ? (
+                        <option value="">Add a project folder in the Projects tab first</option>
+                      ) : (
+                        <>
+                          {!project && <option value="">Choose a project</option>}
+                          {projects.map((p) => (
+                            <option key={p.path} value={p.path}>{p.name || p.path}</option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                    {suggest?.projects.find(([v]) => v === project) && (
+                      <p className="text-xs text-[var(--color-muted-foreground)]">
+                        Suggested: {suggest.projects.find(([v]) => v === project)?.[1]}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="add-file" className="text-xs">File in the project</Label>
+                    <select
+                      id="add-file"
+                      value={file}
+                      onChange={(e) => setFile(e.target.value)}
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      {(suggest && suggest.files.length > 0 ? suggest.files : [[".env", "default env file"]]).map(([f]) => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                    {suggest?.files.find(([v]) => v === file) && (
+                      <p className="text-xs text-[var(--color-muted-foreground)]">
+                        Suggested: {suggest.files.find(([v]) => v === file)?.[1]}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <fieldset className="space-y-2">
+                  <legend className="text-xs font-medium">Variable name the project reads</legend>
+                  <div className="flex flex-wrap gap-2">
+                    {(suggest?.vars ?? []).map(([name, why]) => (
+                      <button
+                        key={name}
+                        type="button"
+                        aria-pressed={!otherVar.trim() && varName === name}
+                        onClick={() => { setVarName(name); setOtherVar(""); }}
+                        className={
+                          "flex flex-col items-start rounded-md border px-3 py-1.5 text-left transition-colors " +
+                          (!otherVar.trim() && varName === name
+                            ? "border-cyan-500/60 bg-cyan-500/10"
+                            : "border-[var(--color-border)] hover:bg-[var(--color-muted)]")
+                        }
+                      >
+                        <span className="font-mono text-xs">{name}</span>{" "}
+                        <span className="text-xs text-[var(--color-muted-foreground)]">{why}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="add-var-other" className="text-xs">Other name</Label>
+                    <Input
+                      id="add-var-other"
+                      className="max-w-xs font-mono text-xs"
+                      placeholder="OPENAI_API_KEY"
+                      value={otherVar}
+                      onChange={(e) => setOtherVar(e.target.value.toUpperCase())}
+                    />
+                  </div>
+                </fieldset>
+
+                {previewErr && (
+                  <p role="alert" className="rounded-md border border-red-400/30 bg-red-500/5 p-3 text-sm text-red-400">
+                    {previewErr}
+                  </p>
+                )}
+                <div aria-live="polite">
+                  {preview && !previewErr && (
+                    <div className="space-y-1 rounded-md border border-cyan-500/40 bg-cyan-500/5 p-3">
+                      <p className="text-sm">{preview.line}</p>
+                      <p className="text-xs text-[var(--color-muted-foreground)]">{changeSentence(preview)}</p>
+                      <p className="text-xs text-[var(--color-muted-foreground)]">
+                        {preview.gitignore_change
+                          ? `${preview.file} will be added to .gitignore.`
+                          : `${preview.file} is already ignored by git.`}
+                      </p>
+                    </div>
+                  )}
+                  {!preview && !previewErr && previewBusy && (
+                    <p className="text-xs text-[var(--color-muted-foreground)]">Checking what would be written…</p>
+                  )}
+                </div>
+
+                {confirmNeeds && (
+                  <ConfirmPanel
+                    ref={confirmRef}
+                    titleId={confirmTitleId}
+                    needs={confirmNeeds}
+                    busy={addLoading}
+                    onConfirm={() => submitAdd(confirmNeeds)}
+                    onBack={() => { setConfirmNeeds(null); submitRef.current?.focus(); }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="flex justify-end">
-            <Button type="submit" size="sm" disabled={addLoading} className="gap-1">
+            <Button
+              ref={submitRef}
+              type="submit"
+              size="sm"
+              disabled={addLoading || (connectOn && (!project || previewBusy || !preview))}
+              className="gap-1"
+            >
               <Plus className="h-4 w-4" />
-              {addLoading ? "Adding…" : "Add key"}
+              {addLoading ? "Saving…" : connectOn ? "Save & connect" : "Save"}
             </Button>
           </div>
         </form>
+      )}
+
+      {addResult && (
+        <section
+          aria-labelledby={addResultTitleId}
+          className="space-y-2 rounded-md border border-emerald-400/30 bg-emerald-500/5 p-4"
+        >
+          <h2 id={addResultTitleId} className="text-base font-semibold">
+            {addResult.name} is saved and connected
+          </h2>
+          <div role="status" aria-live="polite" className="space-y-1 text-sm">
+            <p>Saved in the vault, encrypted with your master password</p>
+            <p>
+              {`Connected: ${projectLabel(addResult.connection.project, projects)} -> ${addResult.connection.file} as ${addResult.connection.var}`}
+            </p>
+            {addResult.connection.written && (
+              <p>
+                {`Written: ${addResult.connection.change === "replace" ? "1 line replaced" : addResult.connection.change === "none" ? "no change needed" : "1 line added"}`}
+                {addResult.connection.gitignore_changed ? `, ${addResult.connection.file} added to .gitignore` : ""}
+              </p>
+            )}
+          </div>
+          {!addResult.connection.written && (
+            <p role="alert" className="text-sm text-red-400">
+              {`Not written: ${reasonText(addResult.connection.reason)}. The key is saved and connected; fix that, then use Update now.`}
+            </p>
+          )}
+          <p className="text-xs text-[var(--color-muted-foreground)]">
+            Pushkey remembers this connection. When you replace the key, this file is updated too.
+          </p>
+          <div className="flex gap-2">
+            <Button type="button" size="sm" onClick={() => openUsedIn(addResult.name)}>
+              See where it is used
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setAddResult(null);
+                setShowAdd(true);
+                setAddForm(EMPTY_ADD);
+                resetConnect();
+                loadProjects();
+              }}
+            >
+              Add another key
+            </Button>
+          </div>
+        </section>
       )}
 
       {err && (

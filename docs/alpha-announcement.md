@@ -82,7 +82,7 @@ pushkey status                        # vault health summary
 Known issues, deferred items, and exactly what's out of scope for alpha:
 👉 **[docs/alpha-known-issues.md](https://github.com/Push-Key/pushkey/blob/main/docs/alpha-known-issues.md)**
 
-Short version: most deferred items live in the cloud/multi-writer paths a single-machine tester never touches. There are two local `.env` edge cases worth knowing — plaintext `.env.pushkey_backup_*` snapshots aren't auto-pruned yet, and a `.env` with invalid (non-UTF-8) bytes can error on inject.
+Short version: most deferred items live in the cloud/multi-writer paths a single-machine tester never touches. There are two local `.env` edge cases worth knowing — backups of replaced env files now live in `~/.pushkey/env-backups` (newest 3 per file, plaintext; old in-project `.env.pushkey_backup_*` files from earlier versions are not deleted automatically), and a `.env` with invalid (non-UTF-8) bytes is refused by connect and sync but can still error in the older command-line inject.
 
 ---
 
