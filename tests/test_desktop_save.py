@@ -343,6 +343,136 @@ def test_desktop_cloud_sync_conflict_goes_through_the_helper(frame, tmp_path, mo
     assert canonical in on_disk["projects"]
 
 
+# -- fix round 1: first-run vault, theme rebuild, config refresh ----------------------
+
+
+class FakeDialog:
+    """The attributes RecoverySetupDialog._submit reads (no Tk root)."""
+
+    def __init__(self, on_confirmed):
+        self._password = PASSWORD
+        self._code = pushkey.generate_recovery_code()
+        self._on_confirmed = on_confirmed
+        self.destroyed = False
+        self._submit = types.MethodType(pushkey.RecoverySetupDialog._submit, self)
+
+    def destroy(self):
+        self.destroyed = True
+
+
+def test_desktop_fix1_new_vault_saves_twice_in_one_session(tmp_path, box, monkeypatch):
+    """Brand-new user: the vault the dialog hands over carries a revision, so saves work."""
+    monkeypatch.setattr(pushkey, "write_health_sidecar", lambda vault: True)
+    handed = []
+    dialog = FakeDialog(lambda pw, vault, key: handed.append((pw, vault, key)))
+
+    dialog._submit()
+
+    assert len(handed) == 1
+    pw, vault, key = handed[0]
+    session = FakeFrame(vault, key, load_config())
+    session.vault["FIRST"] = _entry()
+    assert _ok(session.save) is True
+    session.vault["SECOND"] = _entry()
+    assert _ok(session.save) is True
+    assert set(load_vault(PASSWORD)[0]) == {"FIRST", "SECOND"}
+    assert box.calls == []
+
+
+class FakePushkeyApp:
+    """The attributes PushkeyApp.reload_app reads (no Tk root); switch records its kwargs."""
+
+    def __init__(self):
+        self.switched = []
+        self.root = types.SimpleNamespace(configure=lambda **kw: None)
+        self.reload_app = types.MethodType(pushkey.PushkeyApp.reload_app, self)
+
+    def switch(self, cls, **kw):
+        self.switched.append((cls, kw))
+
+    def show_login(self):
+        pass
+
+
+def test_desktop_fix1_reload_app_passes_the_vault_key_to_the_frame():
+    app = FakePushkeyApp()
+    vault = {}
+
+    _ok(lambda: app.reload_app(PASSWORD, vault, b"k" * 32))
+
+    assert len(app.switched) == 1
+    cls, kw = app.switched[0]
+    assert cls is pushkey.AppFrame
+    assert kw.get("vault_key") == b"k" * 32
+    assert kw["vault"] is vault and kw["password"] == PASSWORD and kw["app"] is app
+
+
+def test_desktop_fix1_theme_toggle_keeps_the_vault_key_and_saves(frame, box, monkeypatch):
+    app = FakePushkeyApp()
+    frame.app = app
+    frame.master = types.SimpleNamespace(after=lambda delay, fn: fn())  # run the rebuild now
+    monkeypatch.setattr(pushkey, "_CURRENT_THEME", "dark")
+    old_key = frame.vault_key
+
+    frame._toggle_theme()
+
+    assert len(app.switched) == 1
+    kw = app.switched[0][1]
+    assert kw.get("vault_key") == old_key and old_key is not None
+    # The rebuilt AppFrame is built from exactly these kwargs; its save must work on V3.
+    rebuilt = FakeFrame(kw["vault"], kw.get("vault_key"), load_config())
+    rebuilt.vault["AFTER_THEME"] = _entry()
+    assert _ok(rebuilt.save) is True
+    assert "AFTER_THEME" in load_vault(PASSWORD)[0]
+    assert load_config(strict=True)["theme"] == "light"
+    assert box.calls == []
+
+
+def test_desktop_fix1_save_config_never_drops_project_keys_from_memory(frame, tmp_path, monkeypatch):
+    """The worker thread runs _save_config while the UI thread reads config["projects"]."""
+    canonical = _register(tmp_path)
+    seen = []
+
+    class SpyConfig(dict):
+        def _note(self, what):
+            seen.append((what, "projects" in self))
+
+        def pop(self, *args):
+            result = super().pop(*args)
+            self._note("pop")
+            return result
+
+        def __delitem__(self, key):
+            super().__delitem__(key)
+            self._note("del")
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            self._note("set")
+
+        def update(self, *args, **kwargs):
+            super().update(*args, **kwargs)
+            self._note("update")
+
+    frame.config = SpyConfig(frame.config)
+    frame.config["theme"] = "light"
+    seen.clear()
+    real = pushkey.update_config
+
+    def spy(mutate):
+        seen.append(("during_update_config", "projects" in frame.config))
+        result = real(mutate)
+        seen.append(("after_update_config", "projects" in frame.config))
+        return result
+
+    monkeypatch.setattr(pushkey, "update_config", spy)
+
+    assert frame._save_config() is True
+
+    assert seen and all(present for _what, present in seen), seen
+    assert canonical in frame.config["projects"]  # still refreshed from disk
+
+
 # -- login ----------------------------------------------------------------------------
 
 
