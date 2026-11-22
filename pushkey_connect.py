@@ -12,9 +12,9 @@ Foundations:
   every key's link to it.
 
 Operations: ``preview`` (the confirmation line and what needs confirming),
-``connect`` (save, allowlist, connection, then write the env file with a backup
-and a .gitignore line), ``sync`` (rewrite every connected file after a key
-changed), ``status`` (up to date, out of date, missing, ... per connection),
+``connect`` (save, allowlist, connection, then the .gitignore line, a backup and
+the env file), ``sync`` (rewrite every connected file after a key changed),
+``status`` (up to date, out of date, missing, tracked by git, ... per connection),
 ``disconnect`` and ``suggest`` (project, file and variable candidates).
 
 Nothing here puts a key value in a ConnectError, a message, a result or a log
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,8 @@ _MAX_COMMIT_ATTEMPTS = 2
 #: The only VaultConflictError message that means "someone else saved first".
 _STALE_REVISION = "stale_vault_revision"
 _HEALTH_WARNING = "health_publication_failed"
+#: ConnectResult.warning when the save that records ``last_error`` could not be made.
+_RECORDING_WARNING = "last_error_not_recorded"
 
 
 class ConnectError(RuntimeError):
@@ -335,8 +338,11 @@ _BARE_CR = re.compile(r"\r(?!\n)")
 _BROWSER_PREFIXES = (
     "NEXT_PUBLIC_", "VITE_", "PUBLIC_", "REACT_APP_", "EXPO_PUBLIC_", "NUXT_PUBLIC_",
 )
-#: A key or variable name carrying one of these is meant to be public.
-_PUBLIC_NAME_MARKERS = ("ANON", "PUBLISHABLE", "PUBLIC_KEY", "_URL", "CLIENT_ID")
+#: A vault key whose name (upper-cased, split on non-alphanumerics) has one of these
+#: tokens is meant to be public.
+_PUBLIC_KEY_TOKENS = ("ANON", "PUBLISHABLE")
+#: ... or has one of these token pairs next to each other, in this order.
+_PUBLIC_KEY_PAIRS = (("PUBLIC", "KEY"), ("CLIENT", "ID"))
 #: A value starting with one of these is a publishable key.
 _PUBLIC_VALUE_PREFIXES = ("pk_", "sb_publishable_")
 #: Read-only env files that list variable names for suggestions.
@@ -375,7 +381,9 @@ class ConnectResult:
 
     ``written`` is True when the file holds the key's value afterwards (also
     when it did already, ``change == "none"``). When False, ``reason`` says why
-    and the connection stays in the vault.
+    and the connection stays in the vault. ``warning`` is
+    ``"last_error_not_recorded"`` when the file work is done but the vault save
+    that records its outcome failed (status then derives the file state live).
     """
 
     key: str
@@ -502,12 +510,39 @@ def _project_label(registered: dict[str, dict], project: str) -> str:
     return _text(record.get("name"), Path(project).name or project)
 
 
+def _is_plain_web_url(value: Any) -> bool:
+    """Whether ``value`` is an http(s) URL with no user name or password in it."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+        return parts.scheme in ("http", "https") and parts.username is None and parts.password is None
+    except ValueError:
+        return False
+
+
+def _key_is_meant_public(key_name: str, value: Any) -> bool:
+    """Whether the vault key's own name says it is meant to be public.
+
+    Only the key name counts, never the variable name (that is what is being
+    checked), and only whole tokens: ``CANONICAL`` does not contain ``ANON``. A
+    ``URL`` token counts only for a value that is a plain web URL, so a database
+    URL with a password in it is still confirmed.
+    """
+    tokens = [token for token in re.split(r"[^A-Z0-9]+", key_name.upper()) if token]
+    if set(_PUBLIC_KEY_TOKENS).intersection(tokens):
+        return True
+    adjacent = list(zip(tokens, tokens[1:]))
+    if any(pair in adjacent for pair in _PUBLIC_KEY_PAIRS):
+        return True
+    return "URL" in tokens and _is_plain_web_url(value)
+
+
 def _bundled_in_browser(key_name: str, var: str, value: Any) -> bool:
     """Whether ``var`` is bundled into browser code and the key is not meant to be public."""
     if not var.startswith(_BROWSER_PREFIXES):
         return False
-    names = f"{key_name} {var}".upper()
-    if any(marker in names for marker in _PUBLIC_NAME_MARKERS):
+    if _key_is_meant_public(key_name, value):
         return False
     return not ("" if value is None else str(value)).startswith(_PUBLIC_VALUE_PREFIXES)
 
@@ -658,19 +693,24 @@ def _write_assignments(project: str, file: str, values: dict[str, Any]) -> _Writ
 
     Everything that can refuse runs first and has no side effect: the path
     shape, the git-tracked check, reading and decoding the file, and rendering
-    the new text. Then, in the spec's order, the file is backed up and
-    replaced, and the project's .gitignore is made to list it. A file that
-    already holds every value is not rewritten, but its .gitignore is still
-    checked. Nothing raises: a refusal or failure is the outcome's ``reason``.
+    the new text. Then the project's .gitignore is made to list the file, and
+    only then is the file backed up and replaced, so a failed .gitignore write
+    never leaves a secret in a file git may not ignore (and a failed file write
+    leaves, at worst, a harmless .gitignore line, reported in
+    ``gitignore_changed``). A file that already holds every value is not
+    rewritten, but its .gitignore is still checked. Nothing raises: a refusal or
+    failure is the outcome's ``reason``.
     """
     changes: dict[str, str] = {}
     wrote = False
+    gitignore_changed = False
     try:
         relpath = pushkey_projectfs.validate_env_relpath(file)
         target, identity = _check_target(project, relpath)
         raw = _read_env(target)
         text = _decode_env(raw)
         changes = {var: _change_for(text, var, value) for var, value in values.items()}
+        new_bytes: Optional[bytes] = None
         if any(change != "none" for change in changes.values()):
             rendered = {var: pushkey_env.render_connected_value(value) for var, value in values.items()}
             try:
@@ -678,15 +718,16 @@ def _write_assignments(project: str, file: str, values: dict[str, Any]) -> _Writ
                 new_bytes = new_text.encode("utf-8")
             except ValueError:
                 raise ConnectError("invalid_env_file") from None
+        gitignore_changed = pushkey_projectfs.ensure_project_gitignore(project, relpath, identity)
+        if new_bytes is not None:
             _backup_then_write(project, relpath, identity, raw, new_bytes)
             wrote = True
-        gitignore_changed = pushkey_projectfs.ensure_project_gitignore(project, relpath, identity)
     except pushkey_projectfs.ProjectPathError as error:
-        return _WriteOutcome(error.reason, changes if wrote else {}, False)
+        return _WriteOutcome(error.reason, changes if wrote else {}, gitignore_changed)
     except ConnectError as error:
-        return _WriteOutcome(error.code, changes if wrote else {}, False)
+        return _WriteOutcome(error.code, changes if wrote else {}, gitignore_changed)
     except OSError:
-        return _WriteOutcome("write_failed", changes if wrote else {}, False)
+        return _WriteOutcome("write_failed", changes if wrote else {}, gitignore_changed)
     return _WriteOutcome(None, changes, gitignore_changed)
 
 
@@ -740,13 +781,15 @@ def _record_last_errors(
     vault_key: Optional[bytes],
     password: Optional[str],
     target: Optional[dict],
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """Set (reason) or clear (None) ``last_error`` on connections, in one save.
 
     ``updates`` holds ``(key, project, file, var, reason)``. Nothing is saved
     when ``known`` already agrees. The file outcome is the truth the caller
-    reports, so a save that cannot complete (``vault_changed``, a busy vault)
-    only leaves the old ``last_error`` in place. Returns the health warning.
+    reports, so a save that cannot complete (``vault_changed``, a busy vault, a
+    full disk, anything) only leaves the old ``last_error`` in place. Returns
+    ``(health warning, recording warning)``; the second is set when the save
+    failed.
     """
 
     def connections(vault: dict, key: str, project: str, file: str, var: str):
@@ -757,7 +800,7 @@ def _record_last_errors(
         for key, project, file, var, reason in updates
         for conn in connections(known, key, project, file, var)
     ):
-        return None
+        return None, None
 
     def mutate(fresh: VaultData) -> None:
         for key, project, file, var, reason in updates:
@@ -768,9 +811,9 @@ def _record_last_errors(
                     conn["last_error"] = reason
 
     try:
-        return commit(mutate, vault_key=vault_key, password=password, target=target).health_warning
-    except (ConnectError, pushkey_vault.VaultBusyError):
-        return None
+        return commit(mutate, vault_key=vault_key, password=password, target=target).health_warning, None
+    except Exception:
+        return None, _RECORDING_WARNING
 
 
 # -- preview and connect ----------------------------------------------------------------
@@ -795,13 +838,20 @@ def preview(
     ``invalid_var``, ``var_taken`` with ``detail["key"]``, ``file_tracked_by_git``)
     and ProjectPathError for a refused path. With ``replace_source=True`` a
     variable another key holds is not an error: ``conflict_key`` names that key.
+
+    ``value`` and ``env`` preview a key that is not in the vault yet (an entry
+    point that will ``connect(value=...)``) or a replacement value: the
+    confirmation checks and ``change`` use them in place of the stored ones.
+    Without a value an absent key is still ``key_not_found``.
     """
     plan = _resolve(
         vault, config, key_name=key_name, project=project, file=file, var=var,
-        value=None, env=None, replace_source=replace_source,
+        value=value, env=env, replace_source=replace_source,
     )
     target, identity = _check_target(plan.project, plan.file)
     text = _decode_env(_read_env(target))
+    stored = vault.get(key_name)
+    candidate = value if value is not None else (stored.get("value") if isinstance(stored, dict) else None)
     return Preview(
         key=key_name,
         project=plan.project,
@@ -810,7 +860,7 @@ def preview(
         var=plan.var,
         environment=plan.environment,
         line=f"Save to {plan.project_name} -> {plan.environment} -> {plan.file} as {plan.var}",
-        change=_change_for(text, plan.var, vault[key_name].get("value")),
+        change=_change_for(text, plan.var, candidate),
         gitignore_change=not _gitignore_covers_file(plan.project, plan.file, identity),
         needs_confirm=plan.needs_confirm,
         conflict_key=plan.conflicts[0] if plan.conflicts else None,
@@ -886,10 +936,13 @@ def connect(
     (nothing is saved or written when one fails, including
     ``confirmation_required`` with ``detail["needs"]`` listing the extra
     confirmations ``confirmed`` lacks), then one vault save (key, allowlist,
-    connection), then the file (backup, write, .gitignore) unless ``write`` is
-    False, then the audit line. A file failure never undoes the connection: the
-    result has ``written=False`` and a ``reason``, and the connection records it
-    as ``last_error`` until a ``sync`` succeeds.
+    connection), then the file (.gitignore, backup, write) unless ``write`` is
+    False, then the audit line, then a save that records the outcome as
+    ``last_error``. A file failure never undoes the connection: the result has
+    ``written=False`` and a ``reason``, and the connection records it as
+    ``last_error`` until a ``sync`` succeeds. A failure of that last save (the
+    file is already written and logged) is the result's ``warning``, never an
+    exception.
     """
     approved = frozenset(confirmed)
     stamp = datetime.now().strftime(_TIMESTAMP_FORMAT)
@@ -932,17 +985,21 @@ def connect(
     saved = commit(apply, vault_key=vault_key, password=password, target=target)
     plan = saved.value
     warning = saved.health_warning
+    recording = None
     if write:
         outcome = _write_assignments(plan.project, plan.file, {plan.var: saved.vault[key_name].get("value")})
-        recorded = _record_last_errors(
+    else:
+        outcome = _WriteOutcome("write_skipped", {}, False)
+    # The audit line goes in before the save that records the outcome: that save can
+    # still fail after the file was written, and the write must be on the record.
+    log_event(f"{actor}: connected {key_name} -> {plan.project_name} {plan.file} as {plan.var}")
+    if write:
+        recorded, recording = _record_last_errors(
             saved.vault,
             [(key_name, plan.project, plan.file, plan.var, outcome.reason)],
             vault_key=vault_key, password=password, target=target,
         )
         warning = warning or recorded
-    else:
-        outcome = _WriteOutcome("write_skipped", {}, False)
-    log_event(f"{actor}: connected {key_name} -> {plan.project_name} {plan.file} as {plan.var}")
     return ConnectResult(
         key=key_name,
         project=plan.project,
@@ -953,6 +1010,7 @@ def connect(
         change=outcome.changes.get(plan.var, "none"),
         gitignore_changed=outcome.gitignore_changed,
         health_warning=warning,
+        warning=recording,
     )
 
 
@@ -974,7 +1032,9 @@ def sync(
     connection: a refusal or failure is that result's ``reason`` (and its
     ``last_error``). Connections to the same file are written together, so one
     sync makes one backup per file. A folder that is not on this computer gives
-    ``folder_missing`` and records nothing: it is a state, not an error.
+    ``folder_missing`` and records nothing: it is a state, not an error. When the
+    final save that records ``last_error`` fails, every result it concerned still
+    comes back, with ``warning == "last_error_not_recorded"``.
     """
     vault = _reload(vault_key, password)
     registered = registered_projects(pushkey_vault.load_config(strict=True))
@@ -1022,46 +1082,66 @@ def sync(
 
     results = []
     updates = []
+    recorded_results = []  # the results whose last_error is saved below
     for name, row_project, row_file, row_var in rows:
         outcome = outcomes[(_path_key(row_project), _norm_file(row_file).casefold())]
         reason = outcome.reason
         if reason is None and not _VAR_NAME.fullmatch(row_var):
             reason = "invalid_var"
         change = outcome.changes.get(row_var, "none") if reason is None else "none"
-        if reason != "folder_missing":
-            updates.append((name, row_project, row_file, row_var, reason))
         if reason is None and change != "none":
             log_event(
                 f"{actor}: synced {name} -> {_project_label(registered, row_project)} {row_file} as {row_var}"
             )
-        results.append(
-            ConnectResult(
-                key=name, project=row_project, file=row_file, var=row_var,
-                written=reason is None, reason=reason, change=change,
-                gitignore_changed=outcome.gitignore_changed, health_warning=None,
-            )
+        result = ConnectResult(
+            key=name, project=row_project, file=row_file, var=row_var,
+            written=reason is None, reason=reason, change=change,
+            gitignore_changed=outcome.gitignore_changed, health_warning=None,
         )
-    warning = _record_last_errors(
+        results.append(result)
+        if reason != "folder_missing":
+            updates.append((name, row_project, row_file, row_var, reason))
+            recorded_results.append(result)
+    # After every audit line: this save can fail with the files already written.
+    warning, recording = _record_last_errors(
         vault, updates, vault_key=vault_key, password=password, target=target
     )
     if warning:
         for result in results:
             result.health_warning = warning
+    for result in recorded_results:
+        result.warning = recording
     return results
 
 
-def _connection_state(project: str, file: str, var: str, value: Any, last_error: Any):
-    """``(state, reason)`` of one connection, read from the file without changing anything."""
+def _connection_state(
+    project: str, file: str, var: str, value: Any, last_error: Any, tracked: Optional[dict] = None
+):
+    """``(state, reason)`` of one connection, read from the file without changing anything.
+
+    ``project`` is the registered folder (as ``sync`` writes it). ``tracked``
+    caches the git answer per file for one ``status`` call.
+    """
     folder = Path(project)
     if not folder.is_dir():
         return "folder_missing", None
-    state, reason = _file_state(folder, project, file, var, value)
+    state, reason = _file_state(folder, project, file, var, value, tracked)
     if state not in ("up_to_date", "not_written") and last_error:
         return "not_written", str(last_error)
     return state, reason
 
 
-def _file_state(folder: Path, project: str, file: str, var: str, value: Any):
+def _tracked_by_git(project: str, relpath: str, cache: dict) -> bool:
+    key = (_path_key(project), relpath.casefold())
+    if key not in cache:
+        cache[key] = pushkey_projectfs.is_git_tracked(project, relpath)
+    return cache[key]
+
+
+def _file_state(
+    folder: Path, project: str, file: str, var: str, value: Any, tracked: Optional[dict] = None
+):
+    tracked = {} if tracked is None else tracked
     try:
         relpath = pushkey_projectfs.validate_env_relpath(file)
     except pushkey_projectfs.ProjectPathError as error:
@@ -1075,6 +1155,10 @@ def _file_state(folder: Path, project: str, file: str, var: str, value: Any):
         return "not_written", error.reason
     except OSError:
         return "folder_missing", None
+    # A file git tracks is not safe whatever it holds, so this outranks every state
+    # the file's content would give (sync refuses to write it for the same reason).
+    if _tracked_by_git(project, relpath, tracked):
+        return "not_written", "file_tracked_by_git"
     try:
         raw = target.read_bytes()
     except FileNotFoundError:
@@ -1110,11 +1194,17 @@ def status(
 ) -> list[ConnectionStatus]:
     """Where each connection stands, read from the files; values never appear.
 
-    A connection that has a ``last_error`` and is not up to date reads
+    Each connection is read the way ``sync`` would write it: through its
+    registered folder (a project that is not registered is ``not_written`` with
+    reason ``project_not_registered``), and a file git tracks is ``not_written``
+    with reason ``file_tracked_by_git`` whatever it holds (one git question per
+    file). A connection that has a ``last_error`` and is not up to date reads
     ``not_written`` with that reason; a folder that is gone is ``folder_missing``
     either way. A refused path (a template name, a link) is ``not_written`` too.
+    ``ConnectionStatus.project`` keeps the spelling stored on the connection.
     """
     registered = registered_projects(config)
+    tracked: dict[tuple[str, str], bool] = {}
     wanted = None
     if project is not None:
         wanted = _path_key(pushkey_projectfs.canonical_project_path(project, must_exist=False))
@@ -1128,9 +1218,13 @@ def status(
                 continue
             if wanted is not None and _path_key(conn_project) != wanted:
                 continue
-            state, reason = _connection_state(
-                conn_project, conn_file, conn_var, entry.get("value"), conn.get("last_error")
-            )
+            registered_key = _find_registered(registered, conn_project)
+            if registered_key is None:
+                state, reason = "not_written", "project_not_registered"
+            else:
+                state, reason = _connection_state(
+                    registered_key, conn_file, conn_var, entry.get("value"), conn.get("last_error"), tracked
+                )
             statuses.append(
                 ConnectionStatus(
                     key=name, project=conn_project,
@@ -1155,13 +1249,17 @@ def disconnect(
 ) -> CommitResult:
     """Remove one connection (and the project from the allowlist when it was the last).
 
-    ``key_not_found`` / ``connection_not_found`` refuse before anything is saved.
+    ``key_not_found`` / ``connection_not_found`` and an unreadable config
+    (``ConfigUnreadableError``) refuse before anything is saved.
     With ``remove_line=True`` the variable's line is then taken out of the env file
     (a write, so it keeps the same guards and a backup). The vault is committed
     first and never rolled back for a file problem: ``CommitResult.value`` is
     ``{"line_removed": bool, "reason": Optional[str]}``.
     """
     canonical = pushkey_projectfs.canonical_project_path(project, must_exist=False)
+    # Strictly and before anything changes: an unreadable config must refuse here, not
+    # read as "no projects" after the vault was committed.
+    registered = registered_projects(pushkey_vault.load_config(strict=True))
 
     def apply(fresh: VaultData) -> None:
         entry = fresh.get(key_name)
@@ -1174,7 +1272,6 @@ def disconnect(
             )
 
     saved = commit(apply, vault_key=vault_key, password=password, target=target)
-    registered = registered_projects(pushkey_vault.load_config())
     removed, reason = False, None
     if remove_line:
         registered_key = _find_registered(registered, canonical)
