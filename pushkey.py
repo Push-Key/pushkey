@@ -2249,8 +2249,21 @@ def _project_scan_roots(config):
 
 
 def _merge_foreign_vault_entries(local_vault, incoming):
-    """Inert placeholder for the RED run (replaced by the real merge)."""
-    local_vault.update(incoming)
+    """Merge vault entries that came from outside this computer (a backup or a team export).
+
+    The values, notes and so on arrive, but ``projects`` and ``connections`` are folders
+    on the other machine: they never decide where a secret is written here. A key that
+    is new here arrives with both empty; a key that already exists keeps this computer's
+    own links. ``incoming`` is not changed.
+    """
+    for name, entry in incoming.items():
+        merged = dict(entry) if isinstance(entry, dict) else entry
+        if isinstance(merged, dict):
+            local = local_vault.get(name)
+            for field in ("projects", "connections"):
+                kept = local.get(field) if isinstance(local, dict) else None
+                merged[field] = kept if isinstance(kept, list) else []
+        local_vault[name] = merged
 
 
 def _project_connections(vault, path):
@@ -2556,8 +2569,10 @@ class AppFrame(ctk.CTkFrame):
         ``projects`` missing; the desktop's own settings in memory are left alone.
         """
         try:
-            fresh = load_config()
-        except Exception:
+            fresh = load_config(strict=True)
+        except Exception as error:
+            # An unreadable file is not an empty one: keep the project data in memory as it is.
+            log_event(f"config unreadable, project data kept from memory ({error or 'config_unreadable'})")
             return
         for k in _PROJECT_OWNED_CONFIG_KEYS:
             if k in fresh:
@@ -2652,11 +2667,11 @@ class AppFrame(ctk.CTkFrame):
         fields["ci_platform"] = platform
         return self._update_project_record(path, fields)
 
-    def _update_project_record(self, path, fields):
+    def _try_update_project_record(self, path, fields):
         """Set extra fields on one registered project's record (``update_config`` on that record).
 
-        Never a whole-config save. A project that is no longer registered is skipped.
-        True when saved.
+        Never a whole-config save. Returns ``(saved, error code or None)``: a project that
+        is no longer registered gives ``(False, "project_not_registered")``.
         """
 
         def mutate(config):
@@ -2668,10 +2683,16 @@ class AppFrame(ctk.CTkFrame):
 
         try:
             saved = update_config(mutate)
-        except ConfigUnreadableError as error:
-            messagebox.showwarning("Pushkey", f"Settings could not be saved: {error or 'config_unreadable'}")
-            return False
+        except (ConfigUnreadableError, OSError) as error:
+            return False, str(error) or "config_unreadable"
         self._reload_config()
+        return saved, (None if saved else "project_not_registered")
+
+    def _update_project_record(self, path, fields):
+        """``_try_update_project_record`` with a warning when the write failed. True when saved."""
+        saved, code = self._try_update_project_record(path, fields)
+        if not saved and code != "project_not_registered":
+            messagebox.showwarning("Pushkey", f"Settings could not be saved: {code}")
         return saved
 
     def _schedule_health_refresh(self):
@@ -4011,7 +4032,8 @@ class AppFrame(ctk.CTkFrame):
             for k, key_data in team_vault.items():
                 if k in permissions:
                     key_data["_rbac"] = permissions[k]
-            self.vault.update(team_vault)
+            # Another person's project links are folders on their machine: not trusted here.
+            _merge_foreign_vault_entries(self.vault, team_vault)
             self.save()
             self._invalidate_tabs("dashboard", "keys", "timeline")
             win.destroy()
@@ -4054,16 +4076,9 @@ class AppFrame(ctk.CTkFrame):
         updated = [k for k in imported_vault if k in self.vault and imported_vault[k]["value"] != self.vault[k]["value"]]
         if not messagebox.askyesno("Import", f"Found {len(imported_vault)} keys.\n{len(new_keys)} new, {len(updated)} different.\n\nMerge into current vault?"):
             return
-        for name, imported in imported_vault.items():
-            local = self.vault.get(name)
-            merged = dict(imported) if isinstance(imported, dict) else imported
-            if isinstance(local, dict) and isinstance(merged, dict):
-                # The backup's project links are paths from when it was made: this
-                # computer's own links for a key it already has are kept.
-                for field in ("projects", "connections"):
-                    if field in local:
-                        merged[field] = local[field]
-            self.vault[name] = merged
+        # The backup's project links are paths from the machine it was made on: a new key
+        # arrives with none, a key this computer has keeps its own.
+        _merge_foreign_vault_entries(self.vault, imported_vault)
         # The backup's project list is not merged: projects are registered here, on
         # this computer, through the shared project store.
         self.save()
@@ -8173,7 +8188,17 @@ class AppFrame(ctk.CTkFrame):
             return
         self._reload_config()
         if environment != "dev":
-            self._update_project_record(canonical, {"environment": environment})
+            saved, code = self._try_update_project_record(canonical, {"environment": environment})
+            if not saved:
+                # The project stays registered; only its environment label is missing.
+                self.proj_name.delete(0, "end")
+                self.proj_path_var.set("")
+                self._invalidate_tabs("projects", "dashboard")
+                self.render_projects()
+                messagebox.showerror(
+                    "Project added",
+                    f"The project was added, but its environment could not be saved: {code}")
+                return
 
         self.proj_name.delete(0, "end")
         self.proj_path_var.set("")

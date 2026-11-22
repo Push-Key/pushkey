@@ -128,7 +128,7 @@ _BOUND = (
     "save", "_save_config", "_reload_after_conflict", "_reload_config", "_core_args", "_run_sync",
     "_auto_inject_key", "_auto_inject_keys_bulk", "_stamp_keys_used", "add_key", "add_project",
     "remove_project", "sync_project", "_apply_project_assignment", "_save_ci_fields",
-    "_update_project_record", "import_vault", "_inline_inject",
+    "_update_project_record", "_try_update_project_record", "import_vault", "_inline_inject",
     "_run_scan", "_run_git_scan",
 )
 
