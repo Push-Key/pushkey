@@ -37,33 +37,56 @@ function ErrorBanner({ msg }: { msg: string }) {
   );
 }
 
+/** Files the write did not reach. A folder that is not on this computer is skipped, not a failure. */
+function injectFailures(r: InjectResp): ConnectResult[] {
+  return (r.results ?? []).filter((x) => !x.written && x.reason !== "folder_missing");
+}
+
 function InjectResult({ result }: { result: InjectResp }) {
-  // Files the write did not reach are named here, in red. They are never a quiet no-op.
-  const results = result.results ?? [];
-  const problems = results.filter((r) => !r.written);
+  // Files the write did not reach are named in their own red alert block, never inside the
+  // success block and never behind a green heading.
+  const failures = injectFailures(result);
+  const skipped = (result.results ?? []).filter((x) => !x.written && x.reason === "folder_missing");
+  const failed = failures.length > 0;
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className="rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1"
-    >
-      <p className="font-semibold text-emerald-400">
-        {result.wrote ? "Wrote" : "Preview"}: {result.env_file}
-      </p>
-      <p className="text-[var(--color-muted-foreground)]">
-        Injected: {result.injected.length === 0 ? "none" : result.injected.join(", ")}
-      </p>
-      {problems.map((r) =>
-        r.reason === "folder_missing" ? (
+    <div className="space-y-1">
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className={
+          failed
+            ? "rounded-md border border-[var(--color-border)] p-3 text-xs space-y-1"
+            : "rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs space-y-1"
+        }
+      >
+        {failed ? (
+          <p className="font-semibold text-[var(--color-foreground)]">Not every file was written.</p>
+        ) : (
+          <p className="font-semibold text-emerald-400">
+            {result.wrote ? "Wrote" : "Preview"}: {result.env_file}
+          </p>
+        )}
+        <p className="text-[var(--color-muted-foreground)]">
+          Injected: {result.injected.length === 0 ? "none" : result.injected.join(", ")}
+        </p>
+        {skipped.map((r) => (
           <p key={`${r.file}-${r.var}`} className="text-[var(--color-muted-foreground)]">
             Skipped: folder not on this computer
           </p>
-        ) : (
-          <p key={`${r.file}-${r.var}`} className="text-red-400">
-            Not written: {r.file} ({reasonText(r.reason)})
-          </p>
-        ),
+        ))}
+      </div>
+      {failed && (
+        <div
+          role="alert"
+          className="rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-3 text-xs space-y-1 text-red-400"
+        >
+          {failures.map((r) => (
+            <p key={`${r.file}-${r.var}`}>
+              Not written: {r.file} ({reasonText(r.reason)})
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -124,7 +147,9 @@ function ProjectPanel({
     try {
       const r = await api.injectProject(project.path, false);
       setInjectResult(r);
-      toast.success(".env injected");
+      const failures = injectFailures(r);
+      if (failures.length === 0) toast.success(".env injected");
+      else toast.error("Some files were not written");
       loadConns();
     } catch (e) {
       setInjectErr(describeApiError(e, "inject failed"));
