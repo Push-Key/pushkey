@@ -1348,8 +1348,23 @@ def make_btn(parent, text, command, fg_color=None, text_color=None, width=None, 
 _ADD_FOLDER_LABEL = "Add a project folder\u2026"
 
 
+#: Space left free around a dialog that is as big as the screen allows (taskbar, title bar).
+_SCREEN_MARGIN = 80
+
+
+def _clamp_to_screen(width, height, screen_width, screen_height, scale=1.0, margin=_SCREEN_MARGIN):
+    """``(width, height)`` cut to the screen minus ``margin`` real pixels.
+
+    ``width``/``height`` are window units (what ``geometry`` takes, which CTk multiplies by
+    ``scale``), so the screen limit is divided by ``scale`` too.
+    """
+    scale = scale or 1.0
+    return (min(width, int((screen_width - margin) / scale)),
+            min(height, int((screen_height - margin) / scale)))
+
+
 def _fit_window(win, width=None, min_height=0):
-    """Size a dialog to what is in it, at the current display scaling.
+    """Size a dialog to what is in it, at the current display scaling, never past the screen.
 
     ``winfo_req*`` are real pixels while ``geometry``/``minsize`` of a CTkToplevel multiply by the
     window scaling, so divide first (otherwise 125% scaling would be applied twice).
@@ -1359,6 +1374,7 @@ def _fit_window(win, width=None, min_height=0):
     scale = win._get_window_scaling()
     w = max(int(width or 0), math.ceil(win.winfo_reqwidth() / scale))
     h = max(int(min_height), math.ceil(win.winfo_reqheight() / scale))
+    w, h = _clamp_to_screen(w, h, win.winfo_screenwidth(), win.winfo_screenheight(), scale)
     win.minsize(w, h)
     win.geometry(f"{w}x{h}")
 
@@ -3434,8 +3450,7 @@ class AppFrame(ctk.CTkFrame):
                 status_lbl.configure(text="Paste your new key value above")
                 return
             win.destroy()
-            self._apply_rotation(name, val)
-            self._invalidate_tabs("dashboard", "keys", "timeline")
+            self._apply_rotation(name, val, skip_empty_dialog=True)
             if remaining:
                 self.after(300, lambda: self._prompt_rotation_queue(remaining))
 
@@ -6157,7 +6172,9 @@ class AppFrame(ctk.CTkFrame):
         try:
             statuses = pushkey_connect.status(self.vault, self.config, key_name=name)
         except Exception:
-            statuses = []
+            ctk.CTkLabel(used, text="Could not read this key's projects", font=FONT_XS,
+                         text_color=C["text3"], anchor="w").pack(anchor="w")
+            return
         rows = _used_in_rows(statuses)
         if not rows:
             ctk.CTkLabel(
@@ -6330,7 +6347,12 @@ class AppFrame(ctk.CTkFrame):
         self._render_key_rows()
 
     def _inline_rotate(self, name, new_val):
-        self._apply_rotation(name, new_val)
+        """The inline strip's Confirm: the green "Rotated" strip only after the value was saved.
+
+        On a refused save the error dialog is already up; the input stays for another try.
+        """
+        if not self._apply_rotation(name, new_val, skip_empty_dialog=True):
+            return False
         self._rotate_pending = False
         self._rotate_result = new_val
         self._render_key_rows()
@@ -7394,11 +7416,14 @@ class AppFrame(ctk.CTkFrame):
             self.save()
             self._invalidate_tabs("dashboard", "keys", "timeline")
 
-    def _apply_rotation(self, name, new_value, headline=None, title="Rotated"):
+    def _apply_rotation(self, name, new_value, headline=None, title="Rotated",
+                        skip_empty_dialog=False):
         """Replace a key's value, rewrite its connected files and show one results dialog.
 
         The value goes in through the vault commit (reload, replace, save); the old value moves
         to the key's history. True when the new value was saved; False after an error dialog.
+        ``skip_empty_dialog``: for callers that confirm the rotation themselves (the inline
+        strip, the rotation queue), show no dialog when no file was involved and nothing failed.
         """
         def mutate(fresh):
             entry = fresh.get(name)
@@ -7415,6 +7440,8 @@ class AppFrame(ctk.CTkFrame):
         results, error = self._sync_results(key_name=name)
         self._stamp_written(name, results)
         self._invalidate_tabs("dashboard", "keys", "timeline", "projects")
+        if skip_empty_dialog and not results and error is None:
+            return True
         self._show_sync_results(title, headline or f"{name} rotated", results, error)
         return True
 
