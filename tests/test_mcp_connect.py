@@ -71,6 +71,14 @@ def _get(reply, field):
     return reply[field]
 
 
+def _ok(call):
+    """The result of `call`; an exception is a failed assertion, not a test error."""
+    try:
+        return call()
+    except Exception as exc:
+        raise AssertionError(f"unexpected {exc!r}") from exc
+
+
 def _only(items):
     items = list(items)
     assert len(items) == 1, f"expected exactly one item, got {len(items)}"
@@ -207,7 +215,7 @@ def test_connect_key_needs_write_and_inject(world, scopes, missing):
 
     reply = world.connect()
 
-    assert reply["error"] == "scope_denied" and reply["required_scope"] == missing
+    assert reply.get("error") == "scope_denied" and reply.get("required_scope") == missing
     assert world.env() is None
     assert world.vault()[KEY]["connections"] == []
 
@@ -313,7 +321,21 @@ def test_mcp_inject_env_writes_connected_keys_in_one_pass(world):
     assert VALUE not in json.dumps(reply) and OTHER_VALUE not in json.dumps(reply)
     assert f"{KEY}={VALUE}" in world.env() and f"{OTHER}={OTHER_VALUE}" in world.env()
     assert ".env" in (world.folder / ".gitignore").read_text(encoding="utf-8")
-    assert len(list(pushkey_shared.ENV_BACKUPS_DIR.rglob("*.bak"))) <= 1
+
+
+def test_mcp_inject_env_makes_one_backup_per_file_for_several_keys(world):
+    (world.folder / ".env").write_text("OLD=1\n", encoding="utf-8")
+    world.mod.assign_key(KEY, str(world.folder))
+    world.mod.assign_key(OTHER, str(world.folder))
+
+    reply = world.mod.inject_env(str(world.folder))
+
+    assert reply["success"] is True and reply["injected_count"] == 2
+    backups = list(pushkey_shared.ENV_BACKUPS_DIR.rglob("*.bak"))
+    # One call for both keys: one backup, holding the file as it was before the inject (a
+    # call per key would back the file up twice and the first backup would hold only OLD).
+    assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == "OLD=1\n"
+    assert "OLD=1" in world.env() and f"{OTHER}=" in world.env() and f"{KEY}=" in world.env()
 
 
 def test_mcp_inject_env_explicit_unconnected_key_refused(world):
@@ -438,7 +460,7 @@ def test_mcp_sync_failure_after_rotate_is_a_code_only_field(world, monkeypatch, 
 
     monkeypatch.setattr(pushkey_connect, "sync", boom)
 
-    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")
+    reply = _ok(lambda: world.mod.rotate_key(KEY, "tok_dummy_rotated456"))
 
     assert reply["success"] is True and _get(reply, "sync_error") == code
     assert "tok_dummy_rotated456" not in json.dumps({k: v for k, v in reply.items() if k != "warning"})
@@ -568,7 +590,7 @@ def test_mcp_unlock_survives_a_migration_error_and_logs_names_only(tmp_path, mon
     monkeypatch.setattr(pushkey_connect_migrate, "ensure_migrated", boom)
     monkeypatch.setattr(pushkey_crypto, "log_event", logged.append)
 
-    reply = mod._unlock(PASSWORD)
+    reply = _ok(lambda: mod._unlock(PASSWORD))
 
     assert reply["success"] is True and "vault" in mod._SESSION
     assert logged and all(VALUE not in line for line in logged)
@@ -617,6 +639,9 @@ def test_mcp_token_unlock_leaves_vault_and_config_bytes_unchanged(tmp_path):
     assert reply == {
         "success": False, "error": "migration_pending", "hint": MIGRATION_PENDING_HINT,
     }
+    assert mod.preview_connection(KEY, str(folder))["error"] == "migration_pending"
+    assert mod.assign_key(KEY, str(folder))["error"] == "migration_pending"
+    assert mod.inject_env(str(folder), keys=[KEY])["error"] == "migration_pending"
     assert pushkey_shared.VAULT_FILE.read_bytes() == vault_before
     assert pushkey_shared.CONFIG_FILE.read_bytes() == config_before
     assert not (folder / ".env").exists()

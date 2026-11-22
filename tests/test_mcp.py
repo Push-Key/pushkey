@@ -8,6 +8,15 @@ def _fresh_mcp():
     return importlib.import_module("pushkey_mcp")
 
 
+def _register_and_assign(mcp_mod, folder, key):
+    """Register `folder` as a project the way a person does, then connect `key` to it
+    without writing the file (assign_key): the add-and-connect precondition for inject_env."""
+    import pushkey_connect
+    pushkey_connect.register_project(str(folder))
+    result = mcp_mod.assign_key(key, str(folder))
+    assert result["success"] is True, result
+
+
 def test_vault_starts_locked():
     mcp_mod = _fresh_mcp()
     assert mcp_mod._SESSION == {}
@@ -296,12 +305,13 @@ def test_inject_env_writes_file(tmp_path, monkeypatch):
     from pushkey_vault import save_vault
     vault = {
         "OPENAI_KEY": {"value": "sk-abc", "created": "2024-01-01", "rotated": "2024-01-01",
-                       "provider": "OpenAI", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""},
+                       "provider": "OpenAI", "env": "dev", "projects": [], "notes": ""},
     }
     save_vault(vault, "pw")
 
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
+    _register_and_assign(mcp_mod, project_dir, "OPENAI_KEY")
     result = mcp_mod.inject_env(str(project_dir), keys=["OPENAI_KEY"])
     assert result["success"] is True
     assert result["injected_count"] == 1
@@ -327,9 +337,10 @@ def test_mcp_inject_sanitizes_hostile_value(tmp_path, monkeypatch):
     project_dir.mkdir()
     from pushkey_vault import save_vault
     save_vault({"SAFE_KEY": {"value": "one\nEVIL=two", "created": "2024-01-01", "rotated": "2024-01-01",
-                             "provider": "Unknown", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""}}, "pw")
+                             "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
+    _register_and_assign(mcp_mod, project_dir, "SAFE_KEY")
 
     result = mcp_mod.inject_env(str(project_dir), keys=["SAFE_KEY"])
 
@@ -339,7 +350,7 @@ def test_mcp_inject_sanitizes_hostile_value(tmp_path, monkeypatch):
     assert "\nEVIL=two" not in content
 
 
-def test_mcp_inject_rejects_unassigned_project_path(tmp_path, monkeypatch):
+def test_mcp_inject_rejects_unconnected_key(tmp_path, monkeypatch):
     import pushkey_shared as _s
     vault_dir = tmp_path / "vault_dir"
     vault_dir.mkdir()
@@ -355,11 +366,13 @@ def test_mcp_inject_rejects_unassigned_project_path(tmp_path, monkeypatch):
                              "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
+    import pushkey_connect
+    pushkey_connect.register_project(str(project_dir))  # registered, but the key is not connected
 
     result = mcp_mod.inject_env(str(project_dir), keys=["SAFE_KEY"])
 
     assert result["success"] is False
-    assert "allowlisted" in result["error"]
+    assert "not connected" in result["error"]  # was "not allowlisted": the allowlist alone no longer grants a write
     assert not (project_dir / ".env").exists()
 
 
@@ -377,11 +390,12 @@ def test_inject_env_adds_gitignore(tmp_path, monkeypatch):
     project_dir.mkdir()
     from pushkey_vault import save_vault
     save_vault({"K": {"value": "v", "created": "2024-01-01", "rotated": "2024-01-01",
-                      "provider": "Unknown", "env": "dev", "projects": [str(project_dir.resolve())], "notes": ""}}, "pw")
+                      "provider": "Unknown", "env": "dev", "projects": [], "notes": ""}}, "pw")
 
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
-    mcp_mod.inject_env(str(project_dir), keys=["K"])
+    _register_and_assign(mcp_mod, project_dir, "K")
+    assert mcp_mod.inject_env(str(project_dir), keys=["K"])["success"] is True
     gitignore = project_dir / ".gitignore"
     assert gitignore.exists()
     assert ".env" in gitignore.read_text()
@@ -483,8 +497,12 @@ def test_assign_key_to_project(tmp_path, monkeypatch):
     mcp_mod = _fresh_mcp()
     mcp_mod._unlock("pw")
     from pathlib import Path
+    import pushkey_connect
+    (tmp_path / "myapp").mkdir()
     project_path = str(tmp_path / "myapp")
     expected = str(Path(project_path).resolve())
+    # A folder must be a registered project (a person adds it in Pushkey) before a key is assigned.
+    pushkey_connect.register_project(project_path)
     result = mcp_mod.assign_key("MY_KEY", project_path)
     assert result["success"] is True
 
