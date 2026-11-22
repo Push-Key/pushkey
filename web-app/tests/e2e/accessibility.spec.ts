@@ -61,7 +61,7 @@ async function collectUnnamedInteractiveControls(page: Page): Promise<string[]> 
       let label = ariaLabel || title || text;
       if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && !label) {
         label = getAssociatedLabel(el);
-        if (!label) label = el.placeholder?.replace(/\s+/g, " ").trim() ?? "";
+        if (!label && "placeholder" in el) label = el.placeholder.replace(/\s+/g, " ").trim();
       }
 
       if (!label) {
