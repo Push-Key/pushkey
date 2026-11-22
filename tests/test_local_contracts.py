@@ -57,6 +57,21 @@ def test_local_web_client_paths_have_local_api_routes():
     assert missing == set()
 
 
+def test_web_client_wraps_every_connect_route():
+    doc = LOCAL_API_DOC.read_text(encoding="utf-8")
+    documented = {
+        _normalise_client_path(path)
+        for path in re.findall(r"\|\s*(?:GET|POST|PATCH|DELETE)\s*\|\s*`([^`]+)`", doc)
+    }
+    connect_routes = {
+        path
+        for path in documented
+        if path.startswith("/api/connections") or path.startswith("/api/connect/notice")
+    }
+    assert connect_routes, "the doc lists no connect routes"
+    assert connect_routes - _client_paths() == set()
+
+
 def test_local_api_contract_doc_lists_every_client_path():
     doc = LOCAL_API_DOC.read_text(encoding="utf-8")
     missing = [path for path in sorted(_client_paths()) if path not in doc]

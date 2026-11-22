@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { installRoutes } from "./support/mock-local-api";
+import { KEY, THREE_CONNECTIONS, installRoutes } from "./support/mock-local-api";
 
 async function collectUnnamedInteractiveControls(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -135,6 +135,27 @@ test("locked shell keeps login controls named in the accessibility tree", async 
   await expect(page.getByLabel("Master password")).toBeVisible();
   await expect(page.getByRole("button", { name: "Master Password" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Recovery Code" })).toBeVisible();
+
+  const unnamedControls = await collectUnnamedInteractiveControls(page);
+  expect(unnamedControls).toEqual([]);
+});
+
+test("used-in row exposes named controls and disclosure state", async ({ page }) => {
+  await installRoutes(page, false, { keys: [KEY], connections: THREE_CONNECTIONS });
+
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Vault" }).click();
+
+  const toggle = page.getByRole("button", { name: "Used in OPENAI_API_KEY" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  await expect(page.getByRole("button", { name: "Update OPENAI_API_KEY in admin-portal" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Disconnect OPENAI_API_KEY from admin-portal .env" })).toBeVisible();
+  // A folder that is not on this computer cannot be updated from here.
+  await expect(page.getByRole("button", { name: "Update OPENAI_API_KEY in billing-worker" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Update OPENAI_API_KEY in acme-web" })).toHaveCount(0);
 
   const unnamedControls = await collectUnnamedInteractiveControls(page);
   expect(unnamedControls).toEqual([]);

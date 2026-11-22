@@ -135,3 +135,30 @@ def test_local_web_layout_has_responsive_mobile_structure():
 
     assert "flex-col md:flex-row" in page
     assert "w-full md:w-56" in sidebar
+
+
+def test_vault_used_in_row_is_its_own_disclosure():
+    text = (WEB_APP / "components" / "vault-tab.tsx").read_text(encoding="utf-8")
+
+    for required in (
+        "aria-expanded={usedInState[k.name] !== undefined}",
+        "aria-controls={usedInId}",
+        "aria-label={`Used in ${k.name}`}",
+        "aria-label={`Update ${k.name} in ",
+        "aria-label={`Disconnect ${k.name} from ",
+        'role="status"',
+        'role="alert"',
+    ):
+        assert required in text
+
+
+def test_connect_notice_is_a_labelled_region():
+    notice = WEB_APP / "components" / "connect-notice.tsx"
+    assert notice.exists(), "connect-notice.tsx is missing"
+    text = notice.read_text(encoding="utf-8")
+
+    assert "aria-labelledby" in text
+    assert "Later" in text
+    assert "Hide this notice" in text
+    # local-vault.spec.ts looks up page.getByRole("status") strictly.
+    assert 'role="status"' not in text
