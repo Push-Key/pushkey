@@ -24,6 +24,7 @@ from pushkey_crypto import generate_recovery_code, log_event
 from pushkey_env import mutate_env_file
 from pushkey_providers import PROVIDERS, detect_provider, days_since, health_status
 from pushkey_vault import load_config, load_vault, load_vault_with_key, save_config, save_vault, save_vault_with_key
+from pushkey_health import HealthSidecarError, publish_saved_vault
 
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
@@ -372,6 +373,20 @@ _ENV_LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
 
 # ── commands ──────────────────────────────────────────────────────────────────
 
+def _save_and_publish(vault, password, *, vault_key=None, recovery_code=None):
+    if password is None:
+        # Agent-token session: no master password, write through the raw key path.
+        _save_vault_for_session(vault, password, vault_key)
+    else:
+        save_vault(vault, password, vault_key=vault_key, recovery_code=recovery_code)
+    try:
+        publish_saved_vault(vault)
+        return None
+    except HealthSidecarError:
+        print("health_publication_failed", file=sys.stderr)
+        return "health_publication_failed"
+
+
 def cmd_add(args, vault, password, vault_key=None):
     name = args.name.upper()
     if name in vault:
@@ -389,10 +404,12 @@ def cmd_add(args, vault, password, vault_key=None):
         "notes": args.notes or "",
         "rotation_count": 0,
     }
-    _save_vault_for_session(vault, password, vault_key)
+    warning = _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: added {name}")
     suffix = f" [{provider}]" if provider else ""
     print(f"Added {name}{suffix}")
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def cmd_get(args, vault, password, vault_key=None):
@@ -466,9 +483,11 @@ def cmd_rotate(args, vault, password, vault_key=None):
     info["value"] = new_val
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    _save_vault_for_session(vault, password, vault_key)
+    warning = _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: rotated {name}")
     print(f"Rotated {name}")
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def cmd_set_backup(args, vault, password, vault_key=None):
@@ -509,9 +528,11 @@ def cmd_delete(args, vault, password, vault_key=None):
             print("Cancelled.")
             return
     del vault[name]
-    _save_vault_for_session(vault, password, vault_key)
+    warning = _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: deleted {name}")
     print(f"Deleted {name}")
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def cmd_status(args, vault, password, vault_key=None):
@@ -588,7 +609,7 @@ def cmd_import(args, vault, password, vault_key=None):
         added += 1
 
     if added:
-        _save_vault_for_session(vault, password, vault_key)
+        _save_and_publish(vault, password, vault_key=vault_key)
         log_event(f"cli: imported {added} keys from {path.name}")
     print(f"Imported {added} key(s), skipped {skipped} existing")
 
@@ -785,7 +806,7 @@ def _cmd_init(recovery_file=None, password=None):
         recovery_destination = _write_recovery_file(recovery_file, recovery_code)
         print(f"Recovery code written to {recovery_destination}")
     try:
-        save_vault({}, pw1, recovery_code=recovery_code)
+        _save_and_publish({}, pw1, recovery_code=recovery_code)
     except Exception:
         if recovery_destination is not None:
             recovery_destination.unlink(missing_ok=True)
@@ -1176,7 +1197,7 @@ def _repl_add(vault, password, vault_key=None):
         "provider": provider, "env": "all", "projects": [],
         "notes": notes, "rotation_count": 0,
     }
-    _save_vault_for_session(vault, password, vault_key)
+    _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: added {name}")
     print(f"  {C_GREEN}✓ Added {name}{C_RESET}")
 
@@ -1201,7 +1222,7 @@ def _repl_rotate(vault, password, name, vault_key=None):
     info["value"] = new_val.strip()
     info["rotated"] = now
     info["rotation_count"] = info.get("rotation_count", 0) + 1
-    _save_vault_for_session(vault, password, vault_key)
+    _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: rotated {name}")
     age_str = f"{int(old_age)}d" if old_age != float("inf") else "?"
     print(f"  {C_GREEN}✓ Rotated. Was {age_str} old.{C_RESET}")
@@ -1220,7 +1241,7 @@ def _repl_delete(vault, password, name, vault_key=None):
         print("  Cancelled.")
         return
     del vault[name]
-    _save_vault_for_session(vault, password, vault_key)
+    _save_and_publish(vault, password, vault_key=vault_key)
     log_event(f"cli: deleted {name}")
     print(f"  {C_GREEN}✓ Deleted {name}{C_RESET}")
 

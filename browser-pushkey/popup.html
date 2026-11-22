@@ -25,6 +25,7 @@
     .dot.healthy { background: #34D399; }
     .dot.warning { background: #F59E0B; }
     .dot.critical { background: #EF4444; animation: pulse 1.5s infinite; }
+    .dot.unknown { background: #64748B; }
     @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.4 } }
     .key-name { flex: 1; font-family: Consolas, monospace; font-size: 11px;
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -36,6 +37,7 @@
            border-radius: 4px; cursor: pointer; font-size: 11px; }
     .btn:hover { background: #3B82F6; }
     .offline { padding: 32px 16px; text-align: center; color: #64748B; }
+    .offline-detail { font-size: 11px; margin-top: 6px; color: #475569; }
     .offline .icon { font-size: 32px; margin-bottom: 8px; }
     .filter-row { display: flex; gap: 4px; padding: 6px 12px; background: #0F172A;
                   border-bottom: 1px solid #1E293B; }

@@ -1,33 +1,37 @@
-# Pushkey — Key Health
+# Pushkey Key Health
 
 Status: beta/deferred until the package/store gates pass.
 
-VS Code gutter decorations for `.env` files. Shows API key rotation health from your local [Pushkey](https://github.com/Push-Key/pushkey) vault.
+VS Code gutter decorations for `.env` files. It shows API key rotation health
+from the local [Pushkey](https://github.com/Push-Key/pushkey) vault without
+reading secret values.
 
-## What it does
+## What It Does
 
-Open any `.env` file. Each `KEY=value` line gets a colored gutter icon based on how stale the key is:
-
-| Icon | Status | Meaning |
-|------|--------|---------|
-| Green | Healthy | Recently rotated |
-| Amber | Warning | Approaching rotation window |
-| Red | Critical | Overdue — rotate now |
-
-No secrets ever read from `.env`. Status comes from `~/.pushkey/health.json`, a public sidecar Pushkey writes — no master password required.
+Open an `.env` file. Each `KEY=value` line can receive a gutter icon based on
+its Pushkey rotation status: healthy, warning, or critical.
 
 ## Requirements
 
-- [Pushkey](https://github.com/Push-Key/pushkey) installed and at least one key tracked.
-- `~/.pushkey/health.json` present (Pushkey writes it on every vault save).
+- [Pushkey](https://github.com/Push-Key/pushkey) installed with at least one
+  tracked key.
+- `~/.pushkey/health.json` published by Pushkey.
 
-## Commands
+## Health Contract
 
-- **Pushkey: Refresh Key Health** — re-reads `health.json` and re-decorates the active editor.
+The extension accepts the strict version 1 health envelope and a temporary
+legacy format only when it is current. It reads no more than 1 MiB, rejects
+malformed or unsupported data, and clears decorations when health is missing,
+invalid, older than 26 hours, or more than five minutes in the future. It
+watches the Pushkey directory so atomic sidecar replacement and a directory
+created after extension activation are handled safely.
 
 ## Privacy
 
-This extension reads only `~/.pushkey/health.json`. It never opens `vault.enc`, never asks for a password, never sends data anywhere.
+This extension reads only `~/.pushkey/health.json`. It never opens `vault.enc`,
+asks for a password, reads `.env` values, or sends data anywhere. The sidecar
+contains local-sensitive metadata such as eligible key names and provider
+identifiers; it never contains secret values.
 
 ## License
 

@@ -1,6 +1,14 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
-from pushkey_providers import detect_provider, days_since, health_status, PROVIDERS
+import pushkey_providers
+from pushkey_providers import (
+    PROVIDERS,
+    days_since,
+    days_since_at,
+    detect_provider,
+    health_status,
+    health_status_at,
+)
 
 
 def test_detect_by_name_pattern_openai():
@@ -56,6 +64,29 @@ def test_days_since_invalid_string():
     assert days_since("not-a-date") == float("inf")
 
 
+def test_days_since_aware_timestamp_remains_invalid_for_legacy_api():
+    assert days_since("2026-01-10T12:00:00+00:00") == float("inf")
+
+
+def test_health_status_aware_timestamp_uses_legacy_invalid_date_behavior():
+    assert health_status({"created": "2026-01-10T12:00:00+00:00"}) == "critical"
+
+
+@pytest.mark.parametrize(("date_str", "now", "expected"), [
+    ("2026-01-08T12:00:00", datetime(2026, 1, 10, 12, 0, 0), 2),
+    ("2026-01-08T07:00:00-05:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc), 2),
+    ("2026-01-08T09:00:00", datetime(2026, 1, 10, 12, 0, tzinfo=timezone(timedelta(hours=3))), 2),
+])
+def test_days_since_at_normalizes_naive_and_aware_values_to_utc(date_str, now, expected):
+    assert days_since_at(date_str, now) == expected
+
+
+@pytest.mark.parametrize("date_str", ["not-a-date", float("nan"), "2026-01-11T12:00:00+00:00"])
+def test_days_since_at_rejects_invalid_and_future_values(date_str):
+    now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    assert days_since_at(date_str, now) == float("inf")
+
+
 def test_health_status_healthy():
     info = {"created": datetime.now().isoformat(), "provider": None}
     assert health_status(info) == "healthy"
@@ -84,6 +115,22 @@ def test_health_status_supabase_longer_threshold():
     dt = (datetime.now() - timedelta(days=100)).isoformat()
     info = {"created": dt, "provider": "Supabase"}
     assert health_status(info) == "healthy"
+
+
+def test_health_status_at_uses_injected_time_and_provider_threshold():
+    now = datetime(2026, 1, 10, 12, 0, 0)
+    info = {"created": "2025-12-06T12:00:00", "provider": "HashiCorp Vault"}
+    assert health_status_at(info, now) == "critical"
+
+
+@pytest.mark.parametrize("metadata", [None, [], "invalid", {"rotation_days": True},
+                          {"rotation_days": 0}, {"rotation_days": -1},
+                          {"rotation_days": float("nan")}, {"rotation_days": "30"}])
+def test_health_status_at_uses_default_threshold_for_malformed_provider_metadata(monkeypatch, metadata):
+    monkeypatch.setattr(pushkey_providers, "PROVIDERS", {"Cached": metadata})
+    now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    info = {"created": "2025-11-01T12:00:00+00:00", "provider": "Cached"}
+    assert health_status_at(info, now) == "warning"
 
 
 def test_providers_contains_openai():
