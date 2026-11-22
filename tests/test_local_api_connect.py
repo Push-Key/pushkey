@@ -151,7 +151,7 @@ class Api:
 @pytest.fixture
 def api(fresh_app):
     _seed_vault()
-    client = TestClient(fresh_app.app)
+    client = TestClient(fresh_app.app, raise_server_exceptions=False)
     boot = client.post("/api/bootstrap", headers={"Authorization": "Bearer test-launch-token"})
     assert boot.status_code == 200
     return Api(client, {"Authorization": f"Bearer {boot.json()['token']}"})
@@ -319,7 +319,7 @@ def test_overwrite_keeps_connections_and_syncs(api, tmp_path):
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert [(item["key"], item["written"], item["change"]) for item in body["synced"]] == [
+    assert [(item["key"], item["written"], item["change"]) for item in body.get("synced", [])] == [
         (KEY, True, "replace")
     ]
     assert "sk-replacement" not in response.text
@@ -344,7 +344,7 @@ def test_rotate_syncs_connected_files(api, tmp_path):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["history_count"] == 1
-    assert [(item["key"], item["written"], item["change"]) for item in body["synced"]] == [
+    assert [(item["key"], item["written"], item["change"]) for item in body.get("synced", [])] == [
         (KEY, True, "replace")
     ]
     assert "not_synced" not in body
@@ -363,7 +363,7 @@ def test_promote_syncs_connected_files(api, tmp_path):
     response = api.post(f"/api/keys/{KEY}/promote")
 
     assert response.status_code == 200, response.text
-    assert [item["written"] for item in response.json()["synced"]] == [True]
+    assert [item["written"] for item in response.json().get("synced", [])] == [True]
     assert f"{KEY}=sk-backup" in _env(folder)
     stored = _stored()
     assert (stored["value"], stored["next_value"]) == ("sk-backup", None)
@@ -381,7 +381,7 @@ def test_token_rotate_without_inject_lists_not_synced(api, tmp_path):
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["not_synced"] == [{"project": path, "file": ".env", "var": KEY}]
+    assert body.get("not_synced") == [{"project": path, "file": ".env", "var": KEY}]
     assert "synced" not in body
     assert f"{KEY}={VALUE}" in _env(folder)
     assert _stored()["value"] == "sk-rotated"
@@ -389,7 +389,7 @@ def test_token_rotate_without_inject_lists_not_synced(api, tmp_path):
     api.token(["write", "inject"])
     allowed = api.post(f"/api/keys/{KEY}/rotate", json={"new_value": "sk-again"})
     assert allowed.status_code == 200, allowed.text
-    assert [item["written"] for item in allowed.json()["synced"]] == [True]
+    assert [item["written"] for item in allowed.json().get("synced", [])] == [True]
     assert "not_synced" not in allowed.json()
     assert f"{KEY}=sk-again" in _env(folder)
 
@@ -406,7 +406,7 @@ def test_rotate_still_succeeds_when_the_follow_up_sync_fails(api, tmp_path, monk
     response = api.post(f"/api/keys/{KEY}/rotate", json={"new_value": "sk-rotated"})
 
     assert response.status_code == 200, response.text
-    assert response.json()["synced"] == []
+    assert response.json().get("synced") == []
     assert response.json()["sync_error"] == "config_busy"
     assert _stored()["value"] == "sk-rotated"
 
@@ -590,7 +590,7 @@ def test_connection_routes_round_trip(api, tmp_path):
 
     synced = api.post("/api/connections/sync", json={"key": KEY, "project": path})
     assert synced.status_code == 200, synced.text
-    assert [(r["key"], r["written"], r["change"]) for r in synced.json()["synced"]] == [(KEY, True, "replace")]
+    assert [(r["key"], r["written"], r["change"]) for r in synced.json().get("synced", [])] == [(KEY, True, "replace")]
     assert f"{KEY}={VALUE}" in _env(folder)
 
     suggested = api.get("/api/connections/suggest", params={"key": OTHER, "project": path})
@@ -702,7 +702,7 @@ def test_health_warning_header_on_connect(api, tmp_path, monkeypatch):
     response = api.post("/api/connections", json={"key": KEY, "project": path})
 
     assert response.status_code == 201, response.text
-    assert response.headers["X-Pushkey-Warning"] == "health_publication_failed"
+    assert response.headers.get("X-Pushkey-Warning") == "health_publication_failed"
     assert f"{KEY}={VALUE}" in _env(folder)
 
 
@@ -858,3 +858,14 @@ _ERROR_CASES = [
 )
 def test_error_map_covers_every_code(fresh_app, error, status, body):
     assert fresh_app._error_status_and_body(error) == (status, body)
+
+
+def test_unlock_without_a_vault_file_creates_none(fresh_app):
+    client = TestClient(fresh_app.app)
+    boot = client.post("/api/bootstrap", headers={"Authorization": "Bearer test-launch-token"})
+    headers = {"Authorization": f"Bearer {boot.json()['token']}"}
+    assert not _s.VAULT_FILE.exists()
+
+    client.post("/api/unlock", headers=headers, json={"password": PASSWORD})
+
+    assert not _s.VAULT_FILE.exists()
