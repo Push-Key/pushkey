@@ -387,6 +387,7 @@ class ConnectResult:
     change: str
     gitignore_changed: bool
     health_warning: Optional[str]
+    warning: Optional[str] = None
 
 
 @dataclass
@@ -784,6 +785,8 @@ def preview(
     file: Optional[str] = None,
     var: Optional[str] = None,
     replace_source: bool = False,
+    value: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> Preview:
     """Resolve a connect and say what it would do; reads the env file, writes nothing.
 

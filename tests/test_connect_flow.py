@@ -6,6 +6,7 @@ vault directory). No test passes a real secret. A test that asserts "nothing was
 written" also asserts one thing the operation did do, so it cannot pass vacuously.
 """
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -27,6 +28,8 @@ from pushkey_vault import load_config, load_vault, save_vault
 PASSWORD = "pw"
 KEY = "SUPABASE_ANON_KEY"
 VALUE = "sb_publishable_x"
+#: ConnectResult.warning when the save that records last_error could not be made.
+RECORDING_WARNING = "last_error_not_recorded"
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
 
@@ -286,6 +289,9 @@ def test_preview_public_prefix_for_every_browser_prefix(world, prefix):
     assert shown.needs_confirm == ["public_prefix"]
 
 
+PUBLIC = ["public_prefix"]
+
+
 @pytest.mark.parametrize(
     "key_name, var, value, expected",
     [
@@ -293,20 +299,86 @@ def test_preview_public_prefix_for_every_browser_prefix(world, prefix):
         ("BACKEND_SECRET", "MY_VITE_SECRET", "eyJx", []),                      # prefix must start the name
         ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "pk_live_abc", []),           # publishable value
         ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "sb_publishable_abc", []),
-        ("BACKEND_ANON", "VITE_SECRET", "eyJx", []),                           # marker in the key name
-        ("BACKEND_SECRET", "VITE_ANON_KEY", "eyJx", []),                       # markers in the variable
-        ("BACKEND_SECRET", "VITE_STRIPE_PUBLISHABLE", "eyJx", []),
-        ("BACKEND_SECRET", "VITE_PUBLIC_KEY_ID", "eyJx", []),
-        ("BACKEND_SECRET", "NEXT_PUBLIC_API_URL", "eyJx", []),
-        ("BACKEND_SECRET", "NEXT_PUBLIC_GITHUB_CLIENT_ID", "eyJx", []),
-        ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "eyJx", ["public_prefix"]),
-        ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "sk_live_abc", ["public_prefix"]),
+        ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "NEXT_PUBLIC_SECRET", "sk_live_abc", PUBLIC),
+        # Only the key name can exempt, and only by whole tokens (split on non-alphanumerics).
+        ("BACKEND_ANON", "VITE_SECRET", "eyJx", []),
+        ("SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "eyJx", []),    # a non-publishable value
+        ("STRIPE_PUBLISHABLE", "VITE_STRIPE", "eyJx", []),
+        ("STRIPE_PUBLIC_KEY", "VITE_STRIPE", "eyJx", []),                      # PUBLIC, KEY adjacent
+        ("GITHUB_CLIENT_ID", "NEXT_PUBLIC_GITHUB", "eyJx", []),                # CLIENT, ID adjacent
+        ("GITHUB-CLIENT.ID", "NEXT_PUBLIC_GITHUB", "eyJx", []),                # any non-alphanumeric splits
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co", []),
+        ("SUPABASE_URL", "VITE_API", "http://localhost:54321/rest", []),
+        # The variable name never exempts: it is the thing being checked.
+        ("BACKEND_SECRET", "VITE_ANON_KEY", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "VITE_STRIPE_PUBLISHABLE", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "VITE_PUBLIC_KEY_ID", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "NEXT_PUBLIC_API_URL", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "NEXT_PUBLIC_GITHUB_CLIENT_ID", "eyJx", PUBLIC),
+        ("SUPABASE_SERVICE_ROLE_KEY", "NEXT_PUBLIC_KEY", "eyJx", PUBLIC),      # a *PUBLIC_ prefix then KEY
+        ("SUPABASE_SERVICE_ROLE_KEY", "PUBLIC_KEYCLOAK_SECRET", "eyJx", PUBLIC),
+        ("SUPABASE_SERVICE_ROLE_KEY", "EXPO_PUBLIC_KEY_SR", "eyJx", PUBLIC),
+        ("BACKEND_SECRET", "NEXT_PUBLIC_DATABASE_URL", "eyJx", PUBLIC),
+        ("CANONICAL_SIGNING_SECRET", "VITE_SIGNING", "eyJx", PUBLIC),           # ANON inside CANONICAL
+        # A token is a whole word, and a pair has to be adjacent.
+        ("ANONYMOUS_TOKEN", "VITE_X", "eyJx", PUBLIC),
+        ("PUBLISHABLES_TOKEN", "VITE_X", "eyJx", PUBLIC),
+        ("PUBLIC_SECRET_KEY", "VITE_X", "eyJx", PUBLIC),
+        ("KEY_PUBLIC", "VITE_X", "eyJx", PUBLIC),
+        ("CLIENT_SECRET_ID", "VITE_X", "eyJx", PUBLIC),
+        ("ID_CLIENT", "VITE_X", "eyJx", PUBLIC),
+        ("BASE_URLS", "VITE_X", "https://x.supabase.co", PUBLIC),
+        ("CURL", "VITE_X", "https://x.supabase.co", PUBLIC),
+        # A URL token exempts only a plain http(s) URL with no user or password in it.
+        ("DATABASE_URL", "NEXT_PUBLIC_DB", "postgres://u:p@h/db", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", None, PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://u:p@x.supabase.co/db", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://token@x.supabase.co", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "ftp://x.supabase.co", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "x.supabase.co", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://[not-a-host", PUBLIC),
     ],
 )
 def test_preview_public_prefix_exemptions(world, key_name, var, value, expected):
-    world.add_key(key_name, value=value)
+    # A plain dict, not a saved vault: a vault refuses a key without a value, and a caller
+    # (the CLI reading a half-migrated vault) can still hand preview one.
+    vault = {key_name: _entry(value=value)}
 
-    assert world.preview(key_name=key_name, var=var).needs_confirm == expected
+    shown = _ok(
+        lambda: pushkey_connect.preview(vault, world.config(), key_name=key_name, project=world.project, var=var)
+    )
+
+    assert shown.needs_confirm == expected
+
+
+def test_preview_of_a_key_that_is_not_in_the_vault_yet(world):
+    before = pushkey_shared.VAULT_FILE.read_bytes()
+
+    shown = _ok(lambda: world.preview(key_name="BRAND_NEW", value="sk_live_x", var="NEXT_PUBLIC_BRAND_NEW"))
+
+    assert shown.needs_confirm == PUBLIC
+    assert shown.line == "Save to acme-web -> dev -> .env as NEXT_PUBLIC_BRAND_NEW"
+    assert shown.change == "add" and shown.key == "BRAND_NEW"
+    plain = _ok(lambda: world.preview(key_name="BRAND_NEW", value="sk_live_x", var="BRAND_NEW"))
+    assert plain.needs_confirm == []
+    public = _ok(lambda: world.preview(key_name="BRAND_NEW", value="pk_live_x", var="NEXT_PUBLIC_BRAND_NEW"))
+    assert public.needs_confirm == []
+    prod = _ok(lambda: world.preview(key_name="BRAND_NEW", value="sk_live_x", env="prod"))
+    assert prod.needs_confirm == ["env_mismatch"]
+    all_envs = _ok(lambda: world.preview(key_name="BRAND_NEW", value="sk_live_x", env="all"))
+    assert all_envs.needs_confirm == []
+    assert pushkey_shared.VAULT_FILE.read_bytes() == before and "BRAND_NEW" not in world.vault()
+
+    without_a_value = _raised(lambda: world.preview(key_name="BRAND_NEW"), ConnectError)
+    assert without_a_value is not None and without_a_value.code == "key_not_found"
+
+
+def test_preview_of_a_replacement_value_compares_the_new_value(world):
+    (world.folder / ".env").write_bytes(f"{KEY}={VALUE}\n".encode())
+
+    assert world.preview().change == "none"
+    assert _ok(lambda: world.preview(value="sb_publishable_new")).change == "replace"
 
 
 # -- connect ---------------------------------------------------------------------
@@ -588,6 +660,7 @@ def test_connect_reports_a_file_it_cannot_rewrite(world):
     assert result.written is False and result.reason == "invalid_env_file"
     assert (world.folder / ".env").read_bytes() == b"A=1\rB=2\r"
     assert _only(world.conns())["last_error"] == "invalid_env_file"
+    assert result.gitignore_changed is False and not (world.folder / ".gitignore").exists()
 
 
 def test_connect_rechecks_the_registration_inside_the_save(world, monkeypatch):
@@ -607,14 +680,39 @@ def test_connect_rechecks_the_registration_inside_the_save(world, monkeypatch):
     assert not (world.folder / ".env").exists()
 
 
+def _refuse_only(relpath_to_refuse, error, calls=None):
+    """An atomic_project_write that raises `error` for one file and really writes the others."""
+    real_write = pushkey_projectfs.atomic_project_write
+
+    def write(registered, relpath, *args, **kwargs):
+        if calls is not None:
+            calls.append(relpath)
+        if relpath == relpath_to_refuse:
+            raise error
+        return real_write(registered, relpath, *args, **kwargs)
+
+    return write
+
+
+def _refuse_everything_but_the_gitignore(error):
+    real_write = pushkey_projectfs.atomic_project_write
+
+    def write(registered, relpath, *args, **kwargs):
+        if relpath == ".gitignore":
+            return real_write(registered, relpath, *args, **kwargs)
+        raise error
+
+    return write
+
+
 def test_failed_write_is_not_written(world, monkeypatch):
     reason = "project directory identity changed during write"
 
-    def refuse(*args, **kwargs):
-        raise ProjectPathError(409, reason)
-
     with monkeypatch.context() as patched:
-        patched.setattr(pushkey_projectfs, "atomic_project_write", refuse)
+        patched.setattr(
+            pushkey_projectfs, "atomic_project_write",
+            _refuse_everything_but_the_gitignore(ProjectPathError(409, reason)),
+        )
         result = _ok(lambda: world.connect())
 
     assert result.written is False and result.reason == reason
@@ -631,21 +729,57 @@ def test_failed_write_is_not_written(world, monkeypatch):
     assert f"{KEY}={VALUE}\n" in world.read(".env")
 
 
-def test_a_gitignore_failure_after_the_file_is_written_is_reported(world, monkeypatch):
-    real_write = pushkey_projectfs.atomic_project_write
-
-    def refuse_gitignore(registered, relpath, *args, **kwargs):
-        if relpath == ".gitignore":
-            raise ProjectPathError(400, "refusing link or reparse-point project target")
-        return real_write(registered, relpath, *args, **kwargs)
+def test_an_env_write_failure_keeps_the_gitignore_line_it_added_and_says_so(world, monkeypatch):
+    reason = "project directory identity changed during write"
+    order = []
 
     with monkeypatch.context() as patched:
-        patched.setattr(pushkey_projectfs, "atomic_project_write", refuse_gitignore)
+        patched.setattr(
+            pushkey_projectfs, "atomic_project_write",
+            _refuse_only(".env", ProjectPathError(409, reason), calls=order),
+        )
         result = _ok(lambda: world.connect())
 
-    assert result.written is False and result.reason == "refusing link or reparse-point project target"
-    assert f"{KEY}={VALUE}\n" in world.read(".env")
-    assert _only(world.conns())["last_error"] == result.reason
+    assert result.written is False and result.reason == reason
+    assert result.gitignore_changed is True
+    assert order == [".gitignore", ".env"]  # the .gitignore line goes in before the secret does
+    assert ".env" in world.read(".gitignore").splitlines()
+    assert not (world.folder / ".env").exists()
+    assert _only(world.conns())["last_error"] == reason
+
+
+@pytest.mark.parametrize("existing", [None, b"KEEP=1\n"], ids=["no-file", "existing-file"])
+def test_a_gitignore_failure_means_the_env_file_is_not_written(world, monkeypatch, existing):
+    reason = "refusing link or reparse-point project target"
+    env_file = world.folder / ".env"
+    if existing is not None:
+        env_file.write_bytes(existing)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            pushkey_projectfs, "atomic_project_write",
+            _refuse_only(".gitignore", ProjectPathError(400, reason)),
+        )
+        result = _ok(lambda: world.connect())
+
+    assert result.written is False and result.reason == reason
+    assert result.gitignore_changed is False and result.change == "none"
+    assert (env_file.read_bytes() if env_file.exists() else None) == existing
+    assert _backups() == []
+    assert _only(world.conns())["last_error"] == reason
+
+
+def test_a_connect_that_changes_nothing_still_adds_the_missing_gitignore_line(world):
+    env_file = world.folder / ".env"
+    env_file.write_bytes(f"{KEY}={VALUE}\n".encode())
+    backups = len(_backups())
+
+    result = _ok(lambda: world.connect())
+
+    assert (result.written, result.change, result.gitignore_changed) == (True, "none", True)
+    assert ".env" in world.read(".gitignore").splitlines()
+    assert env_file.read_bytes() == f"{KEY}={VALUE}\n".encode()
+    assert len(_backups()) == backups
 
 
 def test_connect_survives_a_failed_second_save(world, monkeypatch):
@@ -665,7 +799,46 @@ def test_connect_survives_a_failed_second_save(world, monkeypatch):
 
     assert len(calls) == 2
     assert result.written is False and result.reason == "invalid_env_file"
+    assert result.warning == RECORDING_WARNING
     assert _only(world.conns())["var"] == KEY
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("disk full"), pushkey_vault.VaultConflictError("expected_revision_required")],
+    ids=["os-error", "non-stale-conflict"],
+)
+def test_connect_reports_a_recording_failure_as_a_warning(world, monkeypatch, error):
+    messages = []
+    monkeypatch.setattr(pushkey_connect, "log_event", messages.append)
+    # A connection that failed keeps its last_error until a write succeeds, so the next
+    # successful connect has something to clear: that is the recording save that fails.
+    (world.folder / ".env").write_bytes(b"A=1\rB=2\r")
+    failed = _ok(lambda: world.connect())
+    assert failed.written is False and _only(world.conns())["last_error"] == "invalid_env_file"
+    (world.folder / ".env").write_bytes(b"A=1\n")
+    messages.clear()
+    real_commit = pushkey_connect.commit
+    logged_before = []
+
+    def recording_fails(mutate, **kw):
+        logged_before.append(len(messages))
+        if len(logged_before) == 2:
+            raise error
+        return real_commit(mutate, **kw)
+
+    monkeypatch.setattr(pushkey_connect, "commit", recording_fails)
+
+    result = _ok(lambda: world.connect())
+
+    assert len(logged_before) == 2  # the save of the connection, then the recording that failed
+    assert result.written is True and result.reason is None and result.change == "add"
+    assert result.warning == RECORDING_WARNING
+    assert logged_before[1] == 1  # the audit line was already written when the recording ran
+    assert messages == [f"test: connected {KEY} -> acme-web .env as {KEY}"]
+    assert f"{KEY}={VALUE}\n" in world.read(".env")
+    assert _only(world.conns())["last_error"] == "invalid_env_file"  # the old note stays
+    assert str(error) not in repr(result)
 
 
 def test_connect_result_and_log_have_no_value(world, monkeypatch):
@@ -780,6 +953,26 @@ def test_sync_refuses_a_file_git_tracks_and_leaves_its_bytes(world):
     assert _only(world.status()).state == "not_written"
 
 
+def test_a_file_that_is_refused_gets_no_gitignore_line(world):
+    (world.folder / ".env.local").write_bytes(b"A=1\n")
+    _track(world.folder, ".env.local")
+    (world.folder / ".env").write_bytes(b"\xff\xfe=1\n")  # not UTF-8
+    world.set_vault(
+        lambda vault: vault[KEY].update(
+            projects=[world.project],
+            connections=[_conn(world.project, ".env.local", "FIRST"), _conn(world.project, ".env", "SECOND")],
+        )
+    )
+
+    results = _ok(lambda: world.sync())
+
+    assert [(r.var, r.written, r.reason, r.gitignore_changed) for r in results] == [
+        ("FIRST", False, "file_tracked_by_git", False),
+        ("SECOND", False, "invalid_env_file", False),
+    ]
+    assert not (world.folder / ".gitignore").exists()
+
+
 def test_sync_refuses_a_template_name_before_it_writes(world):
     world.set_vault(
         lambda vault: vault[KEY].update(
@@ -844,9 +1037,16 @@ def test_a_variable_that_is_not_a_valid_name_fails_alone(world):
     assert world.read(".env").count("=") == 1 and f"GOOD={VALUE}\n" in world.read(".env")
 
 
-@pytest.mark.parametrize(
-    "error", [ConnectError("vault_changed"), pushkey_vault.VaultBusyError("vault_lock_failed")]
-)
+RECORDING_FAILURES = [
+    ConnectError("vault_changed"),
+    pushkey_vault.VaultBusyError("vault_lock_failed"),
+    OSError("disk full"),
+    pushkey_vault.VaultConflictError("expected_revision_required"),
+]
+RECORDING_FAILURE_IDS = ["vault-changed", "vault-busy", "os-error", "non-stale-conflict"]
+
+
+@pytest.mark.parametrize("error", RECORDING_FAILURES, ids=RECORDING_FAILURE_IDS)
 def test_sync_returns_its_results_when_recording_them_fails(world, monkeypatch, error):
     (world.folder / ".env").write_bytes(b"A=1\rB=2\r")
     world.set_vault(
@@ -863,6 +1063,31 @@ def test_sync_returns_its_results_when_recording_them_fails(world, monkeypatch, 
     results = _ok(lambda: world.sync())
 
     assert [(r.written, r.reason) for r in results] == [(False, "invalid_env_file")]
+    assert [r.warning for r in results] == [RECORDING_WARNING]
+
+
+@pytest.mark.parametrize("error", RECORDING_FAILURES, ids=RECORDING_FAILURE_IDS)
+def test_sync_that_wrote_its_files_still_returns_its_results_when_recording_fails(world, monkeypatch, error):
+    messages = []
+    monkeypatch.setattr(pushkey_connect, "log_event", messages.append)
+    seeded = _conn(world.project, ".env", KEY, last_error="write_failed")
+    world.set_vault(lambda vault: vault[KEY].update(projects=[world.project], connections=[seeded]))
+    logged_before = []
+
+    def recording_fails(mutate, **kw):
+        logged_before.append(len(messages))
+        raise error
+
+    monkeypatch.setattr(pushkey_connect, "commit", recording_fails)
+
+    results = _ok(lambda: world.sync())
+
+    assert [(r.written, r.reason, r.change, r.warning) for r in results] == [
+        (True, None, "add", RECORDING_WARNING)
+    ]
+    assert f"{KEY}={VALUE}\n" in world.read(".env")
+    assert logged_before == [1]  # the audit line is written before the recording is tried
+    assert messages == [f"test: synced {KEY} -> acme-web .env as {KEY}"]
 
 
 # -- status ----------------------------------------------------------------------
@@ -965,6 +1190,101 @@ def test_status_filters_and_never_shows_a_value(world):
     assert VALUE not in repr(everything) and "other-value-zzz" not in repr(everything)
 
 
+def test_status_flags_a_file_git_tracks_even_when_its_value_is_current(world):
+    assert _ok(lambda: world.connect(file=".env.local", var="API_KEY")).written is True
+    env_file, gitignore = world.folder / ".env.local", world.folder / ".gitignore"
+    good, ignored = env_file.read_bytes(), gitignore.read_bytes()
+    assert _only(world.status()).state == "up_to_date"
+    _track(world.folder, ".env.local")  # committed after the sync: nothing was rotated
+
+    def state():
+        only = _only(world.status())
+        return only.state, only.reason
+
+    assert state() == ("not_written", "file_tracked_by_git")
+    # A tracked file outranks every state its content or its .gitignore would give.
+    env_file.write_bytes(b"API_KEY=edited-by-hand\n")
+    assert state() == ("not_written", "file_tracked_by_git")
+    env_file.write_bytes(b"OTHER=1\n")
+    assert state() == ("not_written", "file_tracked_by_git")
+    env_file.write_bytes(good)
+    gitignore.write_bytes(b"node_modules\n")
+    assert state() == ("not_written", "file_tracked_by_git")
+    gitignore.write_bytes(ignored)
+    env_file.unlink()
+    assert state() == ("not_written", "file_tracked_by_git")
+
+
+def test_status_keeps_the_path_refusals_ahead_of_the_tracked_check(world, monkeypatch):
+    asked = []
+    monkeypatch.setattr(pushkey_projectfs, "is_git_tracked", lambda *args: asked.append(args) or True)
+    (world.folder / ".env.example").write_bytes(b"X=v\n")
+    vault = {"K": {"value": "v", "connections": [_conn(world.project, ".env.example", "X")]}}
+
+    only = _only(pushkey_connect.status(vault, world.config()))
+
+    assert (only.state, only.reason) == ("not_written", "env template files are read-only")
+    assert asked == []
+
+
+def test_status_asks_git_once_per_file(world, monkeypatch):
+    asked = []
+    real_is_tracked = pushkey_projectfs.is_git_tracked
+
+    def counting(project, relpath):
+        asked.append((project, relpath))
+        return real_is_tracked(project, relpath)
+
+    spelled = world.project + os.sep  # the same folder, spelled differently
+    world.set_vault(
+        lambda vault: vault[KEY].update(
+            projects=[world.project],
+            connections=[
+                _conn(world.project, ".env", "A"),
+                _conn(spelled, ".env", "B"),
+                _conn(world.project, ".env.local", "C"),
+            ],
+        )
+    )
+    monkeypatch.setattr(pushkey_projectfs, "is_git_tracked", counting)
+
+    results = world.status()
+
+    assert [(r.var, r.state) for r in results] == [
+        ("A", "file_missing"), ("B", "file_missing"), ("C", "file_missing"),
+    ]
+    assert asked == [(world.project, ".env"), (world.project, ".env.local")]
+
+
+def test_status_reads_a_connection_through_its_registered_folder(world):
+    assert _ok(lambda: world.connect(file=".env.local", var="API_KEY")).written is True
+    spelled = world.project + os.sep
+    world.set_vault(lambda vault: vault[KEY]["connections"][0].update(project=spelled))
+
+    only = _only(world.status())
+
+    assert (only.state, only.reason) == ("up_to_date", None)
+    assert only.project == spelled and only.project_name == "acme-web"
+
+
+def test_status_of_a_connection_to_an_unregistered_project_is_not_written(world):
+    stranger = world.root / "stranger"
+    stranger.mkdir()
+    (stranger / ".env").write_bytes(f"{KEY}={VALUE}\n".encode())
+    (stranger / ".gitignore").write_bytes(b".env\n")
+    canonical = str(stranger.resolve())
+    world.set_vault(
+        lambda vault: vault[KEY].update(projects=[canonical], connections=[_conn(canonical, ".env", KEY)])
+    )
+
+    only = _only(world.status())
+
+    assert (only.state, only.reason) == ("not_written", "project_not_registered")
+    assert only.project == canonical and only.project_name == "stranger"
+    synced = _ok(lambda: world.sync())
+    assert [(r.written, r.reason) for r in synced] == [(False, "project_not_registered")]
+
+
 # -- disconnect ------------------------------------------------------------------
 
 
@@ -1060,6 +1380,27 @@ def test_disconnect_logs_names_only(world, monkeypatch):
 
     assert messages[-1:] == [f"test: disconnected {KEY} -> acme-web .env as {KEY}"]
     assert VALUE not in " ".join(messages)
+
+
+@pytest.mark.parametrize("remove_line", [False, True])
+def test_disconnect_with_an_unreadable_config_refuses_before_anything_changes(world, monkeypatch, remove_line):
+    _connected(world)
+    pushkey_shared.CONFIG_FILE.write_bytes(b"this is not a config")
+    snapshot = {
+        "vault": pushkey_shared.VAULT_FILE.read_bytes(),
+        "config": pushkey_shared.CONFIG_FILE.read_bytes(),
+        "env": (world.folder / ".env").read_bytes(),
+    }
+    messages = []
+    monkeypatch.setattr(pushkey_connect, "log_event", messages.append)
+
+    error = _raised(lambda: world.disconnect(remove_line=remove_line), pushkey_vault.ConfigUnreadableError)
+
+    assert error is not None and str(error) == "config_unreadable"
+    assert pushkey_shared.VAULT_FILE.read_bytes() == snapshot["vault"]
+    assert pushkey_shared.CONFIG_FILE.read_bytes() == snapshot["config"]
+    assert (world.folder / ".env").read_bytes() == snapshot["env"]
+    assert messages == [] and len(world.conns()) == 1
 
 
 # -- suggestions -----------------------------------------------------------------
