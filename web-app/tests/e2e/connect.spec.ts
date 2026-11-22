@@ -293,7 +293,19 @@ test("Pick keys opens that project on the Projects tab", async ({ page }) => {
   await page.goto("/#t=launch-token", { waitUntil: "commit" });
 
   await page.getByRole("button", { name: "Pick keys for old-site" }).click();
-  await expect(page.getByRole("button", { name: /old-site/ }).first()).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: /^old-site/ })).toHaveAttribute("aria-expanded", "true");
+});
+
+test("Pick keys opens the project also when the Projects tab is already showing", async ({ page }) => {
+  const notice = { every_key_projects: ["/work/old-site"] };
+  await installRoutes(page, false, { notice, projects: [PROJECT_ADMIN, PROJECT_OLD] });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Projects" }).click();
+  const card = page.getByRole("button", { name: /^old-site/ });
+  await expect(card).toHaveAttribute("aria-expanded", "false");
+
+  await page.getByRole("button", { name: "Pick keys for old-site" }).click();
+  await expect(card).toHaveAttribute("aria-expanded", "true");
 });
 
 async function addProjectExpecting(page: Page, reply: { status: number; body: unknown }, text: string) {

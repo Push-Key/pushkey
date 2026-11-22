@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -158,7 +159,8 @@ def test_connect_notice_is_a_labelled_region():
     text = notice.read_text(encoding="utf-8")
 
     assert "aria-labelledby" in text
-    assert "Later" in text
-    assert "Hide this notice" in text
+    # The two buttons' own labels, not a comment that happens to mention them.
+    assert re.search(r">\s*Later\s*</Button>", text)
+    assert re.search(r">\s*Hide this notice\s*</Button>", text)
     # local-vault.spec.ts looks up page.getByRole("status") strictly.
     assert 'role="status"' not in text
