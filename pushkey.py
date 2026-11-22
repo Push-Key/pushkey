@@ -2171,6 +2171,21 @@ class RecoverySetupDialog(ctk.CTkToplevel):
 _PROJECT_OWNED_CONFIG_KEYS = ("projects", "projects_legacy", "connect_schema", "connect_notice", "last_project")
 
 
+def _connect_error_text(error):
+    """Plain text for an error the connect core raises (stub)."""
+    return ""
+
+
+def _project_scan_roots(config):
+    """Folders of the registered projects that exist (stub)."""
+    return set()
+
+
+def _project_connections(vault, path):
+    """``[(key name, connection)]`` for one project folder (stub)."""
+    return []
+
+
 class AppFrame(ctk.CTkFrame):
     def __init__(self, master, password, vault, on_lock, app=None, vault_key=None):
         super().__init__(master, fg_color=C["bg"], corner_radius=0)
@@ -2447,6 +2462,25 @@ class AppFrame(ctk.CTkFrame):
             else:
                 self.config.pop(k, None)
         return True
+
+    def _core_args(self):
+        """Credentials for the shared connect core (stub)."""
+        return {}
+
+    def _reload_config(self):
+        """Refresh the project-owned config keys from disk (stub)."""
+
+    def _run_sync(self, **selector):
+        """sync() through the shared core (stub)."""
+        return 0, [], []
+
+    def _apply_project_assignment(self, path, selected):
+        """Connect the selected keys to a project and disconnect the rest (stub)."""
+        return None
+
+    def _save_ci_fields(self, path, platform, creds):
+        """Keep the non-secret CI fields on a project record (stub)."""
+        return False
 
     def _schedule_health_refresh(self):
         if not self.winfo_exists():
