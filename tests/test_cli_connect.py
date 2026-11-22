@@ -1010,11 +1010,14 @@ def test_shell_abbreviated_inject_all_refused_for_an_inject_only_token(world, mo
     assert "OTHER_KEY" not in (world.read() or "")
 
 
+_REAL_BUILD_PARSER = cli._build_parser
+
+
 def _abbreviating_parser():
     """The real parser with abbreviations switched back on (the argparse default)."""
     import argparse
 
-    parser = cli._build_parser()
+    parser = _REAL_BUILD_PARSER()
     stack = [parser]
     while stack:
         current = stack.pop()
@@ -1055,7 +1058,7 @@ def test_shell_add_project_abbreviation_refused_for_a_write_only_token(world, mo
     _no_prompt(monkeypatch)
     before = world.disk()
 
-    result = _shell_cmd(world, "add", ["NEW_KEY", "--proj", str(world.folder)], ["write"])
+    result = _shell_cmd(world, "add", ["NEW_KEY", f"--proj={world.folder}"], ["write"])
 
     assert result is None, repr(result)
     assert "unrecognized arguments: --proj" in capsys.readouterr().err
@@ -1068,7 +1071,7 @@ def test_shell_add_project_abbreviation_hits_the_parsed_gate_when_argparse_allow
     _no_prompt(monkeypatch)
     before = world.disk()
 
-    result = _shell_cmd(world, "add", ["NEW_KEY", "--proj", str(world.folder)], ["write"])
+    result = _shell_cmd(world, "add", ["NEW_KEY", f"--proj={world.folder}"], ["write"])
 
     assert result is None, repr(result)
     assert "missing required scope 'inject'" in capsys.readouterr().err
@@ -1081,6 +1084,7 @@ def test_shell_write_and_inject_token_may_add_with_a_project(world, monkeypatch,
     result = _shell_cmd(world, "add", ["NEW_KEY", f"--project={world.folder}", "--yes"], ["write", "inject"])
 
     assert result is None, repr(result)
+    assert "NEW_KEY" in world.disk()
     assert world.disk()["NEW_KEY"]["value"] == "s3cret-value"
     assert "NEW_KEY=s3cret-value" in (world.read() or "")
     assert "s3cret-value" not in capsys.readouterr().out
@@ -1117,7 +1121,7 @@ def test_top_level_option_abbreviation_is_unrecognized(capsys):
 # -- fix round 1: secret values never reach shell history (F2) -----------------------------------
 
 
-@pytest.mark.parametrize("line,expected", [
+_LINE_CASES = [
     ("add X sk-secret-123", True),
     ("rotate X sk-secret-456", True),
     ("set-backup X sk-secret-789", True),
@@ -1129,6 +1133,7 @@ def test_top_level_option_abbreviation_is_unrecognized(capsys):
     ("add --project P X sk-secret-123", True),
     ('add X --notes "two words" sk-secret-123', True),
     ("add X -- sk-secret-123", True),
+    ("add X -- -----BEGIN-KEY", True),
     ('add X "sk-unbalanced', True),
     ("add X", False),
     ("add", False),
@@ -1150,7 +1155,14 @@ def test_top_level_option_abbreviation_is_unrecognized(capsys):
     ("project add P --name N", False),
     ("", False),
     ("   ", False),
-])
+]
+
+
+# Explicit space-free ids: mutate.py reads failed test ids as whitespace-separated words.
+@pytest.mark.parametrize(
+    "line,expected", _LINE_CASES,
+    ids=[f"{i:02d}-{'value' if expected else 'plain'}" for i, (_line, expected) in enumerate(_LINE_CASES)],
+)
 def test_line_carries_value(line, expected):
     assert cli._line_carries_value(line) is expected
 

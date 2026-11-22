@@ -175,8 +175,52 @@ def _launch_desktop_app() -> None:
     sys.exit(EXIT_USAGE)
 
 
+#: The numbered shell shortcuts.
+_SHELL_ALIASES = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
+
+#: Shell commands whose value must be typed hidden: the line itself goes to the history file.
+_VALUE_COMMANDS = frozenset({"add", "rotate", "set-backup"})
+
+#: Options of those commands that take a value word (that word is not a secret value).
+_VALUE_OPTIONS = frozenset({"--project", "--file", "--as", "--notes", "--confirm"})
+
+
+def _words_carry_value(cmd, rest):
+    """True when ``cmd rest...`` has a positional word after the key name, i.e. a typed secret value."""
+    cmd = _SHELL_ALIASES.get(cmd, cmd)
+    if cmd not in _VALUE_COMMANDS:
+        return False
+    positionals = 0
+    skip_next = False
+    literal = False
+    for word in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if not literal:
+            if word == "--":
+                literal = True
+                continue
+            if word.startswith("-"):
+                skip_next = word in _VALUE_OPTIONS
+                continue
+        positionals += 1
+    return positionals > 1
+
+
 def _line_carries_value(line):
-    return False  # inert stub until the green step
+    """True when a shell line (add, rotate or set-backup) has a secret value typed on it.
+
+    One helper serves the refusal and the history filter, so a line is kept out of the
+    history file exactly when the shell would refuse to run it.
+    """
+    try:
+        words = _split_shell_line(line.strip())
+    except ValueError:
+        words = line.split()  # an unparseable line never runs, but it would still reach the history
+    if not words:
+        return False
+    return _words_carry_value(words[0].lower(), words[1:])
 
 
 def _split_shell_line(line):
@@ -219,6 +263,8 @@ def _run_repl_session(vault, password, vault_key=None, scopes=None):
             line = line.strip()
             if not line:
                 continue
+            if _line_carries_value(line):
+                _forget_line(rl, line)
 
             try:
                 parts = _split_shell_line(line)
@@ -1166,8 +1212,20 @@ def _add_connect_options(parser):
     )
 
 
+class _StrictParser(argparse.ArgumentParser):
+    """An ArgumentParser that does not accept abbreviated options (``--al`` for ``--all``).
+
+    The scope gates and the shell read the words as typed, so a prefix spelling must not parse.
+    Sub-parsers are built from the parent's class and inherit this.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def _build_parser():
-    parser = argparse.ArgumentParser(
+    parser = _StrictParser(
         prog="pushkey",
         description="Pushkey - encrypted API key manager",
     )
@@ -1482,7 +1540,7 @@ def _cmd_app(blocking=False):
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
 _REPL_COMMANDS = ["list", "get", "copy", "add", "rotate", "delete",
-                  "inject", "project", "projects", "security", "app", "desktop",
+                  "connect", "where", "sync", "inject", "project", "projects", "security", "app", "desktop",
                   "status", "help", "about", "agents", "exit", "quit"]
 
 
@@ -1529,13 +1587,39 @@ def _setup_readline(vault, history_file):
     return _rl
 
 
+def _forget_line(rl, line):
+    """Drop the line just read from readline's in-memory history (best effort; the file is filtered on save too)."""
+    if rl is None:
+        return
+    try:
+        length = rl.get_current_history_length()
+        if length and rl.get_history_item(length).strip() == line.strip():
+            rl.remove_history_item(length - 1)
+    except Exception:
+        pass
+
+
+def _scrub_history_file(history_file):
+    """Remove every line that carries a typed secret value from the history file."""
+    try:
+        with open(history_file, "r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+            lines = handle.read().splitlines(keepends=True)
+        kept = [line for line in lines if not _line_carries_value(line)]
+        if len(kept) != len(lines):
+            with open(history_file, "w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+                handle.write("".join(kept))
+    except Exception:
+        pass
+
+
 def _save_history(rl, history_file):
     if rl is None:
         return
     try:
         rl.write_history_file(str(history_file))
     except Exception:
-        pass
+        return
+    _scrub_history_file(history_file)
 
 
 def _project_summary(vault):
@@ -2040,6 +2124,12 @@ def _shell_delegate(cmd, rest, vault, password, vault_key, scopes):
     """Run a CLI command from the shell; its argument errors and exits end only that command."""
     try:
         args = _build_parser().parse_args([cmd, *rest])
+        # The raw words were gated cheaply already; the parsed args decide what really runs
+        # (``--opt=value`` and the like), exactly as the one-shot CLI gates them.
+        problem = _scope_problem(args.command, _scopes_needed(args.command, args), scopes)
+        if problem:
+            print(f"{C_RED}{problem}{C_RESET}", file=sys.stderr)
+            return
         _run_command(args, vault, password, vault_key, scopes)
     except SystemExit:
         pass
@@ -2051,8 +2141,14 @@ def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes
     ``scopes`` is None for a master-password session (never gated). A refusal prints the
     same message the CLI gives and leaves the shell running.
     """
-    aliases = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
-    cmd = aliases.get(cmd, cmd)
+    cmd = _SHELL_ALIASES.get(cmd, cmd)
+    if _words_carry_value(cmd, rest):
+        print(
+            f"{C_RED}Values typed here are saved to history. "
+            f"Use `{cmd} NAME` and enter the value hidden.{C_RESET}",
+            file=sys.stderr,
+        )
+        return app_proc
     problem = _scope_problem(cmd, _shell_required_scopes(cmd, rest), scopes)
     if problem:
         print(f"{C_RED}{problem}{C_RESET}", file=sys.stderr)
@@ -2198,7 +2294,7 @@ def _print_help():
         ("list [filter]",     "show all keys (filter: healthy|warning|critical)"),
         ("get NAME",          "print key value"),
         ("copy NAME",         "copy to clipboard (clears in 30s)"),
-        ("add [NAME VALUE]",  "add a new key (prompts when typed alone); add NAME --project PATH connects it"),
+        ("add NAME [--project PATH ...]", "add a new key (the value is prompted, hidden); --project also connects it"),
         ("connect NAME --project PATH", "connect a key to a variable in a project env file"),
         ("where NAME",        "show where a key is connected and whether each file is up to date"),
         ("sync [NAME]",       "rewrite connected env files with current key values"),
