@@ -511,12 +511,24 @@ def _project_label(registered: dict[str, dict], project: str) -> str:
 
 
 def _is_plain_web_url(value: Any) -> bool:
-    """Whether ``value`` is an http(s) URL with no user name or password in it."""
-    if not isinstance(value, str):
+    """Whether ``value`` is a bare http(s) origin: nothing after the host that could be a secret.
+
+    No user name or password, a path of ``""`` or ``"/"``, no query, no fragment, and no
+    whitespace anywhere in the raw value (``urlsplit`` drops tab, CR and LF before it
+    parses, so the raw text is checked first).
+    """
+    if not isinstance(value, str) or any(ch.isspace() for ch in value):
         return False
     try:
         parts = urllib.parse.urlsplit(value)
-        return parts.scheme in ("http", "https") and parts.username is None and parts.password is None
+        return (
+            parts.scheme in ("http", "https")
+            and parts.username is None
+            and parts.password is None
+            and parts.path in ("", "/")
+            and not parts.query
+            and not parts.fragment
+        )
     except ValueError:
         return False
 

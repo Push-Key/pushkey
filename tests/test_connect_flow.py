@@ -309,7 +309,8 @@ PUBLIC = ["public_prefix"]
         ("GITHUB_CLIENT_ID", "NEXT_PUBLIC_GITHUB", "eyJx", []),                # CLIENT, ID adjacent
         ("GITHUB-CLIENT.ID", "NEXT_PUBLIC_GITHUB", "eyJx", []),                # any non-alphanumeric splits
         ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co", []),
-        ("SUPABASE_URL", "VITE_API", "http://localhost:54321/rest", []),
+        ("SUPABASE_URL", "VITE_API", "http://localhost:54321", []),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co/", []),
         # The variable name never exempts: it is the thing being checked.
         ("BACKEND_SECRET", "VITE_ANON_KEY", "eyJx", PUBLIC),
         ("BACKEND_SECRET", "VITE_STRIPE_PUBLISHABLE", "eyJx", PUBLIC),
@@ -338,6 +339,18 @@ PUBLIC = ["public_prefix"]
         ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "ftp://x.supabase.co", PUBLIC),
         ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "x.supabase.co", PUBLIC),
         ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://[not-a-host", PUBLIC),
+        # ... and only the bare origin: a path, a query or a fragment can carry a secret.
+        ("SUPABASE_URL", "VITE_API", "http://localhost:54321/rest", PUBLIC),
+        ("SLACK_WEBHOOK_URL", "NEXT_PUBLIC_SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/T0/B0/XXXX", PUBLIC),
+        ("API_URL", "NEXT_PUBLIC_API_URL", "https://x.co/?token=abc", PUBLIC),
+        ("API_URL", "NEXT_PUBLIC_API_URL", "https://x.co/#token=abc", PUBLIC),
+        ("API_URL", "NEXT_PUBLIC_API_URL", "https://x.co#token=abc", PUBLIC),
+        # No whitespace anywhere in the raw value: urlsplit drops tab, CR and LF before it parses.
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co\nSECRET=1", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co\r\n", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co\t", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "https://x.supabase.co ", PUBLIC),
+        ("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", " https://x.supabase.co", PUBLIC),
     ],
 )
 def test_preview_public_prefix_exemptions(world, key_name, var, value, expected):
