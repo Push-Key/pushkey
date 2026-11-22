@@ -57,6 +57,17 @@ No linting config, project uses no formatter/linter config files.
 
 **CRITICAL, read this before touching the desktop icon. Six attempts failed because of folder confusion before this was documented.**
 
+> **Smart App Control blocks freshly built exes (found 2026-11-22).** On this machine Smart App Control is on
+> (`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy` value `VerifiedAndReputablePolicyState` = 1). A
+> PyInstaller build is unsigned, so Windows refuses to start it: `Start-Process` fails with "An Application
+> Control policy has blocked this file" and Code Integrity logs events 3033/3077 ("did not meet the Enterprise
+> signing level requirements") in `Microsoft-Windows-CodeIntegrity/Operational`. The July builds in `dist\` and in
+> `Desktop\Pushkey\` were blocked this way; only the older May `Desktop\Pushkey.exe` still starts.
+> **Before Step 3, start the new exe once from `dist\`. If Windows blocks it, do NOT copy it over the desktop exe:**
+> that replaces the one working copy with a blocked one. Keep a copy of the working desktop exe first. Until
+> builds are code-signed, the desktop shortcut runs the app from source (`pythonw.exe pushkey.py`, working
+> directory = the repo).
+
 ### Why this is non-obvious
 
 1. **Desktop is OneDrive-redirected.** The user's real Desktop is `C:\Users\aware\OneDrive\Desktop`, NOT `C:\Users\aware\Desktop`. The latter exists but is empty/orphaned. Always resolve via `[Environment]::GetFolderPath('Desktop')` in PowerShell or `%USERPROFILE%\OneDrive\Desktop`, never hardcode `$env:USERPROFILE\Desktop`.
@@ -99,7 +110,7 @@ for r1 in pe.DIRECTORY_ENTRY_RESOURCE.entries:
 ```
 If it prints fewer sizes than the source `.ico` had, the cache wasn't cleared, try again.
 
-**Step 3, Copy the fresh `.exe` over the desktop copy. Resolve real desktop via API:**
+**Step 3, Copy the fresh `.exe` over the desktop copy, but only if it starts (see the Smart App Control note above). Resolve real desktop via API:**
 ```powershell
 Get-Process -Name "Pushkey" -ErrorAction SilentlyContinue | Stop-Process -Force
 $realDesktop = [Environment]::GetFolderPath('Desktop')   # NOT $env:USERPROFILE\Desktop
