@@ -10,6 +10,8 @@ Foundations:
   project links.
 * The project registry lives in config.json; removing a project also removes
   every key's link to it.
+* Every write refuses with ``migration_pending`` while the desktop's name-keyed
+  projects are not yet migrated (``pushkey_connect_migrate.ensure_migrated``).
 
 Operations: ``preview`` (the confirmation line and what needs confirming),
 ``connect`` (save, allowlist, connection, then the .gitignore line, a backup and
@@ -236,6 +238,7 @@ def register_project(path: str, *, name: Optional[str] = None) -> tuple[str, dic
     label = label or Path(canonical).name or canonical
 
     def add(config: dict) -> dict:
+        _require_migrated(config)
         registered = registered_projects(config)
         if _find_registered(registered, canonical) is not None:
             raise ConnectError("project_exists", {"project": canonical})
@@ -309,7 +312,9 @@ def unregister_project(
     ``CommitResult.value`` lists the key names changed.
     """
     canonical = pushkey_projectfs.canonical_project_path(path, must_exist=False)
-    registered = registered_projects(pushkey_vault.load_config(strict=True))
+    config = pushkey_vault.load_config(strict=True)
+    _require_migrated(config)
+    registered = registered_projects(config)
     was_registered = _find_registered(registered, canonical) is not None
 
     def drop(vault: VaultData) -> list[str]:
@@ -457,6 +462,17 @@ def is_migrated(config: dict) -> bool:
     if not isinstance(projects, dict):
         return True
     return all(isinstance(key, str) and Path(key).is_absolute() for key in projects)
+
+
+def _require_migrated(config: dict) -> None:
+    """Refuse a write while the desktop's projects are still keyed by name.
+
+    Raises ConnectError ``migration_pending``: only a master-password unlock runs the
+    migration (pushkey_connect_migrate.ensure_migrated), so a token or recovery session
+    that meets an unmigrated store must wait for one. Called before anything is changed.
+    """
+    if not is_migrated(config):
+        raise ConnectError("migration_pending")
 
 
 def _text(value: Any, default: str) -> str:
@@ -967,6 +983,7 @@ def connect(
         # Read inside the save, so a project unregistered since the caller looked
         # cannot be linked to (an unregister racing this connect).
         config = pushkey_vault.load_config(strict=True)
+        _require_migrated(config)
         plan = _resolve(
             fresh, config, key_name=key_name, project=project, file=file, var=var,
             value=value, env=env, replace_source=replace_source,
@@ -1049,7 +1066,9 @@ def sync(
     comes back, with ``warning == "last_error_not_recorded"``.
     """
     vault = _reload(vault_key, password)
-    registered = registered_projects(pushkey_vault.load_config(strict=True))
+    config = pushkey_vault.load_config(strict=True)
+    _require_migrated(config)
+    registered = registered_projects(config)
     if key_name is not None and not isinstance(vault.get(key_name), dict):
         raise ConnectError("key_not_found", {"key": key_name})
     wanted = None
@@ -1271,7 +1290,9 @@ def disconnect(
     canonical = pushkey_projectfs.canonical_project_path(project, must_exist=False)
     # Strictly and before anything changes: an unreadable config must refuse here, not
     # read as "no projects" after the vault was committed.
-    registered = registered_projects(pushkey_vault.load_config(strict=True))
+    config = pushkey_vault.load_config(strict=True)
+    _require_migrated(config)
+    registered = registered_projects(config)
 
     def apply(fresh: VaultData) -> None:
         entry = fresh.get(key_name)

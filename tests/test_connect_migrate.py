@@ -151,7 +151,7 @@ def test_migrates_desktop_entry(tmp_path):
         }
     }
     assert config["projects_legacy"] == {"acme": desktop}
-    assert config["connect_schema"] == 1
+    assert config.get("connect_schema") == 1
     assert "connect_notice" not in config
     assert vault["A"]["projects"] == [canon]
     conn = _only(vault["A"]["connections"])
@@ -352,6 +352,32 @@ def test_an_assignment_that_has_a_connection_gets_no_second_one(tmp_path):
     assert config.get("connect_schema") == 1  # it ran ...
     assert report.connections_added == 0  # ... and added nothing
     assert vault["K"]["connections"] == [existing]
+
+
+def test_an_existing_connection_spelled_differently_still_counts(tmp_path):
+    folder = _folder(tmp_path, "cli-web")
+    canon = _canon(folder)
+    existing = {"project": canon.replace("\\", "/") + "/", "file": ".env", "var": "K", "added": "2026-03-04T05:06:07"}
+    config = {"projects": {canon: {"name": "cli-web", "created": "2026-02-03"}}}
+    vault = {"K": _entry("K", projects=[canon], connections=[copy.deepcopy(existing)])}
+
+    report = plan_migration(vault, config)
+
+    assert config.get("connect_schema") == 1 and report.connections_added == 0
+    assert vault["K"]["connections"] == [existing]
+
+
+def test_a_desktop_key_already_allowlisted_under_another_spelling_is_not_listed_twice(tmp_path):
+    folder = _folder(tmp_path, "acme-web")
+    spelled = _canon(folder).replace("\\", "/") + "/"
+    config = {"projects": {"acme": _desktop(folder, ["A"])}}
+    vault = {"A": _entry("A", projects=[spelled])}
+
+    report = plan_migration(vault, config)
+
+    assert report.connections_added == 1
+    assert vault["A"]["projects"] == [spelled]
+    assert _only(vault["A"]["connections"])["project"] == _canon(folder)
 
 
 def test_a_lost_marker_does_not_bring_back_unassigned_keys(tmp_path):

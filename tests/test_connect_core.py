@@ -485,7 +485,11 @@ def test_register_project_takes_a_display_name(pro_tier, tmp_path):
 
 
 def test_register_project_counts_only_absolute_path_projects(tmp_path):
-    save_config({"projects": {"desktop-name": {"name": "legacy"}}, "sso_settings": {"on": True}})
+    # connect_schema 1 marks the store as migrated: a name-keyed entry left behind (or written by
+    # an old desktop afterwards) is then ignored, not counted and not an obstacle.
+    save_config({
+        "projects": {"desktop-name": {"name": "legacy"}}, "connect_schema": 1, "sso_settings": {"on": True},
+    })
     p1 = _folder(tmp_path, "p1")
 
     path, _ = _ok(lambda: pushkey_connect.register_project(str(p1)))

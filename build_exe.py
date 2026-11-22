@@ -22,6 +22,7 @@ SUBMODULES = [
     "pushkey_health",
     "pushkey_projectfs",
     "pushkey_connect",
+    "pushkey_connect_migrate",
 ]
 
 
