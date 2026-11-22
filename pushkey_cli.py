@@ -175,6 +175,10 @@ def _launch_desktop_app() -> None:
     sys.exit(EXIT_USAGE)
 
 
+def _line_carries_value(line):
+    return False  # inert stub until the green step
+
+
 def _split_shell_line(line):
     """Split a shell line into words, honouring quotes (a path with spaces: ``project add "My App"``).
 

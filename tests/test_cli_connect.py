@@ -988,3 +988,283 @@ def test_inject_reports_a_connection_it_could_not_write(world, monkeypatch, caps
     out = capsys.readouterr().out
     assert code == cli.EXIT_IO
     assert "Not written: EXISTING" in out and "write_failed" in out
+
+
+# -- fix round 1: parsed-args gate (F1) ----------------------------------------------------------
+
+
+def _shell_cmd(world, cmd, rest, scopes, password=None):
+    return _error_of(lambda: cli._handle_repl_command(cmd, rest, world.vault, password, world.vault_key, None, scopes=scopes))
+
+
+def test_shell_abbreviated_inject_all_refused_for_an_inject_only_token(world, monkeypatch, capsys):
+    world.put("OTHER_KEY", value="other-secret")
+    world.connect()
+    before = world.disk()
+
+    result = _shell_cmd(world, "inject", ["--al", "--project", str(world.folder)], ["inject"])
+
+    assert result is None, repr(result)
+    assert "unrecognized arguments: --al" in capsys.readouterr().err
+    assert world.disk() == before
+    assert "OTHER_KEY" not in (world.read() or "")
+
+
+def _abbreviating_parser():
+    """The real parser with abbreviations switched back on (the argparse default)."""
+    import argparse
+
+    parser = cli._build_parser()
+    stack = [parser]
+    while stack:
+        current = stack.pop()
+        current.allow_abbrev = True
+        for action in current._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                stack.extend(action.choices.values())
+    return parser
+
+
+def test_shell_parsed_gate_refuses_inject_all_whatever_the_spelling(world, monkeypatch, capsys):
+    """Even if argparse accepted an abbreviation, the parsed args decide: --all is master only."""
+    monkeypatch.setattr(cli, "_build_parser", _abbreviating_parser)
+    world.put("OTHER_KEY", value="other-secret")
+    before = world.disk()
+
+    result = _shell_cmd(world, "inject", ["--al", "--project", str(world.folder)], ["inject"])
+
+    assert result is None, repr(result)
+    assert "master-password" in capsys.readouterr().err
+    assert world.disk() == before
+    assert "OTHER_KEY" not in (world.read() or "")
+
+
+def test_shell_add_project_equals_form_refused_for_a_write_only_token(world, monkeypatch, capsys):
+    _no_prompt(monkeypatch)
+    before = world.disk()
+
+    result = _shell_cmd(world, "add", ["NEW_KEY", f"--project={world.folder}"], ["write"])
+
+    assert result is None, repr(result)
+    assert "missing required scope 'inject'" in capsys.readouterr().err
+    assert world.disk() == before
+    assert world.read() is None
+
+
+def test_shell_add_project_abbreviation_refused_for_a_write_only_token(world, monkeypatch, capsys):
+    _no_prompt(monkeypatch)
+    before = world.disk()
+
+    result = _shell_cmd(world, "add", ["NEW_KEY", "--proj", str(world.folder)], ["write"])
+
+    assert result is None, repr(result)
+    assert "unrecognized arguments: --proj" in capsys.readouterr().err
+    assert world.disk() == before
+    assert world.read() is None
+
+
+def test_shell_add_project_abbreviation_hits_the_parsed_gate_when_argparse_allows_it(world, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_build_parser", _abbreviating_parser)
+    _no_prompt(monkeypatch)
+    before = world.disk()
+
+    result = _shell_cmd(world, "add", ["NEW_KEY", "--proj", str(world.folder)], ["write"])
+
+    assert result is None, repr(result)
+    assert "missing required scope 'inject'" in capsys.readouterr().err
+    assert world.disk() == before
+
+
+def test_shell_write_and_inject_token_may_add_with_a_project(world, monkeypatch, capsys):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "s3cret-value")
+
+    result = _shell_cmd(world, "add", ["NEW_KEY", f"--project={world.folder}", "--yes"], ["write", "inject"])
+
+    assert result is None, repr(result)
+    assert world.disk()["NEW_KEY"]["value"] == "s3cret-value"
+    assert "NEW_KEY=s3cret-value" in (world.read() or "")
+    assert "s3cret-value" not in capsys.readouterr().out
+
+
+def test_shell_master_session_may_inject_all(world, capsys):
+    result = _shell_cmd(world, "inject", ["--all", "--project", str(world.folder)], None, password=PASSWORD)
+
+    assert result is None, repr(result)
+    assert f"EXISTING={OLD}" in (world.read() or "")
+
+
+@pytest.mark.parametrize("argv", [
+    ["inject", "--al"],
+    ["add", "X", "--proj", "P"],
+    ["connect", "X", "--proj", "P"],
+    ["sync", "--proj", "P"],
+    ["project", "add", "P", "--na", "N"],
+    ["list", "--js"],
+])
+def test_argparse_abbreviations_are_unrecognized(argv, capsys):
+    code = _exit_code(lambda: cli._build_parser().parse_args(argv))
+
+    assert code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_top_level_option_abbreviation_is_unrecognized(capsys):
+    code = _exit_code(lambda: cli._build_parser().parse_args(["--pass", "x", "list"]))
+
+    assert code == 2
+
+
+# -- fix round 1: secret values never reach shell history (F2) -----------------------------------
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("add X sk-secret-123", True),
+    ("rotate X sk-secret-456", True),
+    ("set-backup X sk-secret-789", True),
+    ("ADD X sk-secret-123", True),
+    ("1 X sk-secret-123", True),
+    ("4 X sk-secret-456", True),
+    ('add X "sk secret 123"', True),
+    ("add X sk-secret-123 --project P --yes", True),
+    ("add --project P X sk-secret-123", True),
+    ('add X --notes "two words" sk-secret-123', True),
+    ("add X -- sk-secret-123", True),
+    ('add X "sk-unbalanced', True),
+    ("add X", False),
+    ("add", False),
+    ("1", False),
+    ("rotate X", False),
+    ("set-backup X", False),
+    ("add X --project P --yes", False),
+    ("add X --project=P --yes", False),
+    ("add X --project P -y", False),
+    ('add X --notes "two words"', False),
+    ("add X --notes=two", False),
+    ("add X --file .env.local --as FOO", False),
+    ("add X --confirm public_prefix --confirm env_mismatch", False),
+    ("add --project P X", False),
+    ("connect X --project P", False),
+    ("list", False),
+    ("get X", False),
+    ("inject --all", False),
+    ("project add P --name N", False),
+    ("", False),
+    ("   ", False),
+])
+def test_line_carries_value(line, expected):
+    assert cli._line_carries_value(line) is expected
+
+
+@pytest.mark.parametrize("cmd,rest,name", [
+    ("add", ["NEW_KEY", "sk-secret-123"], "add"),
+    ("1", ["NEW_KEY", "sk-secret-123"], "add"),
+    ("rotate", ["EXISTING", "sk-secret-456"], "rotate"),
+    ("set-backup", ["EXISTING", "sk-secret-789"], "set-backup"),
+])
+@pytest.mark.parametrize("scopes", [None, ["read", "write", "inject"]])
+def test_shell_refuses_a_line_that_carries_a_value(world, monkeypatch, capsys, cmd, rest, name, scopes):
+    _no_prompt(monkeypatch)
+    before = world.disk()
+
+    result = _shell_cmd(world, cmd, rest, scopes, password=PASSWORD if scopes is None else None)
+
+    assert result is None, repr(result)
+    captured = capsys.readouterr()
+    assert "Values typed here are saved to history." in captured.out + captured.err
+    assert f"Use `{name} NAME` and enter the value hidden." in captured.out + captured.err
+    assert world.disk() == before
+
+
+def test_shell_session_refuses_the_value_line_and_keeps_going(world, monkeypatch, capsys):
+    error = _shell(monkeypatch, ["add NEW_KEY sk-secret-123", "list", "exit"], world.vault, PASSWORD, world.vault_key)
+
+    assert error is None, repr(error)
+    assert "NEW_KEY" not in world.disk()
+    assert "Values typed here are saved to history." in capsys.readouterr().err
+
+
+class _FakeReadline:
+    """Records input lines like readline does and writes them out as the history file."""
+
+    def __init__(self, with_removal=False):
+        self.items = []
+        if with_removal:
+            self.get_current_history_length = lambda: len(self.items)
+            self.get_history_item = lambda pos: self.items[pos - 1]
+            self.remove_history_item = lambda pos: self.items.pop(pos)
+
+    def write_history_file(self, path):
+        Path(path).write_text("".join(item + "\n" for item in self.items), encoding="utf-8")
+
+
+def _session_with_history(monkeypatch, lines, world, rl):
+    feed = iter(lines)
+
+    def fake_input(prompt=""):
+        line = next(feed)
+        rl.items.append(line)
+        return line
+
+    monkeypatch.setattr(cli, "_setup_readline", lambda v, h: rl)
+    monkeypatch.setattr(cli, "_render_dashboard", lambda v: None)
+    monkeypatch.setattr(cli, "_render_stale_warnings", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": (_ for _ in ()).throw(EOFError()))
+    return _error_of(lambda: cli._run_repl_session(world.vault, PASSWORD, world.vault_key))
+
+
+@pytest.mark.parametrize("with_removal", [False, True])
+def test_history_file_never_holds_a_typed_value(world, monkeypatch, with_removal):
+    rl = _FakeReadline(with_removal=with_removal)
+    lines = ["add X sk-secret-123", "rotate X sk-secret-456", "list", "exit"]
+
+    error = _session_with_history(monkeypatch, lines, world, rl)
+
+    assert error is None, repr(error)
+    history = (pushkey_shared.VAULT_DIR / ".cli_history").read_text(encoding="utf-8")
+    assert "list" in history.split()
+    assert "sk-secret-123" not in history
+    assert "sk-secret-456" not in history
+
+
+def test_value_line_is_dropped_from_memory_right_after_input(world, monkeypatch):
+    rl = _FakeReadline(with_removal=True)
+    seen = []
+    real_handle = cli._handle_repl_command
+
+    def spy(*args, **kwargs):
+        seen.append(list(rl.items))
+        return real_handle(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_handle_repl_command", spy)
+
+    error = _session_with_history(monkeypatch, ["add X sk-secret-123", "exit"], world, rl)
+
+    assert error is None, repr(error)
+    assert seen[0] == []  # already gone when the command is handled
+
+
+def test_save_history_filters_value_lines(tmp_path):
+    rl = _FakeReadline()
+    rl.items = ["list", "add Y sk-old-secret", "get Z"]
+    target = tmp_path / ".cli_history"
+
+    cli._save_history(rl, target)
+
+    assert target.read_text(encoding="utf-8").splitlines() == ["list", "get Z"]
+
+
+def test_help_does_not_advertise_a_value_on_the_shell_add_line(capsys):
+    cli._print_help()
+
+    out = capsys.readouterr().out
+    assert "add [NAME VALUE]" not in out
+    assert "add NAME [--project PATH" in out
+
+
+# -- fix round 1: tab completion (F3) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["connect", "where", "sync", "project"])
+def test_shell_completion_offers_the_new_commands(command):
+    assert command in cli._REPL_COMMANDS
