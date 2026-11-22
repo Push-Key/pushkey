@@ -165,7 +165,7 @@ def _launch_desktop_app() -> None:
     sys.exit(EXIT_USAGE)
 
 
-def _run_repl_session(vault, password, vault_key=None):
+def _run_repl_session(vault, password, vault_key=None, scopes=None):
     history_file = _s.VAULT_DIR / ".cli_history"
     rl = _setup_readline(vault, history_file)
 
@@ -464,7 +464,7 @@ def cmd_list(args, vault, password, vault_key=None):
         print(f"{r['name']:<{w_name}}  {r['provider']:<{w_prov}}  {r['age']:>6}  {icon.get(r['status'], '?')} {r['status']}")
 
 
-def cmd_rotate(args, vault, password, vault_key=None):
+def cmd_rotate(args, vault, password, vault_key=None, scopes=None):
     name = args.name.upper()
     if name not in vault:
         print(f"Error: '{name}' not found", file=sys.stderr)
@@ -612,6 +612,34 @@ def cmd_import(args, vault, password, vault_key=None):
         _save_and_publish(vault, password, vault_key=vault_key)
         log_event(f"cli: imported {added} keys from {path.name}")
     print(f"Imported {added} key(s), skipped {skipped} existing")
+
+
+def cmd_connect(args, vault, password, vault_key=None):
+    pass  # RED stub
+
+
+def cmd_where(args, vault, password, vault_key=None):
+    pass  # RED stub
+
+
+def cmd_sync(args, vault, password, vault_key=None):
+    pass  # RED stub
+
+
+def cmd_project(args, vault, password, vault_key=None):
+    pass  # RED stub
+
+
+def _connect_error_exit(error):
+    pass  # RED stub
+
+
+def _split_shell_line(line):
+    return line.split()  # RED stub
+
+
+def _shell_required_scopes(cmd, rest):
+    return None  # RED stub
 
 
 def cmd_completion(args):
@@ -1070,7 +1098,7 @@ def _render_dashboard(vault):
     print(f"  {token_count} token(s). Use {C_CYAN}agents list{C_RESET}, {C_CYAN}agents create <name> read,write,inject{C_RESET}, {C_CYAN}agents revoke <token_id>{C_RESET}")
 
 
-def _render_stale_warnings(vault, password):
+def _render_stale_warnings(vault, password, vault_key=None, scopes=None):
     stale = []
     for name, info in vault.items():
         age = days_since(info.get("rotated") or info.get("created"))
@@ -1202,7 +1230,7 @@ def _repl_add(vault, password, vault_key=None):
     print(f"  {C_GREEN}✓ Added {name}{C_RESET}")
 
 
-def _repl_rotate(vault, password, name, vault_key=None):
+def _repl_rotate(vault, password, name, vault_key=None, scopes=None):
     if name not in vault:
         print(f"{C_RED}Unknown key. Try: list{C_RESET}")
         return
@@ -1396,7 +1424,7 @@ def _repl_agents(vault, password, vault_key, rest=None) -> None:
     print(f"{C_RED}Usage: agents [list|create|revoke]{C_RESET}")
 
 
-def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc):
+def _handle_repl_command(cmd, rest, vault, password, vault_key, app_proc, scopes=None):
     aliases = {"1": "add", "2": "get", "3": "inject", "4": "rotate", "5": "projects", "6": "agents", "7": "security", "8": "app"}
     cmd = aliases.get(cmd, cmd)
     if cmd in ("exit", "quit"):
