@@ -64,6 +64,8 @@ export type MockOptions = {
   projectPostReply?: MockReply;
   /** Answer to POST /api/projects/assign. */
   assignReplies?: MockReply[];
+  /** Answer to POST /api/projects/inject. */
+  injectReply?: MockReply;
   /** Every write the app sends (method, path, query, JSON body) is pushed here. */
   requests?: RecordedRequest[];
 };
@@ -305,6 +307,15 @@ export async function installRoutes(page: Page, locked: boolean, options: MockOp
     ];
     const reply = pickReply(replies, assignCount);
     assignCount += 1;
+    return json(route, reply.status, reply.body);
+  });
+
+  await page.route("**/api/projects/inject**", (route) => {
+    record(route);
+    const reply = options.injectReply ?? {
+      status: 200,
+      body: { injected: [], skipped_existing: [], env_file: "/work/admin-portal/.env", wrote: true, results: [] },
+    };
     return json(route, reply.status, reply.body);
   });
 

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -64,3 +65,18 @@ def test_written_false_is_not_a_quiet_noop():
     for text in (vault, projects):
         assert "Not written" in text
         assert "results" in text
+
+
+def test_inject_result_never_shows_a_failed_write_as_success():
+    projects = _read("components/projects-tab.tsx")
+    start = projects.index("function InjectResult")
+    end = projects.index("// ── expanded project panel")
+    result_view = projects[start:end]
+
+    # The failed files sit in their own alert region, apart from the status region.
+    assert 'role="alert"' in result_view
+    assert result_view.index('role="status"') < result_view.index('role="alert"')
+
+    # The success toast fires only when nothing failed; a failure gets an error toast.
+    assert re.search(r"failures\.length\s*===\s*0[^;]*toast\.success\(\"\.env injected\"\)", projects, re.S)
+    assert "toast.error(" in projects

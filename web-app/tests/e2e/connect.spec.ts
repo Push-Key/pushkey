@@ -345,3 +345,57 @@ test("Update all on a project reports every connection", async ({ page }) => {
   expect(syncs).toHaveLength(1);
   expect(syncs[0].body).toEqual({ project: "/work/admin-portal" });
 });
+
+async function openInject(page: Page, injectReply: { status: number; body: unknown }) {
+  await installRoutes(page, false, {
+    projects: [PROJECT_ADMIN],
+    keys: [KEY],
+    connections: [connection("up_to_date")],
+    injectReply,
+  });
+  await page.goto("/#t=launch-token", { waitUntil: "commit" });
+  await page.getByRole("button", { name: "Open Projects" }).click();
+  await page.getByRole("button", { name: /admin-portal/ }).first().click();
+  await page.getByRole("button", { name: "Inject environment file for admin-portal" }).click();
+}
+
+test("Inject .env names a file that was not written as an alert, not as success", async ({ page }) => {
+  await openInject(page, {
+    status: 200,
+    body: {
+      injected: ["OPENAI_API_KEY"],
+      skipped_existing: [],
+      env_file: "/work/admin-portal/.env",
+      wrote: true,
+      results: [
+        writtenResult({ file: ".env", var: "OPENAI_API_KEY" }),
+        writtenResult({ file: ".env.local", written: false, reason: "file_tracked_by_git", change: "none" }),
+      ],
+    },
+  });
+
+  const alert = page.getByRole("alert").filter({ hasText: ".env.local" });
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText(TRACKED);
+  await expect(page.getByText("Wrote:")).toHaveCount(0);
+  await expect(page.getByText(".env injected")).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: ".env.local" })).toHaveCount(0);
+  await expect(page.getByText("Some files were not written")).toBeVisible();
+});
+
+test("Inject .env with every file written keeps the green result and the success toast", async ({ page }) => {
+  await openInject(page, {
+    status: 200,
+    body: {
+      injected: ["OPENAI_API_KEY"],
+      skipped_existing: [],
+      env_file: "/work/admin-portal/.env",
+      wrote: true,
+      results: [writtenResult({ file: ".env", var: "OPENAI_API_KEY" })],
+    },
+  });
+
+  await expect(page.getByText("Wrote: /work/admin-portal/.env")).toBeVisible();
+  await expect(page.getByText(".env injected")).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "Not written" })).toHaveCount(0);
+});
