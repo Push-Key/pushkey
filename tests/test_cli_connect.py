@@ -262,6 +262,21 @@ def test_add_asks_for_each_extra_confirmation_and_stops_on_no(world, monkeypatch
     assert world.read() is None
 
 
+def test_add_yes_still_asks_the_extra_confirmation_when_interactive(world, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "y")
+    args = _add_args(
+        name="STRIPE_SECRET", value="whsec_dummy", project=str(world.folder), as_var="NEXT_PUBLIC_STRIPE", yes=True,
+    )
+
+    code = _exit_code(lambda: cli.cmd_add(args, world.vault, PASSWORD, world.vault_key))
+
+    assert asked == ["This name is bundled into browser code. Continue? [y/N] "]  # no plain Confirm?: --yes
+    assert code == 0
+    assert "NEXT_PUBLIC_STRIPE=whsec_dummy" in (world.read() or "")
+
+
 def test_add_without_yes_cannot_confirm_when_not_interactive(world, capsys):
     args = _add_args(name="STRIPE_SECRET", value="whsec_dummy", project=str(world.folder))
 
@@ -684,10 +699,14 @@ def test_shell_project_add_path_with_spaces(world, tmp_path, monkeypatch, capsys
 
 
 def test_shell_unbalanced_quote_prints_and_continues(world, monkeypatch, capsys):
-    error = _shell(monkeypatch, ['project add "oops', "exit"], world.vault, PASSWORD, world.vault_key)
+    seen = []
+    monkeypatch.setattr(cli, "_print_help", lambda: seen.append("help"))
+
+    error = _shell(monkeypatch, ['project add "oops', "help", "exit"], world.vault, PASSWORD, world.vault_key)
 
     assert error is None, repr(error)
     assert "Could not parse that line" in capsys.readouterr().out
+    assert seen == ["help"]  # the next line still ran
 
 
 def test_split_shell_line_strips_quotes_and_keeps_backslashes():
@@ -926,3 +945,46 @@ def test_connect_not_written_for_a_tracked_file_prints_the_sentence(world, monke
     assert code == 0
     assert "Connected, not written: file_tracked_by_git" in out
     assert "this file is committed to git; Pushkey will not write secrets into it" in out
+
+
+def test_shell_project_assign_and_inject_need_their_scopes(world, monkeypatch, capsys):
+    _no_prompt(monkeypatch)
+
+    _error_of(lambda: cli._handle_repl_command(
+        "project", ["assign", str(world.folder), "EXISTING"], world.vault, None, world.vault_key, None, scopes=["read", "inject"]))
+    _error_of(lambda: cli._handle_repl_command(
+        "project", ["inject", str(world.folder)], world.vault, None, world.vault_key, None, scopes=["read", "write"]))
+
+    err = capsys.readouterr().err
+    assert "missing required scope 'write'" in err
+    assert "missing required scope 'inject'" in err
+    assert world.disk()["EXISTING"].get("connections") in ([], None)
+
+
+def test_shell_command_exit_does_not_end_the_shell(world, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_desktop_app_candidates", lambda: [])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+
+    code = _exit_code(lambda: cli._handle_repl_command("desktop", [], world.vault, PASSWORD, world.vault_key, "proc"))
+
+    assert code == 0  # no SystemExit escaped
+    assert "Desktop app not found" in capsys.readouterr().err
+
+
+def test_shell_delegated_command_errors_stay_in_the_shell(world, monkeypatch, capsys):
+    error = _shell(monkeypatch, ["where NOPE", "where", "connect", "exit"], world.vault, PASSWORD, world.vault_key)
+
+    assert error is None, repr(error)
+    assert "key_not_found" in capsys.readouterr().err
+
+
+def test_inject_reports_a_connection_it_could_not_write(world, monkeypatch, capsys):
+    world.connect(write=False)
+    monkeypatch.setattr(pc, "_write_assignments", lambda project, file, values: pc._WriteOutcome("write_failed", {}, False))
+    args = Namespace(project=str(world.folder), all=False)
+
+    code = _exit_code(lambda: cli.cmd_inject(args, world.disk(), PASSWORD, world.vault_key))
+
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_IO
+    assert "Not written: EXISTING" in out and "write_failed" in out

@@ -142,17 +142,25 @@ def test_require_command_scope_none_means_full_access():
         cli._require_command_scope(command, None)  # must not raise
 
 
-@pytest.mark.parametrize("command,scope", sorted(cli._COMMAND_SCOPES.items()))
-def test_require_command_scope_allows_matching_scope(command, scope):
-    cli._require_command_scope(command, [scope])  # must not raise
+@pytest.mark.parametrize("command,scopes", sorted(cli._COMMAND_SCOPES.items()))
+def test_require_command_scope_allows_matching_scope(command, scopes):
+    cli._require_command_scope(command, list(scopes))  # must not raise
 
 
-@pytest.mark.parametrize("command,scope", sorted(cli._COMMAND_SCOPES.items()))
-def test_require_command_scope_denies_missing_scope(command, scope):
-    other = next(s for s in ("read", "write", "inject") if s != scope)
-    with pytest.raises(SystemExit) as exc:
-        cli._require_command_scope(command, [other])
-    assert exc.value.code == cli.EXIT_AUTH
+@pytest.mark.parametrize("command,scopes", sorted(cli._COMMAND_SCOPES.items()))
+def test_require_command_scope_denies_missing_scope(command, scopes):
+    # A token holding every scope except one the command needs is refused.
+    for needed in scopes:
+        held = [s for s in ("read", "write", "inject") if s != needed]
+        with pytest.raises(SystemExit) as exc:
+            cli._require_command_scope(command, held)
+        assert exc.value.code == cli.EXIT_AUTH
+    # And a token holding only scopes the command does not need is refused too.
+    others = [s for s in ("read", "write", "inject") if s not in scopes]
+    if others:
+        with pytest.raises(SystemExit) as exc:
+            cli._require_command_scope(command, others)
+        assert exc.value.code == cli.EXIT_AUTH
 
 
 def test_require_command_scope_read_cannot_write_or_inject():

@@ -55,6 +55,20 @@ def _vault_with_key():
     }
 
 
+def _saved_vault_with_key():
+    """The one-key vault saved on disk and loaded back (the connect core reloads from disk)."""
+    save_vault(_vault_with_key(), PASSWORD)
+    vault, _ = load_vault(PASSWORD)
+    return vault
+
+
+def _register_project(folder):
+    import pushkey_connect
+    folder.mkdir()
+    pushkey_connect.register_project(str(folder))
+    return folder
+
+
 def _subprocess_env(home: Path, password: str | None = PASSWORD) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
@@ -337,7 +351,7 @@ def test_cmd_list_empty_vault(capsys):
 # ── rotate ───────────────────────────────────────────────────────────────────
 
 def test_cmd_rotate_updates_value(capsys):
-    vault = _vault_with_key()
+    vault = _saved_vault_with_key()
     args = Namespace(name="OPENAI_API_KEY", new_value="sk-new-value")
     cli.cmd_rotate(args, vault, PASSWORD)
     assert vault["OPENAI_API_KEY"]["value"] == "sk-new-value"
@@ -347,7 +361,7 @@ def test_cmd_rotate_updates_value(capsys):
 
 
 def test_cmd_rotate_saves_history():
-    vault = _vault_with_key()
+    vault = _saved_vault_with_key()
     args = Namespace(name="OPENAI_API_KEY", new_value="sk-v2")
     cli.cmd_rotate(args, vault, PASSWORD)
     assert vault["OPENAI_API_KEY"]["history"][0]["value"] == "sk-test123"
@@ -456,9 +470,8 @@ def test_completion_powershell_outputs_commands(capsys):
 # ── inject ───────────────────────────────────────────────────────────────────
 
 def test_cmd_inject_all_flag_writes_env(tmp_path, capsys):
-    project = tmp_path / "myproject"
-    project.mkdir()
-    vault = _vault_with_key()
+    project = _register_project(tmp_path / "myproject")
+    vault = _saved_vault_with_key()
     args = Namespace(project=str(project), all=True)
     cli.cmd_inject(args, vault, PASSWORD)
     env_file = project / ".env"
@@ -468,9 +481,8 @@ def test_cmd_inject_all_flag_writes_env(tmp_path, capsys):
 
 
 def test_cmd_inject_adds_gitignore(tmp_path, capsys):
-    project = tmp_path / "proj"
-    project.mkdir()
-    vault = _vault_with_key()
+    project = _register_project(tmp_path / "proj")
+    vault = _saved_vault_with_key()
     args = Namespace(project=str(project), all=True)
     cli.cmd_inject(args, vault, PASSWORD)
     gi = project / ".gitignore"
@@ -478,21 +490,20 @@ def test_cmd_inject_adds_gitignore(tmp_path, capsys):
     assert ".env" in gi.read_text()
 
 
-def test_cmd_inject_no_assignment_no_all_exits(tmp_path):
-    project = tmp_path / "empty_proj"
-    project.mkdir()
-    vault = _vault_with_key()
+def test_cmd_inject_no_connections_no_all_writes_nothing(tmp_path, capsys):
+    project = _register_project(tmp_path / "empty_proj")
+    vault = _saved_vault_with_key()
     args = Namespace(project=str(project), all=False)
-    with pytest.raises(SystemExit):
-        cli.cmd_inject(args, vault, PASSWORD)
+    cli.cmd_inject(args, vault, PASSWORD)
+    assert "No keys are connected to" in capsys.readouterr().out
+    assert not (project / ".env").exists()
 
 
 def test_cmd_inject_updates_existing_env(tmp_path, capsys):
-    project = tmp_path / "proj2"
-    project.mkdir()
+    project = _register_project(tmp_path / "proj2")
     env_file = project / ".env"
     env_file.write_text("OPENAI_API_KEY=old-value\nOTHER=keep\n", encoding="utf-8")
-    vault = _vault_with_key()
+    vault = _saved_vault_with_key()
     args = Namespace(project=str(project), all=True)
     cli.cmd_inject(args, vault, PASSWORD)
     content = env_file.read_text()
@@ -659,13 +670,14 @@ def test_launch_desktop_app_exits_cleanly_when_missing(monkeypatch, capsys):
 def test_unlock_into_repl_marks_seen_and_runs_session(monkeypatch):
     calls = []
     args = Namespace(password=None)
-    monkeypatch.setattr(cli, "_open_vault", lambda _args: ({"OPENAI_API_KEY": {}}, PASSWORD, "vk", None))
+    monkeypatch.setattr(cli, "_open_vault", lambda _args: ({"OPENAI_API_KEY": {}}, None, "vk", ["read"]))
     monkeypatch.setattr(cli, "_mark_cli_onboarding_seen", lambda: calls.append("marked"))
-    monkeypatch.setattr(cli, "_run_repl_session", lambda vault, password, vault_key: calls.append((vault, password, vault_key)))
+    monkeypatch.setattr(cli, "_run_repl_session", lambda vault, password, vault_key, scopes=None: calls.append((vault, password, vault_key, scopes)))
 
     cli._unlock_into_repl(args)
 
-    assert calls == ["marked", ({"OPENAI_API_KEY": {}}, PASSWORD, "vk")]
+    # the token's scopes reach the shell (it used to drop them)
+    assert calls == ["marked", ({"OPENAI_API_KEY": {}}, None, "vk", ["read"])]
 
 
 def test_pre_unlock_shell_marks_first_run_and_accepts_help_then_exit(monkeypatch):
@@ -725,7 +737,7 @@ def test_run_repl_session_supports_about_and_agents(monkeypatch):
     monkeypatch.setattr(cli, "_setup_readline", lambda vault, history_file: None)
     monkeypatch.setattr(cli, "_save_history", lambda rl, history_file: None)
     monkeypatch.setattr(cli, "_render_dashboard", lambda vault: seen.append("dashboard"))
-    monkeypatch.setattr(cli, "_render_stale_warnings", lambda vault, password: seen.append("warnings"))
+    monkeypatch.setattr(cli, "_render_stale_warnings", lambda vault, password, vault_key=None, scopes=None: seen.append("warnings"))
     monkeypatch.setattr(cli, "_print_help", lambda: seen.append("about"))
     monkeypatch.setattr(cli, "_print_agent_help", lambda: seen.append("agents"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(prompts))
@@ -752,7 +764,7 @@ def test_render_dashboard_shows_branding_and_quick_actions(capsys, monkeypatch):
 def test_project_add_and_assign_flow(tmp_path):
     project_dir = tmp_path / "demo"
     project_dir.mkdir()
-    vault = _vault_with_key()
+    vault = _saved_vault_with_key()
 
     cli._repl_project_add(str(project_dir))
     cli._repl_project_assign(vault, PASSWORD, str(project_dir), ["OPENAI_API_KEY"])
@@ -766,7 +778,7 @@ def test_project_add_and_assign_flow(tmp_path):
 def test_repl_projects_lists_registered_projects(capsys, tmp_path):
     project_dir = tmp_path / "demo"
     project_dir.mkdir()
-    vault = _vault_with_key()
+    vault = _saved_vault_with_key()
     cli._repl_project_add(str(project_dir))
     cli._repl_project_assign(vault, PASSWORD, str(project_dir), ["OPENAI_API_KEY"])
 
