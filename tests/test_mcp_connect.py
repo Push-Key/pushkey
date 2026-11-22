@@ -41,7 +41,7 @@ def cheap_key_derivation(monkeypatch):
     Nothing here is about the KDF; tests/test_vault_crypto.py covers the real one.
     """
     monkeypatch.setattr(
-        pushkey_crypto, "_derive_key_argon2",
+        pushkey_crypto, "_derive_key_argon2",  # gitleaks:allow
         lambda password, salt: hashlib.sha256(salt + password.encode()).digest(),
     )
 
@@ -390,7 +390,7 @@ def test_rotate_to_backup_syncs_connected_file(world):
 def test_rotate_key_syncs_connected_file(world):
     world.connect()
 
-    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")
+    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")  # gitleaks:allow
 
     assert reply["success"] is True and "MCP client context" in reply["warning"]
     assert _only(_get(reply, "synced"))["written"] is True
@@ -424,7 +424,7 @@ def test_mcp_rotate_without_inject_lists_not_synced(world):
     world.connect()
     world.mod._SESSION["scopes"] = ["read", "write"]
 
-    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")
+    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")  # gitleaks:allow
 
     assert reply["success"] is True
     assert _get(reply, "not_synced") == [{"project": world.project, "file": ".env", "var": KEY}]
@@ -460,7 +460,7 @@ def test_mcp_sync_failure_after_rotate_is_a_code_only_field(world, monkeypatch, 
 
     monkeypatch.setattr(pushkey_connect, "sync", boom)
 
-    reply = _ok(lambda: world.mod.rotate_key(KEY, "tok_dummy_rotated456"))
+    reply = _ok(lambda: world.mod.rotate_key(KEY, "tok_dummy_rotated456"))  # gitleaks:allow
 
     assert reply["success"] is True and _get(reply, "sync_error") == code
     assert "tok_dummy_rotated456" not in json.dumps({k: v for k, v in reply.items() if k != "warning"})
@@ -490,7 +490,7 @@ def test_add_key_warning_text_unchanged(world):
 
 
 def test_rotate_and_backup_warning_text_unchanged(world):
-    rotated = world.mod.rotate_key(KEY, "tok_dummy_rotated456")
+    rotated = world.mod.rotate_key(KEY, "tok_dummy_rotated456")  # gitleaks:allow
     backup = world.mod.set_backup_key(KEY, "tok_dummy_backup777")
 
     assert rotated["warning"] == (
@@ -675,7 +675,7 @@ def test_mcp_token_session_rotate_syncs_through_the_core(world):
     world.connect()
     world.token_session(["read", "write", "inject"])
 
-    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")
+    reply = world.mod.rotate_key(KEY, "tok_dummy_rotated456")  # gitleaks:allow
 
     assert reply["success"] is True and _only(_get(reply, "synced"))["written"] is True
     assert f"{KEY}=tok_dummy_rotated456" in world.env()

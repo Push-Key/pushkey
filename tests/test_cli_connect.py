@@ -91,7 +91,7 @@ def isolated(monkeypatch):
     monkeypatch.delenv("PUSHKEY_AGENT_TOKEN", raising=False)
     # One SHA-256 instead of Argon2id: nothing here is about the KDF.
     monkeypatch.setattr(
-        pushkey_crypto, "_derive_key_argon2",
+        pushkey_crypto, "_derive_key_argon2",  # gitleaks:allow
         lambda password, salt: hashlib.sha256(salt + password.encode()).digest(),
     )
     monkeypatch.setattr(pushkey_tiers, "current_tier", lambda: "team")

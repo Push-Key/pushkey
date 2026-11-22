@@ -85,7 +85,7 @@ def _stored(name=KEY):
 def cheap_key_derivation(monkeypatch):
     """One SHA-256 instead of Argon2id (64 MB, 3 passes); nothing here is about the KDF."""
     monkeypatch.setattr(
-        pushkey_crypto, "_derive_key_argon2",
+        pushkey_crypto, "_derive_key_argon2",  # gitleaks:allow
         lambda password, salt: hashlib.sha256(salt + password.encode()).digest(),
     )
 

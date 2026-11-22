@@ -109,7 +109,7 @@ def cheap_key_derivation(monkeypatch):
     Nothing here is about the KDF; tests/test_vault_crypto.py covers the real one.
     """
     monkeypatch.setattr(
-        pushkey_crypto, "_derive_key_argon2",
+        pushkey_crypto, "_derive_key_argon2",  # gitleaks:allow
         lambda password, salt: hashlib.sha256(salt + password.encode()).digest(),
     )
 
