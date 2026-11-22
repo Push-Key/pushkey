@@ -102,31 +102,36 @@ def provider_supports_multi_key(provider_name: str) -> bool:
 
 
 # tzinfo used to read timezone-less datetimes; None means this machine's local time.
-# Tests pin a zone here because time.tzset does not exist on Windows.
+# It exists so tests can pin a zone, because time.tzset does not exist on Windows.
 LOCAL_TZ = None
 
 
 def as_utc(value):
-    """RED stub: still reads naive values as UTC."""
-    if value.tzinfo is None:
+    """Return an aware UTC datetime. Naive values are read as local time.
+
+    Every writer stamps key dates with naive local time (datetime.now()), so a naive value
+    is this machine's local time (LOCAL_TZ when pinned), not UTC.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    if LOCAL_TZ is not None:
+        return value.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    try:
+        return value.astimezone(timezone.utc)  # Python reads a naive value as system local time, DST-aware
+    except (OSError, OverflowError):
+        # Windows cannot convert dates before 1970 (or at the edge of datetime) through the C
+        # library. At that distance a few hours of offset cannot change the health status (an age
+        # can shift by one day), so read the value as UTC rather than failing.
         return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def days_since_at(date_str, now):
-    """Return whole elapsed days with naive datetimes interpreted as UTC."""
+    """Return whole elapsed days; naive values are read as this machine's local time."""
     if not date_str or not isinstance(now, datetime):
         return float("inf")
     try:
-        dt = datetime.fromisoformat(date_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-        else:
-            now = now.astimezone(timezone.utc)
+        dt = as_utc(datetime.fromisoformat(date_str))
+        now = as_utc(now)
         if dt > now:
             return float("inf")
         return (now - dt).days

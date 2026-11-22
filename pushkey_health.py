@@ -15,7 +15,7 @@ from pathlib import Path
 import pushkey_shared as _s
 from pushkey_locking import FileLockTimeout, bounded_file_lock
 from pushkey_vault import _current_encrypted_vault_revision, _vault_write_guard
-from pushkey_providers import health_status_at
+from pushkey_providers import as_utc, health_status_at
 
 
 _MAX_BYTES = 1_048_576
@@ -196,11 +196,7 @@ def _parse_source_date(value, now):
     if not isinstance(value, str):
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        else:
-            parsed = parsed.astimezone(timezone.utc)
+        parsed = as_utc(datetime.fromisoformat(value))
         if parsed > now:
             return None
         return parsed

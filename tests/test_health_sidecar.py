@@ -186,6 +186,13 @@ def test_build_reads_a_date_only_stamp_as_local_date_east_of_utc(monkeypatch):
     assert record["days_old"] == 0
 
 
+def test_build_ages_a_pre_1970_naive_stamp_instead_of_failing():
+    # Windows cannot convert pre-1970 naive datetimes to UTC through the C library.
+    record = build_health_document({"KEY": {"created": "1969-12-31"}}, generated_at=NOW)["keys"]["KEY"]
+    assert record["status"] == "critical"
+    assert 20000 < record["days_old"] < 365_000
+
+
 def test_build_reads_a_naive_stamp_as_local_time_west_of_utc(monkeypatch):
     zone = timezone(timedelta(hours=-8))
     monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", zone)

@@ -102,6 +102,26 @@ def test_days_since_at_reads_naive_values_as_local_time(monkeypatch, offset_hour
     assert days_since_at(date_str, now) == expected
 
 
+@pytest.mark.parametrize("date_str", ["1969-12-31", "0001-01-02T00:00:00"])
+def test_days_since_at_reads_dates_the_platform_cannot_localize(date_str):
+    # Windows cannot convert pre-1970 naive datetimes to UTC; they must still age, not fail.
+    now = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+    assert 20000 < days_since_at(date_str, now) < float("inf")
+
+
+@pytest.mark.parametrize(("offset_hours", "value", "expected"), [
+    (10, datetime(2026, 1, 10, 22, 0), datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)),
+    (-8, datetime(2026, 1, 10, 4, 0), datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)),
+    (10, datetime(2026, 1, 10, 22, 0, tzinfo=timezone(timedelta(hours=3))),
+     datetime(2026, 1, 10, 19, 0, tzinfo=timezone.utc)),
+])
+def test_as_utc_reads_naive_values_in_the_pinned_zone_and_keeps_aware_offsets(monkeypatch, offset_hours, value, expected):
+    monkeypatch.setattr(pushkey_providers, "LOCAL_TZ", timezone(timedelta(hours=offset_hours)))
+    result = pushkey_providers.as_utc(value)
+    assert result == expected
+    assert result.utcoffset() == timedelta(0)
+
+
 @pytest.fixture
 def system_timezone():
     previous = os.environ.get("TZ")
