@@ -131,7 +131,8 @@ _BOUND = (
     "_update_project_record", "_try_update_project_record", "import_vault", "_inline_inject",
     "_run_scan", "_run_git_scan", "_apply_rotation", "_promote_backup_key", "_submit_add_key",
     "_add_wants_connection", "_add_connection_choice", "_sync_results", "_show_sync_results",
-    "_register_folder_for_add", "_used_in_update_now", "_used_in_disconnect",
+    "_register_folder_for_add", "_used_in_update_now", "_used_in_disconnect", "_stamp_written",
+    "_keep_category", "_project_label",
 )
 
 
@@ -913,9 +914,11 @@ def test_add_key_with_connection_keeps_the_chosen_category(world, box):
     assert world.app.vault.get(NEW_KEY, {}).get("category") == "AI"
 
 
-def test_add_key_write_failure_after_the_vault_save_still_closes_the_window(world, box):
+def test_add_key_write_failure_after_the_vault_save_still_closes_the_window(world, box, monkeypatch):
     project = world.register("acme")
-    (Path(project) / ".env").mkdir()  # an env file that cannot be written
+    monkeypatch.setattr(  # the file passes every check, then the write itself fails
+        pushkey_connect, "_write_assignments",
+        lambda *a, **k: pushkey_connect._WriteOutcome("write_failed", {}, False))
     world.fill(NEW_KEY, NEW, env="dev")
     world.pick(project, ".env", NEW_KEY)
 
@@ -1234,12 +1237,14 @@ def test_used_in_disconnect_declined_changes_nothing(world, box):
 
 
 def test_expand_panel_has_a_used_in_block_instead_of_project_pills():
-    source = inspect.getsource(pushkey.AppFrame._render_expand_panel)
+    panel = inspect.getsource(pushkey.AppFrame._render_expand_panel)
+    block = inspect.getsource(pushkey.AppFrame._render_used_in)
 
-    assert '"USED IN"' in source and "_used_in_rows" in source
-    assert '"PROJECTS"' not in source
-    assert "Not used in any project yet. Connect it from Add or the project's Keys screen." in source
-    assert "_used_in_update_now" in source and "_used_in_disconnect" in source
+    assert "_render_used_in" in panel and '"PROJECTS"' not in panel
+    assert '"USED IN"' in block and "_used_in_rows" in block
+    assert "Not used in any project yet. Connect it from Add or the project's Keys screen." in block
+    assert "_used_in_update_now" in block and "_used_in_disconnect" in block
+    assert '"Update now"' in block and '"Disconnect"' in block
 
 
 # -- connect preview wording, adding a folder -----------------------------------------------
@@ -1274,6 +1279,12 @@ def test_connect_preview_lines_in_plain_words():
     ]
 
     assert pushkey._connect_preview_lines(_preview(change="none"))[1] == ".env.local already holds this value."
+
+
+def test_add_connect_default_is_off_for_an_existing_key():
+    assert pushkey._add_connect_default(True, False) is True  # a suggested project, a new key
+    assert pushkey._add_connect_default(False, False) is False  # nothing suggested
+    assert pushkey._add_connect_default(True, True) is False  # a rotation does not add connections
 
 
 def test_register_folder_for_add_registers_and_returns_the_path(world, box):
@@ -1356,13 +1367,14 @@ def _notice_world(world, count=2):
 
 def test_notice_later_does_not_dismiss(world, box, monkeypatch):
     _folders, notice = _notice_world(world)
+    dismissed = []
     monkeypatch.setattr(
-        pushkey.pushkey_connect_migrate, "dismiss_notice",
-        lambda: pytest.fail("Later must not dismiss the notice"))
+        pushkey.pushkey_connect_migrate, "dismiss_notice", lambda: dismissed.append("dismissed"))
     app, win = NoticeApp(), FakeWin()
 
     _ok(lambda: app._notice_later(win))
 
+    assert dismissed == [], "Later must not dismiss the notice"
     assert win.destroyed is True
     assert load_config(strict=True)["connect_notice"] == notice
     assert box.calls == []
@@ -1405,6 +1417,15 @@ def test_notice_only_the_hide_button_can_dismiss():
     assert "WM_DELETE_WINDOW" in builder and "_notice_later" in builder
     assert "CTkCheckBox" not in builder and "show again" not in builder
     assert "Hide this notice" in builder and "Later" in builder and "Pick keys" in builder
+
+
+def test_notice_closing_the_window_does_not_dismiss():
+    """The dialog's own X is the "Later" path, never the "Hide this notice" path (ruling S7)."""
+    builder = inspect.getsource(pushkey.PushkeyApp._open_connect_notice)
+    handlers = re.findall(r"\.protocol\(\s*[\"']WM_DELETE_WINDOW[\"']\s*,([^\n]*)\)", builder)
+    assert len(handlers) == 1, handlers
+    assert "_notice_later" in handlers[0], handlers[0]
+    assert "_notice_hide" not in handlers[0] and "dismiss_notice" not in handlers[0], handlers[0]
 
 
 def test_show_connect_notice_opens_the_modal_with_names_only(world, box):

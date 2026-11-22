@@ -486,9 +486,14 @@ class FakeApp:
     def __init__(self):
         self.events = []
         self.root = None
+        self.opened = []  # the notice modal is a recorder here (no Tk root)
         self.on_login = types.MethodType(pushkey.PushkeyApp.on_login, self)
         self._migrate_at_login = types.MethodType(pushkey.PushkeyApp._migrate_at_login, self)
         self._show_connect_notice = types.MethodType(pushkey.PushkeyApp._show_connect_notice, self)
+        self._notice_hide = types.MethodType(pushkey.PushkeyApp._notice_hide, self)
+
+    def _open_connect_notice(self, view):
+        self.opened.append(view)
 
     def switch(self, cls, **kw):
         self.events.append(("switch", kw["vault"]))
@@ -624,31 +629,36 @@ def _notice_world(tmp_path):
     save_config({"projects": {}, "connect_schema": 1, "connect_notice": NOTICE})
 
 
-def test_desktop_login_notice_dismissed_on_yes(tmp_path, box):
+def test_desktop_login_notice_opens_the_modal_and_dismisses_nothing(tmp_path, box):
+    # Changed in task 13: the notice is a modal with Later / Hide buttons, not two message boxes.
     _notice_world(tmp_path)
-    box.answer = True
     app = FakeApp()
 
     app._show_connect_notice()
 
-    info = box.of("info")
-    assert len(info) == 1 and info[0][1] == "Projects were updated"
-    text = info[0][2]
-    for expected in ("C:/work/acme", "PROD_KEY", "lost", "OTHER_KEY", "C:/work/elsewhere"):
+    assert box.calls == []  # no message boxes any more
+    assert len(app.opened) == 1
+    text = repr(app.opened[0])
+    for expected in ("acme", "PROD_KEY", "lost", "OTHER_KEY", "C:/work/elsewhere"):
         assert expected in text
-    assert box.of("askyesno") == [("askyesno", "Pushkey", "Hide this notice from now on?")]
-    assert "connect_notice" not in load_config(strict=True)
+    assert load_config(strict=True)["connect_notice"] == NOTICE  # showing it keeps it
 
 
-def test_desktop_login_notice_kept_on_no(tmp_path, box):
+def test_desktop_login_notice_hide_button_dismisses(tmp_path, box):
     _notice_world(tmp_path)
-    box.answer = False
     app = FakeApp()
 
-    app._show_connect_notice()
+    class Win:
+        destroyed = False
 
-    assert len(box.of("info")) == 1 and len(box.of("askyesno")) == 1
-    assert load_config(strict=True)["connect_notice"] == NOTICE
+        def destroy(self):
+            self.destroyed = True
+
+    win = Win()
+    app._notice_hide(win)
+
+    assert win.destroyed and "connect_notice" not in load_config(strict=True)
+    assert box.calls == []
 
 
 def test_desktop_login_shows_the_notice_once_the_frame_is_built(tmp_path, box, monkeypatch):
@@ -656,13 +666,13 @@ def test_desktop_login_shows_the_notice_once_the_frame_is_built(tmp_path, box, m
     _notice_world(tmp_path)
     vault, key = load_vault(PASSWORD)
     app = FakeApp()
-    shown_before_switch = []
-    app.switch = lambda cls, **kw: shown_before_switch.append(len(box.calls))
+    opened_before_switch = []
+    app.switch = lambda cls, **kw: opened_before_switch.append(len(app.opened))
 
     app.on_login(PASSWORD, vault, key)
 
-    assert shown_before_switch == [0]  # nothing was shown while the frame was still unbuilt
-    assert len(box.of("info")) == 1 and len(box.of("askyesno")) == 1
+    assert opened_before_switch == [0]  # nothing was shown while the frame was still unbuilt
+    assert len(app.opened) == 1 and box.calls == []
 
 
 def test_desktop_login_no_notice_means_no_dialog(tmp_path, box):
@@ -672,7 +682,7 @@ def test_desktop_login_no_notice_means_no_dialog(tmp_path, box):
 
     app._show_connect_notice()
 
-    assert box.calls == []
+    assert box.calls == [] and app.opened == []
 
 
 def test_desktop_login_empty_notice_means_no_dialog(tmp_path, box):
@@ -696,6 +706,13 @@ def test_desktop_login_notice_dismiss_failure_warns_once(tmp_path, box, monkeypa
     monkeypatch.setattr(pushkey_connect_migrate, "dismiss_notice", boom)
     app = FakeApp()
 
-    app._show_connect_notice()
+    class Win:
+        destroyed = False
 
-    assert len(box.of("warning")) == 1
+        def destroy(self):
+            self.destroyed = True
+
+    win = Win()
+    app._notice_hide(win)  # the Hide button (changed in task 13: it used to be a yes/no question)
+
+    assert len(box.of("warning")) == 1 and not win.destroyed
