@@ -31,7 +31,7 @@ used by that file must have a matching route in `pushkey_local_api.py`.
 | POST | `/api/logout` | Revoke the current browser session token and clear unlocked vault state. |
 | POST | `/api/unlock` | Unlock with master password, recovery code or agent token. A master-password unlock also runs the one-time project store migration; a failing migration never blocks the unlock. |
 | POST | `/api/lock` | Clear the in-memory unlocked session. |
-| GET | `/api/keys` | List masked key summaries. |
+| GET | `/api/keys` | List masked key summaries, each with its connection count (`connections`). |
 | POST | `/api/keys` | Add a key [write]. An optional `connect` object (`project`, optional `file`, `var`, `confirmed`) also connects it to a registered project's env file [write and inject]. `overwrite=true` replaces the value the way a rotation does, keeps the key's connections and syncs them. |
 | GET | `/api/keys/{name}` | Reveal one key's detail. |
 | PATCH | `/api/keys/{name}` | Update key metadata. |
@@ -44,14 +44,14 @@ used by that file must have a matching route in `pushkey_local_api.py`.
 | DELETE | `/api/projects` | Delete a project registration selected by query parameter, and every key's connections to it (master-password session only). |
 | POST | `/api/projects/assign` | Connect keys to a project selected by query parameter [write], using the project's default file and the key name as variable; no file is written. An environment mismatch or browser-bundled name needs `confirmed`. |
 | POST | `/api/projects/unassign` | Disconnect keys from a project selected by query parameter [write]; a named key also loses its allowlist entry for the project. |
-| POST | `/api/projects/inject` | Preview or write the project's connected variables [inject]; connected values are replaced, other variables are left alone, and explicit `keys` must be connected. Named keys are written in one pass (one backup per file). |
+| POST | `/api/projects/inject` | Preview or write the project's connected variables [inject]; connected values are replaced, other variables are left alone, and explicit `keys` must be connected. Named keys are written in one pass (one backup per file). A write answers `injected`, `env_file`, `wrote` and a per-connection `results` list (`written`, `reason`); `skipped_existing` is always empty. A result with `written: false` was not written: show it as a failure. |
 | POST | `/api/connections/preview` | Preview a connection [read]: the confirmation line, what would change and what needs confirming. A body with `value` or `env` (a key not saved yet) also needs [write]. |
 | POST | `/api/connections` | Connect a key to a variable in a registered project's env file and write it [write and inject]. |
 | DELETE | `/api/connections` | Remove one connection, selected by key, project, file and variable in the body [write]. |
 | GET | `/api/connections` | List connections with their state, optionally for one `key` and/or `project` [read]. |
 | POST | `/api/connections/sync` | Rewrite connected variables with the keys' current values, optionally for one `key` and/or `project` [inject]. |
 | GET | `/api/connections/suggest` | Suggest projects, files and variable names for a `key` [read]. |
-| GET | `/api/connect/notice` | Read the one-time notice the project migration left [read]. |
+| GET | `/api/connect/notice` | Read the one-time notice the project migration left [read]. Answers `{"notice": null}` or `{"notice": {"every_key_projects": [path], "env_skipped": [[desktop name, key]], "unusable": [name], "unregistered": [[key, path]]}}`: names and paths only. The notice stays until it is dismissed. |
 | DELETE | `/api/connect/notice` | Dismiss that notice [write]. |
 | GET | `/api/health` | Return vault health classification for the local dashboard. |
 | GET | `/api/forecast` | Return upcoming rotation forecast. |

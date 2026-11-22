@@ -54,13 +54,61 @@ web app, and cloud sync is opt-in.
 
 ## Deferred — local `.env` handling regressions
 
-- **`.env` plaintext backups are no longer pruned.** The consolidated
-  `mutate_env_file` writes `.env.pushkey_backup_*` snapshots but never prunes
-  to the most-recent few, so they accumulate in project directories. They are
-  not covered by the `.env` gitignore entry the tool writes.
-- **`.env` is read as strict UTF-8.** A single invalid byte in an existing
-  `.env` now raises `UnicodeDecodeError` on the inject paths instead of being
-  tolerated. Rare, but a regression from the prior `errors="ignore"` read.
+- **Env file backups moved out of the project.** Before Pushkey changes a
+  project env file it copies the old one to
+  `~/.pushkey/env-backups/<project id>/` and keeps the newest 3 per file. The
+  copies are plaintext (so is the env file itself) and sit outside the
+  project, so they cannot be committed. Old `.env.pushkey_backup_*` files from
+  earlier versions are still ignored by the project's `.gitignore` but are not
+  deleted automatically; delete them by hand.
+- **`.env` is read as strict UTF-8.** The connect, sync and inject paths
+  (CLI, local API, MCP and the desktop connect screens) refuse an env file with
+  an invalid byte (`invalid_env_file`) and leave it untouched. The older
+  `inject_env_file` helper in `pushkey.py` (used by its command-line inject)
+  still reads strictly and can raise `UnicodeDecodeError`.
+
+## Deferred — add-and-connect
+
+Known limits of connecting keys to projects. None loses a key; they are listed
+so testers are not surprised.
+
+- **`.gitignore` coverage is checked against the project's root `.gitignore`
+  only.** A nested `.gitignore` with a negation (for example `!.env.local` in a
+  subfolder) is not seen. If git is missing, times out, or `git ls-files`
+  fails, the file is treated as not tracked. A crashed write can leave a
+  `.pushkey-*` temp file that holds a secret and is not ignored.
+- **Edge cases in env file text.** A value ending in a backslash, written in
+  double quotes, can make python-dotenv drop the whole file when a later line
+  has a double quote. A variable with an unterminated quote can delete lines
+  that the Next.js dotenv loader still reads as live. New lines use LF even in a
+  CRLF file.
+- **Backup names can collide.** `a/b` and `a__b` flatten to the same backup
+  name.
+- **A partial failure is reported per file.** Replacing a key rewrites every
+  connected file in one pass. A file that fails says why (`written: false`
+  with a reason), the connection stays, and `sync` retries it. After a partial
+  failure the reply can list `synced: []` although some files were written.
+- **`rotated` is a timestamp** (`%Y-%m-%dT%H:%M:%S`) on entries written by
+  rotate, promote or connect; older entries keep a date. Readers accept both.
+- **Windows file locking.** `config.json` replacement can fail with
+  `PermissionError` while another program holds the file open, and the very
+  first lock-file creation can race. Nothing is written in either case. A
+  password unlock waits up to 5 seconds for the config lock, then continues
+  without migrating.
+- **Interactive shell.** Values typed in the shell are refused and never saved
+  to history. A typed value that starts with `-` is not recognised as a value,
+  and macOS libedit history can keep escaped lines. An `unrecognized arguments`
+  error can echo part of an unquoted value (also true of the one-shot CLI).
+- **One-time migration.** It copies the desktop's extra fields (such as `ci_*`
+  and `github_*`) unfiltered, rewrites the vault even when there was nothing
+  to move, and keeps `projects_legacy` forever. `ensure_migrated` runs on every
+  master-password CLI command; its cost is unmeasured.
+- **Disconnect leaves the line in the file.** `DELETE /api/connections` and the
+  desktop and web "Disconnect" stop future writes but never remove the line
+  already written. `POST /api/connections/sync` with no key also syncs
+  internal `_`-prefixed entries that have connections.
+- **Desktop.** Changing the master password, or importing a vault, while
+  another Pushkey process saved can lose that change until the next unlock.
 
 ## Deferred — CLI parity
 

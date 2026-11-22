@@ -226,14 +226,14 @@ The server cannot decrypt your vault. If the server is compromised, attackers ge
 
 | Threat | Mitigation |
 |--------|-----------|
-| Disk read by another process | Vault + config + log are encrypted at rest. POSIX installs request mode `0600`; Windows `chmod` does not prove restrictive ACLs, so Windows ACL enforcement/testing remains a production-readiness task. |
+| Disk read by another process | Vault + config + log are encrypted at rest. POSIX installs request mode `0600` (`config.json` too); Windows `chmod` does not prove restrictive ACLs, so Windows ACL enforcement/testing remains a production-readiness task. Project env files and `~/.pushkey/env-backups/` (copies of env files before Pushkey changes them) are plaintext by nature. |
 | Weak master password | Argon2id with 64 MB memory cost makes brute-force expensive |
 | Forgotten master password | Recovery code (independent Argon2id slot) |
 | Lost recovery code + forgotten password | No recovery possible, this is by design |
 | Vault file tampering | AES-GCM authentication tag detects any modification |
 | Partial write / corruption | Atomic `os.replace()` writes; 3 rolling backups at `vault_backup_*.enc` |
 | Cloud server compromise | Zero-knowledge, server stores only ciphertext |
-| Key accidentally committed to git | Git scan (Starter+) + `inject` always writes `.gitignore` guard |
+| Key accidentally committed to git | Git scan (Starter+) + every connected file is listed in `.gitignore` before it is written, and a file git already tracks is refused ("this file is committed to git; Pushkey will not write secrets into it") |
 | Master password stolen, no physical access | Recovery code cannot be derived from the master password |
 | Secret pasted into LLM chat (MCP `add_key` / `rotate_key` / `set_backup_key`) | **Not mitigated by this repo**, the secret enters the MCP client context and may be transmitted to or retained by the model provider, client transcript, or telemetry. Use the CLI (`pushkey add` / `pushkey rotate`, getpass) for production keys; reserve plaintext MCP tools for short-lived dev keys. See "MCP / LLM Channel" below. |
 
@@ -256,6 +256,9 @@ CLI, even though both ultimately write to the same encrypted vault.
 | `list_keys`, `check_health`, `list_projects` | none / filters | none |
 | `get_key(name)` | name only; **plaintext value returned** | secret enters the MCP client context and may be retained by the client, model provider, transcript, or telemetry |
 | `inject_env(project_path, keys)` | names + path | none (writes to local `.env`) |
+| `preview_connection(name, project_path, file?, var?)` | names + path | none (changes nothing) |
+| `connect_key(name, project_path, file?, var?, confirm?)` | names + path | none (writes the key into a local env file; it never takes a value, and `confirm` is only for warnings a person has seen) |
+| `key_usage(name)` | name only | none (connection states, never a value) |
 | `rotate_to_backup(name)` | name only | none |
 | `unlock_vault(password)` | password / agent token | password enters the MCP client context and may be transmitted or retained depending on the client/provider, prefer scoped agent tokens (`pk_agent_…`) and revoke after use |
 | `add_key(name, value, …)` | **plaintext value** | secret enters the MCP client context and may be transmitted or retained depending on the client/provider |
@@ -296,7 +299,13 @@ the fragment after success, and keeps the resulting bounded session bearer in
 The API validates the exact `Host` and parsed `Origin`, caps headers and bodies,
 disables access logging, and revokes sessions on lock, logout, expiry, and
 shutdown. Project writes are restricted to canonical registered directories,
-reject links/reparse points, and use same-directory fsync plus atomic replace.
+accept only `.env` / `.env.*` file names (never `.env.example`, `.env.sample` or
+`.env.template`), reject links/reparse points, and use same-directory fsync plus
+atomic replace. Only a master-password session can register or remove a project;
+an agent token cannot. Before Pushkey changes an existing env file it copies the
+old one to `~/.pushkey/env-backups/<project id>/` (newest 3 per file, folder
+`0700` and files `0600` on POSIX); those copies are plaintext, so treat that
+folder like the project's own env files.
 Directory identity is rechecked around every replace. A malicious process
 running as the same OS user may still win a kernel-level rename race on
 Windows; eliminating that residual risk requires native handle-relative

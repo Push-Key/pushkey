@@ -54,7 +54,7 @@ Add to `.vscode/mcp.json` in your workspace:
 | `list_projects` | Show all projects and their assigned keys |
 | `assign_key` | Connect a key to a registered project without writing its env file (scope: write) |
 | `preview_connection` | Show what connecting a key to a project would do: the exact line, add/replace/none, `.gitignore` change, needed confirmations (scope: read; no value can be passed) |
-| `connect_key` | Connect an existing key, by name, to a variable in a registered project's env file and write it (scopes: write and inject; the secret is never passed in) |
+| `connect_key` | Connect an existing key, by name, to a variable in a registered project's env file and write it (scopes: write and inject; the secret is never passed in). An optional `confirm` list (`env_mismatch`, `public_prefix`) accepts a warning a person has already seen in the preview |
 | `key_usage` | Where a key is connected and whether each file is up to date (scope: read) |
 
 No connection tool returns a key value. `assign_key`, `inject_env` and `connect_key` only work on
